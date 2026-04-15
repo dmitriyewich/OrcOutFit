@@ -19,13 +19,12 @@ extern RsGlobalType& RsGlobal;
 
 namespace overlay {
 
-static bool         g_inited        = false;
-static bool         g_menuOpen      = false;
-static bool         g_prevMenuOpen  = false;
-static bool         g_needCreateObj = false;
-static HWND         g_hwnd          = nullptr;
-static WNDPROC      g_origProc      = nullptr;
-static DrawFn       g_drawFn        = nullptr;
+static bool    g_inited        = false;
+static bool    g_menuOpen      = false;
+static bool    g_needCreateObj = false;
+static HWND    g_hwnd          = nullptr;
+static WNDPROC g_origProc      = nullptr;
+static DrawFn  g_drawFn        = nullptr;
 
 // Курсор: патчим call-sites где игра центрует курсор каждый кадр.
 // Адреса и байты из известного рецепта для SA 1.0 US.
@@ -65,8 +64,6 @@ static void PatchCursor(bool show) {
     }
     g_cursorPatched = show;
 }
-static inline void PatchUpdateMouse(bool e) { PatchCursor(e); }
-
 static bool IsMouseMsg(UINT m) {
     switch (m) {
         case WM_MOUSEMOVE: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
@@ -189,7 +186,6 @@ void DrawFrame() {
         if (CPad* p = CPad::GetPad(0)) p->DisablePlayerControls = 0;
     }
     prevWantCursor = wantCursor;
-    g_prevMenuOpen = g_menuOpen;
 }
 
 void Shutdown() {

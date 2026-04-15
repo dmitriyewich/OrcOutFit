@@ -212,18 +212,13 @@ static void SaveDefaultConfig() {
           "; Rotations are in degrees, applied pre-concat in model space.\n"
           ";   RX tilts around bone right, RY around up, RZ around at.\n"
           "; Для нестандартного оружия (мод) можно добавить секцию [WeaponNN],\n"
-          "; где NN = числовой eWeaponType (например [Weapon50]).\n\n", f);
-    fputs("[Main]\nEnabled=1\n\n", f);
-    WeaponCfg tmp[64] = {};
-    for (int i = 0; i < 64; i++) { tmp[i] = g_cfg[i]; }
-    // reset to defaults for dump (in case LoadConfig mutated nothing since INI absent)
+          "; где NN = числовой eWeaponType (например [Weapon50]).\n\n"
+          "[Main]\nEnabled=1\n\n", f);
     for (int i = 0; i < 64; i++) {
-        const auto& c = tmp[i];
+        const auto& c = g_cfg[i];
         if (!c.name) continue;
         fprintf(f,
-            "[%s]\n"
-            "Enabled=%d\n"
-            "Bone=%d\n"
+            "[%s]\nEnabled=%d\nBone=%d\n"
             "OffsetX=%.3f\nOffsetY=%.3f\nOffsetZ=%.3f\n"
             "RotationX=%.1f\nRotationY=%.1f\nRotationZ=%.1f\n"
             "Scale=%.3f\n\n",
@@ -315,35 +310,35 @@ static RwMatrix* GetBoneMatrix(CPed* ped, int boneNodeId) {
 // ----------------------------------------------------------------------------
 // Render callbacks (из BaseModelRender::ClumpsForAtomic / GeometryForMaterials)
 // ----------------------------------------------------------------------------
-static RpMaterial* GeomMatWhiteCB(RpMaterial* mat, void* /*data*/) {
-    mat->color = { 255, 255, 255, 255 };
-    return mat;
+// Whitens material color — в паре с rpGEOMETRYMODULATEMATERIALCOLOR даёт
+// чистое lighting * 1.0 без родного тинта оружия.
+static RpMaterial* WhiteMatCB(RpMaterial* m, void*) {
+    m->color = { 255, 255, 255, 255 };
+    return m;
 }
 
-static RpAtomic* PrepareAtomicCB(RpAtomic* atomic, void* /*data*/) {
-    if (atomic->geometry) {
-        atomic->geometry->flags |= rpGEOMETRYMODULATEMATERIALCOLOR;
-        RpGeometryForAllMaterials(atomic->geometry, GeomMatWhiteCB, nullptr);
+// Per-frame prep: форсим modulate-флаг и белый цвет материалов перед рендером.
+static RpAtomic* PrepAtomicCB(RpAtomic* a, void*) {
+    if (a->geometry) {
+        a->geometry->flags |= rpGEOMETRYMODULATEMATERIALCOLOR;
+        RpGeometryForAllMaterials(a->geometry, WhiteMatCB, nullptr);
     }
-    return atomic;
+    return a;
 }
 
-static RpAtomic* ResetAtomicCB(RpAtomic* atomic, void* /*data*/) {
-    // Nullptr => AtomicDefaultRenderCallBack (штатный RW callback SA).
-    CVisibilityPlugins::SetAtomicRenderCallback(atomic, nullptr);
-    return atomic;
-}
-
-// AddRef материалов чтобы при teardown движка refcount не упал до 0
-// и CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB не упал (плагин-данные
-// уже невалидны к этому моменту). OS освободит память при выходе процесса.
-static RpMaterial* LeakMaterialCB(RpMaterial* mat, void*) {
-    if (mat) mat->refCount++;
-    return mat;
-}
-static RpAtomic* LeakAtomicCB(RpAtomic* a, void*) {
-    if (a && a->geometry)
-        RpGeometryForAllMaterials(a->geometry, LeakMaterialCB, nullptr);
+// One-shot init после CreateInstance:
+//  1) сбрасываем render callback на штатный RW (иначе SA-рендер пробует тащить
+//     оружие через свои пайплайны для держащей руки);
+//  2) AddRef материалов — чтобы при teardown движка плагин-деструкторы
+//     (CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB) не упали на уже
+//     невалидных плагин-данных. Утечка безопасна — процесс всё равно выходит.
+static RpAtomic* InitAtomicCB(RpAtomic* a, void*) {
+    CVisibilityPlugins::SetAtomicRenderCallback(a, nullptr);
+    if (a->geometry) {
+        RpGeometryForAllMaterials(a->geometry,
+            +[](RpMaterial* m, void*)->RpMaterial*{ if (m) m->refCount++; return m; },
+            nullptr);
+    }
     return a;
 }
 
@@ -405,15 +400,11 @@ static bool CreateWeaponInstance(int wt, int slot, CPed* ped) {
     RwObject* inst = mi->CreateInstance(&mtx);
     if (!inst) return false;
 
-    // Сброс render-callback на дефолтный RW — как в BaseModelRender::SetRelatedModelInfoCB.
+    // Сброс render-callback на дефолтный RW + leak материалов (см. InitAtomicCB).
     if (inst->type == rpCLUMP) {
-        auto* c = reinterpret_cast<RpClump*>(inst);
-        RpClumpForAllAtomics(c, ResetAtomicCB, nullptr);
-        RpClumpForAllAtomics(c, LeakAtomicCB,  nullptr);
+        RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), InitAtomicCB, nullptr);
     } else if (inst->type == rpATOMIC) {
-        auto* a = reinterpret_cast<RpAtomic*>(inst);
-        ResetAtomicCB(a, nullptr);
-        LeakAtomicCB (a, nullptr);
+        InitAtomicCB(reinterpret_cast<RpAtomic*>(inst), nullptr);
     }
 
     int fi = FindFree();
@@ -469,13 +460,10 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
 
     if (r.rwObject->type == rpCLUMP) {
         auto* clump = reinterpret_cast<RpClump*>(r.rwObject);
-        RpClumpForAllAtomics(clump, PrepareAtomicCB, nullptr);
+        RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
         RpClumpRender(clump);
     } else {
-        if (atomic->geometry) {
-            atomic->geometry->flags |= rpGEOMETRYMODULATEMATERIALCOLOR;
-            RpGeometryForAllMaterials(atomic->geometry, GeomMatWhiteCB, nullptr);
-        }
+        PrepAtomicCB(atomic, nullptr);
         atomic->renderCallBack(atomic);
     }
 }
@@ -575,8 +563,7 @@ static const BoneOption kBones[] = {
     { 53,             "R Foot" },
 };
 
-static int  g_uiWeaponIdx  = WEAPONTYPE_M4;
-static bool g_uiDirty      = false;
+static int g_uiWeaponIdx = WEAPONTYPE_M4;
 
 static int BoneComboIndex(int boneId) {
     for (int i = 0; i < IM_ARRAYSIZE(kBones); i++)
@@ -627,17 +614,15 @@ static void DrawUI() {
 
     auto& c = g_cfg[g_uiWeaponIdx];
 
-    ImGui::Checkbox("show", &c.enabled); g_uiDirty |= ImGui::IsItemEdited();
+    ImGui::Checkbox("show", &c.enabled);
 
     // --- bone combo ---
     int bi = BoneComboIndex(c.boneId);
     const char* bonePreview = kBones[bi].label;
     if (ImGui::BeginCombo("bone", bonePreview)) {
         for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
-            if (ImGui::Selectable(kBones[i].label, i == bi)) {
+            if (ImGui::Selectable(kBones[i].label, i == bi))
                 c.boneId = kBones[i].id;
-                g_uiDirty = true;
-            }
         }
         ImGui::EndCombo();
     }
@@ -668,7 +653,6 @@ static void DrawUI() {
         SaveWeaponSection(g_uiWeaponIdx);
         char mainBuf[4]; _snprintf_s(mainBuf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
         WritePrivateProfileStringA("Main", "Enabled", mainBuf, g_iniPath);
-        g_uiDirty = false;
     }
     ImGui::SameLine();
     if (ImGui::Button("SAVE ALL")) {
