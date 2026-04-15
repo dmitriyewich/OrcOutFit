@@ -1,0 +1,48 @@
+# Build artifacts
+build/
+bin/
+obj/
+Debug/
+Release/
+x64/
+Win32/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln.docstates
+*.vcxproj.user
+*.opensdf
+*.sdf
+*.opendb
+*.db
+*.VC.db
+*.VC.opendb
+ipch/
+
+# Compiled
+*.obj
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.idb
+*.log
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+
+# Reference (external, not part of our source)
+reference/
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
