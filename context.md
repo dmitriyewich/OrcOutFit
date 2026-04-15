@@ -43,6 +43,7 @@
 
 - Основной код:
   - `C:\Games\CODEX\WeaponsOutFit\source\main.cpp`
+  - UI (ImGui): `source\orc_ui.cpp`, `source\orc_ui.h`; общие типы: `source\orc_types.h`; мост к состоянию: `source\orc_app.h`
 - MinHook:
   - `C:\Games\CODEX\WeaponsOutFit\source\external\MinHook\`
 - Проект Visual Studio:
@@ -91,7 +92,8 @@
 - `MSBuild` использовать только по пути:
   - `C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe`
 - Целевая конфигурация:
-  - `Release | Win32`
+  - `Release | Win32` в `.vcxproj`; в `.sln` платформа называется **`x86`** (маппится на `Win32`).
+  - Пример: `MSBuild.exe OrcOutFit.sln /p:Configuration=Release /p:Platform=x86`
 - Ожидаемый выходной файл:
   - `C:\Games\CODEX\WeaponsOutFit\build\Release\OrcOutFit.asi`
 - **НЕЛЬЗЯ** автоматически копировать / перемещать `.asi` куда-либо.

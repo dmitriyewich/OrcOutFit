@@ -5,6 +5,8 @@
 
 #include "overlay.h"
 
+#include "samp_bridge.h"
+
 #include "imgui.h"
 #include "imgui_impl_dx9.h"
 #include "imgui_impl_win32.h"
@@ -95,11 +97,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
 
-        ImGui_ImplWin32_WndProcHandler(h, m, w, l);
-
+        // Пока меню закрыто — не трогаем очередь сообщений ImGui (курсор/мышь остаются у игры).
         if (g_menuOpen) {
+            ImGui_ImplWin32_WndProcHandler(h, m, w, l);
             ImGuiIO& io = ImGui::GetIO();
-            if (m == WM_SETCURSOR) {
+            // SA:MP: не трогаем WM_SETCURSOR — иначе «мигание» со штатным курсором.
+            if (!samp_bridge::IsSampBuildKnown() && m == WM_SETCURSOR) {
                 SetCursor(LoadCursorA(nullptr, IDC_ARROW));
                 return TRUE;
             }
@@ -125,6 +128,8 @@ void Init() {
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Игра и SA:MP сами обрабатывают курсор; без этого Win32-бэкенд дергает SetCursor каждый кадр.
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
     ImGui::StyleColorsDark();
     ImGuiStyle& st = ImGui::GetStyle();
@@ -155,42 +160,70 @@ void DrawFrame() {
         g_needCreateObj = false;
     }
 
+    static bool s_wantCursor = false;
+
+    if (!g_menuOpen) {
+        if (samp_bridge::IsSampBuildKnown())
+            samp_bridge::SyncSampOverlayCursor(false);
+        if (s_wantCursor) {
+            PatchCursor(false);
+            if (!samp_bridge::IsSampBuildKnown()) {
+                if (auto* dev = static_cast<IDirect3DDevice9*>(RwD3D9GetCurrentD3DDevice()))
+                    dev->ShowCursor(FALSE);
+            }
+            ImGui::GetIO().MouseDrawCursor = false;
+            CPad::NewMouseControllerState.x = 0;
+            CPad::NewMouseControllerState.y = 0;
+            reinterpret_cast<void(__cdecl*)()>(0x541BD0)();
+            reinterpret_cast<void(__cdecl*)()>(0x541DD0)();
+            if (CPad* p = CPad::GetPad(0)) p->DisablePlayerControls = 0;
+            s_wantCursor = false;
+        }
+        return;
+    }
+
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    if (g_menuOpen && g_drawFn) g_drawFn();
+    if (g_drawFn) g_drawFn();
 
     ImGui::EndFrame();
     ImGui::Render();
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 
-    // Input / cursor: одинаково в SAMP и в одиночной.
     // Пока зажат ПКМ — отдаём управление игре (look-around), меню видимо.
-    bool rmbHeld = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-    bool wantCursor = g_menuOpen && !rmbHeld;
-    static bool prevWantCursor = false;
+    const bool rmbHeld = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    const bool wantCursor = !rmbHeld;
+    const bool sampCursorApi = samp_bridge::IsSampBuildKnown();
 
-    if (wantCursor != prevWantCursor) {
-        PatchCursor(wantCursor);
+    if (wantCursor != s_wantCursor) {
+        if (!sampCursorApi)
+            PatchCursor(wantCursor);
+        if (!sampCursorApi) {
+            if (auto* dev = static_cast<IDirect3DDevice9*>(RwD3D9GetCurrentD3DDevice()))
+                dev->ShowCursor(wantCursor ? TRUE : FALSE);
+        }
         ImGui::GetIO().MouseDrawCursor = wantCursor;
-        if (auto* dev = static_cast<IDirect3DDevice9*>(RwD3D9GetCurrentD3DDevice()))
-            dev->ShowCursor(wantCursor ? TRUE : FALSE);
         CPad::NewMouseControllerState.x = 0;
         CPad::NewMouseControllerState.y = 0;
         reinterpret_cast<void(__cdecl*)()>(0x541BD0)();
         reinterpret_cast<void(__cdecl*)()>(0x541DD0)();
+        s_wantCursor = wantCursor;
     }
+    if (sampCursorApi)
+        samp_bridge::SyncSampOverlayCursor(wantCursor);
     if (wantCursor) {
         std::memset(&CPad::NewMouseControllerState, 0, sizeof(CMouseControllerState));
         if (CPad* p = CPad::GetPad(0)) p->DisablePlayerControls = 0xFFFF;
     } else {
         if (CPad* p = CPad::GetPad(0)) p->DisablePlayerControls = 0;
     }
-    prevWantCursor = wantCursor;
 }
 
 void Shutdown() {
+    if (samp_bridge::IsSampBuildKnown())
+        samp_bridge::SyncSampOverlayCursor(false);
     PatchCursor(false);
     if (!g_inited) return;
     if (g_origProc && g_hwnd) {

@@ -229,6 +229,24 @@
   - `OrcOutFit.vcxproj`: в сборку добавлены исходники MinHook
     (`buffer.c`, `hook.c`, `trampoline.c`, `hde32.c`).
   Это исключает исполнение битого trampoline-адреса при вызовах `sendCommand`.
+- Реализована привязка кастомных skin из `OrcOutFit\SKINS` к никам SA:MP:
+  - для каждого skin читается `<skin>.ini` с секцией `[NickBinding]`:
+    - `Enabled=0/1`
+    - `Nicks=name1,name2,...`
+  - добавлен резолв ника по `CPed*` через SA:MP (`IdFind + GetNameById`) для
+    версий `R1`, `R2`, `R3`, `R3-1`, `R4`, `R4-2`, `R5-1`, `DL-R1`;
+  - скины с активным `NickBinding` применяются к удалённым ped по совпадению ника.
+- Локальный игрок:
+  - добавлена настройка `SkinMode.LocalPreferSelected`:
+    - `0` — если есть skin по твоему нику, используется он;
+    - `1` — приоритет у выбранного в UI skin (можно использовать любой кастомный,
+      даже если есть привязка по твоему нику).
+  - добавлена настройка `SkinMode.NickMode` для включения/выключения ник-режима.
+- ImGui (`skins mode // OrcOutFit`) расширен:
+  - `Nick binding mode (SA:MP)`;
+  - `For my nick use selected skin`;
+  - per-skin `Bind this skin to nick(s)` + поле `Nick list (comma-separated)` +
+    `SAVE SKIN INI`.
 - Исправлен визуальный баг с черным кастомным skin: в `RenderSelectedSkin`
   добавлен явный расчёт освещения через
   `CPointLights::GenerateLightsAffectingObject` +
@@ -261,3 +279,16 @@
   - `<asi-dir>\OrcOutFit\SKINS`
   Это позволяет размещать плагин в `modloader\OrcOutFit\...` без хардкода пути
   к корню игры.
+
+## 2026-04-16
+
+- `context.md`: MSBuild — в `OrcOutFit.sln` платформа **`x86`** (не `Win32`); пример команды в контексте.
+- `overlay.cpp`: ImGui/input курсора только при открытом меню; `ImGuiConfigFlags_NoMouseCursorChange`.
+- `main.cpp`: один оверлей **OrcOutFit** с вкладками **Weapons / Objects / Skins**; полноширинные контролы, скролл окна, `TextWrapped` для путей; ники — `InputTextMultiline`.
+- Сборка: `MSBuild` из пути в `context.md`, `/p:Platform=x86` → `build\Release\OrcOutFit.asi`.
+- Вынесен ImGui: `orc_types.h` (WeaponCfg / custom cfg / кости / `D2R`), `orc_app.h` (extern состояние и API), `orc_ui.cpp` + `orc_ui.h` (`OrcUiDraw`); `main.cpp` подключает колбэк `OrcUiDraw`.
+- Убран периодический лог `skin hide base ped` из `pedRenderEvent.before`.
+- `orc_ui.cpp`: поля combo/drag/slider — фикс. ширина `kFieldW` (подписи не обрезаются при растягивании окна).
+- `ParseNickCsv`: ники по **запятой и/или новой строке**; подпись multiline и комментарии ini обновлены.
+- `orc_ui`: без `AlwaysVerticalScrollbar`, высота окна по умолчанию 560.
+- `overlay`: при открытом меню `PatchCursor` и в SA:MP (без центрирования мыши); `ShowCursor` D3D только вне SA:MP; `WM_SETCURSOR` в SA:MP не трогаем.

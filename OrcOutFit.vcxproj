@@ -98,6 +98,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />
+    <ClCompile Include="source\orc_ui.cpp" />
     <ClCompile Include="source\overlay.cpp" />
     <ClCompile Include="source\samp_bridge.cpp" />
     <ClCompile Include="source\external\MinHook\src\buffer.c" />

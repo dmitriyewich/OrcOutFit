@@ -46,3 +46,6 @@ reference/
 # OS
 Thumbs.db
 Desktop.ini
+
+# Cursor / agent export dumps (not for publication)
+.claude/cursor_*.md
