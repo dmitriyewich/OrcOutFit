@@ -8,9 +8,11 @@
 #include "CWeaponInfo.h"
 #include "CModelInfo.h"
 #include "CBaseModelInfo.h"
+#include "CPools.h"
 #include "CVisibilityPlugins.h"
 #include "CPointLights.h"
 #include "CTxdStore.h"
+#include "CKeyGen.h"
 #include "RenderWare.h"
 #include "eWeaponType.h"
 #include "game_sa/rw/rphanim.h"
@@ -24,6 +26,8 @@
 #include <array>
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "overlay.h"
 #include "imgui.h"
@@ -38,6 +42,7 @@ static char    g_logPath[MAX_PATH] = {};
 static char    g_iniPath[MAX_PATH] = {};
 static char    g_gameObjDir[MAX_PATH] = {};
 static char    g_gameSkinDir[MAX_PATH] = {};
+static char    g_weaponSettingsDir[MAX_PATH] = {};
 
 static void LogInit() {
     char modPath[MAX_PATH] = {};
@@ -56,6 +61,7 @@ static void LogInit() {
     // <asi-dir>\OrcOutFit\object and <asi-dir>\OrcOutFit\SKINS
     _snprintf_s(g_gameObjDir, _TRUNCATE, "%s\\OrcOutFit\\object", moduleDir);
     _snprintf_s(g_gameSkinDir, _TRUNCATE, "%s\\OrcOutFit\\SKINS", moduleDir);
+    _snprintf_s(g_weaponSettingsDir, _TRUNCATE, "%s\\OrcOutFit\\weaponsetting", moduleDir);
 
     FILE* f = fopen(g_logPath, "w");
     if (f) { fputs("OrcOutFit debug log\n", f); fclose(f); }
@@ -99,6 +105,8 @@ struct WeaponCfg {
 };
 
 static bool g_enabled = true;
+static bool g_renderAllPedsWeapons = false;
+static float g_renderAllPedsRadius = 80.0f;
 static WeaponCfg g_cfg[64] = {};
 static RpAtomic* InitAtomicCB(RpAtomic* a, void*);
 static bool g_skinModeEnabled = false;
@@ -106,6 +114,8 @@ static bool g_skinHideBasePed = true;
 static std::string g_skinSelectedName;
 static bool g_skinCanAnimate = false;
 static int  g_skinBindCount = 0;
+static std::unordered_map<unsigned int, std::array<WeaponCfg, 64>> g_weaponCfgByModelKey;
+static void LoadWeaponSettingOverrides();
 
 // Секция INI → индекс оружия. Дефолтные расположения в стиле тактической выкладки.
 // Оси кости (наблюдение): X = вдоль "right", Y = вдоль "up" (spine) / "at" (бедро), Z = "at/up".
@@ -186,15 +196,15 @@ static void SetupDefaults() {
     Set(WEAPONTYPE_DETONATOR, "Detonator", BONE_PELVIS, 0.12f, -0.02f, 0.00f);
 }
 
-static void ReadSection(WeaponCfg& c, const char* section) {
+static void ReadSectionFromIni(WeaponCfg& c, const char* section, const char* iniPath) {
     char buf[64];
     auto F = [&](const char* key, float def)->float{
-        GetPrivateProfileStringA(section, key, "", buf, sizeof(buf), g_iniPath);
+        GetPrivateProfileStringA(section, key, "", buf, sizeof(buf), iniPath);
         if (!buf[0]) return def;
         return (float)atof(buf);
     };
-    c.enabled = GetPrivateProfileIntA(section, "Enabled", c.enabled ? 1 : 0, g_iniPath) != 0;
-    c.boneId  = GetPrivateProfileIntA(section, "Bone", c.boneId, g_iniPath);
+    c.enabled = GetPrivateProfileIntA(section, "Enabled", c.enabled ? 1 : 0, iniPath) != 0;
+    c.boneId  = GetPrivateProfileIntA(section, "Bone", c.boneId, iniPath);
     c.x = F("OffsetX", c.x);
     c.y = F("OffsetY", c.y);
     c.z = F("OffsetZ", c.z);
@@ -204,9 +214,16 @@ static void ReadSection(WeaponCfg& c, const char* section) {
     c.scale = F("Scale", c.scale);
 }
 
+static void ReadSection(WeaponCfg& c, const char* section) {
+    ReadSectionFromIni(c, section, g_iniPath);
+}
+
 static void LoadConfig() {
     SetupDefaults();
     g_enabled = GetPrivateProfileIntA("Main", "Enabled", 1, g_iniPath) != 0;
+    g_renderAllPedsWeapons = GetPrivateProfileIntA("Main", "RenderAllPedsWeapons", 0, g_iniPath) != 0;
+    g_renderAllPedsRadius = (float)GetPrivateProfileIntA("Main", "RenderAllPedsRadius", 80, g_iniPath);
+    if (g_renderAllPedsRadius < 5.0f) g_renderAllPedsRadius = 5.0f;
     for (int i = 0; i < 64; i++) {
         auto& c = g_cfg[i];
         if (c.name) ReadSection(c, c.name);
@@ -223,6 +240,7 @@ static void LoadConfig() {
     char skinName[128] = {};
     GetPrivateProfileStringA("SkinMode", "Selected", "", skinName, sizeof(skinName), g_iniPath);
     g_skinSelectedName = skinName;
+    LoadWeaponSettingOverrides();
 }
 
 static void SaveDefaultConfig() {
@@ -241,7 +259,7 @@ static void SaveDefaultConfig() {
           ";   RX tilts around bone right, RY around up, RZ around at.\n"
           "; Для нестандартного оружия (мод) можно добавить секцию [WeaponNN],\n"
           "; где NN = числовой eWeaponType (например [Weapon50]).\n\n"
-          "[Main]\nEnabled=1\n\n", f);
+          "[Main]\nEnabled=1\nRenderAllPedsWeapons=0\nRenderAllPedsRadius=80\n\n", f);
     for (int i = 0; i < 64; i++) {
         const auto& c = g_cfg[i];
         if (!c.name) continue;
@@ -608,6 +626,52 @@ static void SaveSkinModeIni() {
     WritePrivateProfileStringA("SkinMode", "Selected", g_skinSelectedName.c_str(), g_iniPath);
 }
 
+static void LoadWeaponSettingOverrides() {
+    g_weaponCfgByModelKey.clear();
+    DWORD attr = GetFileAttributesA(g_weaponSettingsDir);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) return;
+    std::string dir = g_weaponSettingsDir;
+    std::string mask = JoinPath(dir, "*.ini");
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    int count = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::string iniFile = fd.cFileName;
+        if (LowerExt(iniFile) != ".ini") continue;
+        const std::string base = BaseNameNoExt(iniFile);
+        const std::string fullIni = JoinPath(dir, iniFile);
+        unsigned int modelKey = CKeyGen::GetUppercaseKey(base.c_str());
+        auto cfgArr = std::array<WeaponCfg, 64>{};
+        for (int i = 0; i < 64; i++) cfgArr[i] = g_cfg[i];
+        for (int i = 0; i < 64; i++) {
+            auto& c = cfgArr[i];
+            if (c.name) ReadSectionFromIni(c, c.name, fullIni.c_str());
+            char sec[16];
+            _snprintf_s(sec, _TRUNCATE, "Weapon%d", i);
+            if (GetPrivateProfileIntA(sec, "Bone", 0, fullIni.c_str()) != 0) {
+                if (!c.name) { c.scale = 1.0f; c.enabled = true; }
+                ReadSectionFromIni(c, sec, fullIni.c_str());
+            }
+        }
+        g_weaponCfgByModelKey[modelKey] = cfgArr;
+        count++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    Log("weaponsetting overrides loaded: %d (dir=%s)", count, g_weaponSettingsDir);
+}
+
+static const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
+    if (!ped || wt < 0 || wt >= 64) return g_cfg[0];
+    auto* mi = CModelInfo::GetModelInfo(ped->m_nModelIndex);
+    if (mi) {
+        auto it = g_weaponCfgByModelKey.find(mi->m_nKey);
+        if (it != g_weaponCfgByModelKey.end()) return it->second[wt];
+    }
+    return g_cfg[wt];
+}
+
 // ----------------------------------------------------------------------------
 // Save single weapon section
 // ----------------------------------------------------------------------------
@@ -644,14 +708,16 @@ struct RenderedWeapon {
 };
 static constexpr int kMax = 13;
 static RenderedWeapon g_rendered[kMax] = {};
+using PedWeaponCache = std::array<RenderedWeapon, kMax>;
+static std::unordered_map<int, PedWeaponCache> g_otherPedsRendered;
 
-static int FindSlotByType(int wt) {
+static int FindSlotByType(RenderedWeapon* arr, int wt) {
     for (int i = 0; i < kMax; i++)
-        if (g_rendered[i].active && g_rendered[i].weaponType == wt) return i;
+        if (arr[i].active && arr[i].weaponType == wt) return i;
     return -1;
 }
-static int FindFree() {
-    for (int i = 0; i < kMax; i++) if (!g_rendered[i].active) return i;
+static int FindFree(RenderedWeapon* arr) {
+    for (int i = 0; i < kMax; i++) if (!arr[i].active) return i;
     return -1;
 }
 
@@ -670,6 +736,13 @@ static void DestroyRendered(RenderedWeapon& r) {
 
 static void ClearAll() {
     for (int i = 0; i < kMax; i++) DestroyRendered(g_rendered[i]);
+}
+
+static void ClearAllOtherPeds() {
+    for (auto& kv : g_otherPedsRendered) {
+        for (int i = 0; i < kMax; i++) DestroyRendered(kv.second[i]);
+    }
+    g_otherPedsRendered.clear();
 }
 
 // ----------------------------------------------------------------------------
@@ -755,11 +828,11 @@ static void RotateMatrix(RwMatrix* m, float rx, float ry, float rz) {
 // ----------------------------------------------------------------------------
 // Create / render
 // ----------------------------------------------------------------------------
-static bool CreateWeaponInstance(int wt, int slot, CPed* ped) {
+static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, int slot, CPed* ped) {
     if (wt <= 0 || wt >= 64) return false;
-    const WeaponCfg& wc = g_cfg[wt];
+    const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
     if (!wc.enabled || wc.boneId == 0) return false;
-    if (FindSlotByType(wt) >= 0) return true;
+    if (FindSlotByType(arr, wt) >= 0) return true;
 
     CWeaponInfo* info = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
     if (!info) return false;
@@ -785,12 +858,12 @@ static bool CreateWeaponInstance(int wt, int slot, CPed* ped) {
         InitAtomicCB(reinterpret_cast<RpAtomic*>(inst), nullptr);
     }
 
-    int fi = FindFree();
+    int fi = FindFree(arr);
     if (fi < 0) {
         if (inst->type == rpCLUMP) RpClumpDestroy(reinterpret_cast<RpClump*>(inst));
         return false;
     }
-    g_rendered[fi] = { true, wt, mid, 0, inst };
+    arr[fi] = { true, wt, mid, 0, inst };
 
     static bool logged[64] = {};
     if (!logged[wt]) {
@@ -804,7 +877,7 @@ static bool CreateWeaponInstance(int wt, int slot, CPed* ped) {
 static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
     if (!r.rwObject) return;
 
-    const WeaponCfg& wc = g_cfg[r.weaponType];
+    const WeaponCfg& wc = GetWeaponCfgForPed(ped, r.weaponType);
     RwMatrix* bone = GetBoneMatrix(ped, wc.boneId);
     if (!bone) return;
 
@@ -999,13 +1072,57 @@ static void RenderSelectedSkin(CPlayerPed* player) {
         }
     }
     RwFrameUpdateObjects(dstFrame);
+    // Explicit lighting for custom skin. Without this, when no weapon/object render
+    // runs before, lighting state may stay dark and skin appears black.
+    const CVector& p = player->GetPosition();
+    CVector lightPos = { p.x, p.y, p.z };
+    float lightOut = 0.0f;
+    float light = CPointLights::GenerateLightsAffectingObject(&lightPos, &lightOut, nullptr) * 0.5f;
+    SetLightColoursForPedsCarsAndObjects(light);
     RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
     RpClumpRender(clump);
+}
+
+static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr) {
+    if (!ped) return;
+    unsigned char curSlot = ped->m_nSelectedWepSlot;
+    int curType = 0;
+    if (curSlot < 13) curType = (int)ped->m_aWeapons[curSlot].m_eWeaponType;
+    bool want[64] = {};
+    for (int s = 0; s < 13; s++) {
+        auto& w = ped->m_aWeapons[s];
+        int wt = (int)w.m_eWeaponType;
+        if (wt <= 0 || wt >= 64) continue;
+        if (wt == curType) continue;
+        const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
+        if (!wc.enabled || wc.boneId == 0) continue;
+        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+        bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+        if (needsAmmo && w.m_nAmmoTotal == 0) continue;
+        want[wt] = true;
+    }
+    for (int i = 0; i < kMax; i++) {
+        if (!arr[i].active) continue;
+        int wt = arr[i].weaponType;
+        if (wt < 0 || wt >= 64 || !want[wt]) DestroyRendered(arr[i]);
+    }
+    for (int wt = 1; wt < 64; wt++) if (want[wt]) CreateWeaponInstance(arr, wt, 0, ped);
+}
+
+static int RenderPedWeapons(CPed* ped, RenderedWeapon* arr) {
+    int active = 0;
+    for (int i = 0; i < kMax; i++) {
+        if (!arr[i].active) continue;
+        active++;
+        RenderOneWeapon(ped, arr[i]);
+    }
+    return active;
 }
 
 static void SyncAndRender() {
     if (!g_enabled) {
         ClearAll();
+        ClearAllOtherPeds();
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
         return;
@@ -1013,49 +1130,18 @@ static void SyncAndRender() {
     CPlayerPed* player = FindPlayerPed(0);
     if (!player) {
         ClearAll();
+        ClearAllOtherPeds();
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
         return;
     }
 
-    unsigned char curSlot = player->m_nSelectedWepSlot;
-    int curType = 0;
-    if (curSlot < 13) curType = (int)player->m_aWeapons[curSlot].m_eWeaponType;
-
-    // Собираем набор типов в инвентаре (не текущего). Ammo==0 -> оружие ушло из слота.
-    bool want[64] = {};
-    for (int s = 0; s < 13; s++) {
-        auto& w = player->m_aWeapons[s];
-        int wt = (int)w.m_eWeaponType;
-        if (wt <= 0 || wt >= 64) continue;
-        if (wt == curType) continue;
-        if (!g_cfg[wt].enabled || g_cfg[wt].boneId == 0) continue;
-        // Слот 0 (unarmed) / 1 (melee) / gifts / specials — без патронов.
-        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
-        bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
-        if (needsAmmo && w.m_nAmmoTotal == 0) continue;
-        want[wt] = true;
-    }
-
-    // Удаляем ненужное.
-    for (int i = 0; i < kMax; i++) {
-        if (!g_rendered[i].active) continue;
-        int wt = g_rendered[i].weaponType;
-        if (wt < 0 || wt >= 64 || !want[wt])
-            DestroyRendered(g_rendered[i]);
-    }
-
-    // Создаём недостающее.
-    for (int wt = 1; wt < 64; wt++)
-        if (want[wt]) CreateWeaponInstance(wt, 0, player);
-
-    // Рендер.
+    SyncPedWeapons(player, g_rendered);
     int active = 0;
     for (int i = 0; i < kMax; i++) if (g_rendered[i].active) active++;
-    for (auto& o : g_customObjects) {
-        if (EnsureCustomInstance(o, player)) active++;
-    }
+    for (auto& o : g_customObjects) if (EnsureCustomInstance(o, player)) active++;
     if (g_skinModeEnabled && GetSelectedSkin()) active++;
+    if (g_renderAllPedsWeapons && CPools::ms_pPedPool) active++;
     if (!active) return;
 
     int oldCull, oldZT, oldZW, oldShade, oldFog;
@@ -1072,15 +1158,39 @@ static void SyncAndRender() {
     v = rwSHADEMODEGOURAUD;  RwRenderStateSet(rwRENDERSTATESHADEMODE,    reinterpret_cast<void*>(v));
     v = FALSE;               RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(v));
 
-    for (int i = 0; i < kMax; i++) {
-        if (!g_rendered[i].active) continue;
-        RenderOneWeapon(player, g_rendered[i]);
-    }
+    RenderPedWeapons(player, g_rendered);
     for (auto& o : g_customObjects) {
         if (!o.enabled || o.boneId == 0) continue;
         RenderCustomObject(player, o);
     }
     RenderSelectedSkin(player);
+    if (g_renderAllPedsWeapons && CPools::ms_pPedPool) {
+        std::unordered_set<int> seen;
+        const CVector& pp = player->GetPosition();
+        const float r2 = g_renderAllPedsRadius * g_renderAllPedsRadius;
+        for (int i = 0; i < CPools::ms_pPedPool->m_nSize; i++) {
+            CPed* ped = CPools::ms_pPedPool->GetAt(i);
+            if (!ped || ped == player || !ped->m_pRwClump) continue;
+            const CVector& p = ped->GetPosition();
+            float dx = p.x - pp.x, dy = p.y - pp.y, dz = p.z - pp.z;
+            if ((dx * dx + dy * dy + dz * dz) > r2) continue;
+            int h = CPools::GetPedRef(ped);
+            seen.insert(h);
+            auto& cache = g_otherPedsRendered[h];
+            SyncPedWeapons(ped, cache.data());
+            RenderPedWeapons(ped, cache.data());
+        }
+        for (auto it = g_otherPedsRendered.begin(); it != g_otherPedsRendered.end();) {
+            if (seen.find(it->first) == seen.end()) {
+                for (int i = 0; i < kMax; i++) DestroyRendered(it->second[i]);
+                it = g_otherPedsRendered.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } else {
+        ClearAllOtherPeds();
+    }
 
     RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(oldCull));
     RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(oldZT));
@@ -1168,6 +1278,11 @@ static void DrawUI() {
     if (!open) overlay::SetOpen(false);
 
     ImGui::Checkbox("Plugin enabled", &g_enabled);
+    ImGui::Checkbox("Render weapons for all peds", &g_renderAllPedsWeapons);
+    if (g_renderAllPedsWeapons) {
+        ImGui::SetNextItemWidth(150);
+        ImGui::DragFloat("All peds radius", &g_renderAllPedsRadius, 1.0f, 5.0f, 500.0f, "%.0f m");
+    }
     ImGui::SameLine();
     if (ImGui::SmallButton("Reload INI")) {
         LoadConfig();
@@ -1246,12 +1361,20 @@ static void DrawUI() {
         SaveWeaponSection(g_uiWeaponIdx);
         char mainBuf[4]; _snprintf_s(mainBuf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
         WritePrivateProfileStringA("Main", "Enabled", mainBuf, g_iniPath);
+        _snprintf_s(mainBuf, _TRUNCATE, "%d", g_renderAllPedsWeapons ? 1 : 0);
+        WritePrivateProfileStringA("Main", "RenderAllPedsWeapons", mainBuf, g_iniPath);
+        _snprintf_s(mainBuf, _TRUNCATE, "%.0f", g_renderAllPedsRadius);
+        WritePrivateProfileStringA("Main", "RenderAllPedsRadius", mainBuf, g_iniPath);
     }
     ImGui::SameLine();
     if (ImGui::Button("SAVE ALL")) {
         for (int i = 1; i < 64; i++) if (g_cfg[i].name || g_cfg[i].boneId) SaveWeaponSection(i);
         char mainBuf[4]; _snprintf_s(mainBuf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
         WritePrivateProfileStringA("Main", "Enabled", mainBuf, g_iniPath);
+        _snprintf_s(mainBuf, _TRUNCATE, "%d", g_renderAllPedsWeapons ? 1 : 0);
+        WritePrivateProfileStringA("Main", "RenderAllPedsWeapons", mainBuf, g_iniPath);
+        _snprintf_s(mainBuf, _TRUNCATE, "%.0f", g_renderAllPedsRadius);
+        WritePrivateProfileStringA("Main", "RenderAllPedsRadius", mainBuf, g_iniPath);
     }
     ImGui::SameLine();
     ImGui::TextDisabled("F7 toggle");
@@ -1442,6 +1565,7 @@ public:
         Events::shutdownRwEvent += [] {
             overlay::Shutdown();
             for (int i = 0; i < kMax; i++) g_rendered[i] = {};
+            ClearAllOtherPeds();
             for (auto& o : g_customObjects) {
                 DestroyCustomObjectInstance(o);
                 o.txdSlot = -1;

@@ -166,6 +166,24 @@
   - `<asi-dir>\OrcOutFit\SKINS`
   Это позволяет размещать плагин в `modloader\OrcOutFit\...` без хардкода пути
   к корню игры.
+- Добавлен переключаемый режим рендера оружия для всех ped:
+  - новый флаг `Main.RenderAllPedsWeapons` в `OrcOutFit.ini` (по умолчанию `0`);
+  - checkbox в UI: `Render weapons for all peds`;
+  - сохранение флага через `SAVE`/`SAVE ALL`.
+- Реализация: введён per-ped кэш инстансов оружия (`unordered_map<PedHandle, array<RenderedWeapon,13>>`)
+  с синхронизацией по инвентарю каждого ped из `CPools::ms_pPedPool`.
+  При выключении режима кэш полностью очищается; при исчезновении ped записи удаляются.
+- Добавлен настраиваемый радиус для all-peds режима:
+  - INI: `Main.RenderAllPedsRadius` (метры);
+  - UI: `All peds radius`;
+  - рендер/синхронизация выполняются только для ped внутри радиуса от локального.
+- Добавлены per-skin weapon presets из папки
+  `<asi-dir>\OrcOutFit\weaponsetting\`:
+  - каждый `*.ini` мапится на модель ped по basename через `CKeyGen::GetUppercaseKey`
+    (пример: `lapd1.ini` -> модель `lapd1` / skin id 280);
+  - формат секций идентичен основному `OrcOutFit.ini` (`[WeaponNN]` и именованные секции);
+  - при наличии override у конкретной модели ped используется его `WeaponCfg`,
+    иначе глобальный дефолт.
 - Для сценария modloader пути к данным переведены на вычисление относительно
   расположения `OrcOutFit.asi`:
   - `<asi-dir>\OrcOutFit\object`
