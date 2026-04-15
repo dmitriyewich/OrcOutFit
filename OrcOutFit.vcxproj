@@ -99,6 +99,11 @@
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />
     <ClCompile Include="source\overlay.cpp" />
+    <ClCompile Include="source\samp_bridge.cpp" />
+    <ClCompile Include="source\external\MinHook\src\buffer.c" />
+    <ClCompile Include="source\external\MinHook\src\hook.c" />
+    <ClCompile Include="source\external\MinHook\src\trampoline.c" />
+    <ClCompile Include="source\external\MinHook\src\hde\hde32.c" />
     <ClCompile Include="source\external\imgui\imgui.cpp" />
     <ClCompile Include="source\external\imgui\imgui_draw.cpp" />
     <ClCompile Include="source\external\imgui\imgui_tables.cpp" />

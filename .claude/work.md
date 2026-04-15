@@ -166,6 +166,69 @@
   - `<asi-dir>\OrcOutFit\SKINS`
   Это позволяет размещать плагин в `modloader\OrcOutFit\...` без хардкода пути
   к корню игры.
+- Добавлена SA:MP-ориентированная активация UI для версий `R1`, `R2`, `R3`,
+  `R3-1`, `R4`, `R4-2`, `R5-1`, `DL-R1`:
+  - версия `samp.dll` определяется по `AddressOfEntryPoint`;
+  - для каждой ревизии используется свой `sendCommand` offset;
+  - установлен inline detour `sendCommand`, перехватывающий команду открытия меню.
+- Новая логика активации:
+  - вне SA:MP — только клавиша (по умолчанию `F7`);
+  - в SA:MP — команда (по умолчанию `/orcoutfit`);
+  - опция `Main.SampAllowActivationKey=1` дополнительно включает горячую клавишу в SA:MP.
+- Расширен `OrcOutFit.ini`:
+  - `Main.Command=/orcoutfit`
+  - `Main.ActivationKey=F7` (поддержаны `F1..F12`, `A..Z`, `0..9`, либо числовой VK-код)
+  - `Main.SampAllowActivationKey=0`
+- `overlay` переведён с жёсткого `F7` на настраиваемый VK и флаг `hotkey enabled`,
+  маршрутизация обновляется после загрузки INI и после детекта SA:MP.
+- Проведён рефакторинг SA:MP-слоя в отдельный модуль:
+  - добавлены `source/samp_bridge.h` и `source/samp_bridge.cpp`;
+  - в модуль вынесены: детект `samp.dll`, определение ревизии по `EntryPoint`,
+    таблица версий `R1/R2/R3/R3-1/R4/R4-2/R5-1/DL-R1`, inline detour `sendCommand`,
+    и обработка команды активации;
+  - `main.cpp` оставляет только интеграцию (`samp_bridge::Poll(...)`) и маршрутизацию
+    горячей клавиши через `RefreshActivationRouting`.
+- `OrcOutFit.vcxproj` обновлён: в сборку добавлен `source\samp_bridge.cpp`.
+- Исправлен краш при смене скина SA:MP во время активного `Skin mode`:
+  - причина: между `pedRenderEvent.before` и `pedRenderEvent.after` SA:MP мог
+    заменить `m_pRwClump`, а код пытался восстановить callback/цвета по уже
+    невалидным указателям атомиков/материалов;
+  - добавлен guard snapshot-состояния (`ped + clump`), восстановление теперь
+    выполняется только если clump не сменился;
+  - при смене clump восстановление пропускается безопасно (очистка snapshot без
+    dereference старых указателей) с диагностическим логом;
+  - восстановление в `after` выполняется даже если toggles уже выключены, чтобы
+    не оставлять незавершённый snapshot;
+  - добавлены `__try/__except` вокруг hide/restore и полный сброс snapshot на
+    `shutdownRwEvent`.
+- После повторного отчёта о краше (`Illegal instruction`) путь скрытия базового
+  ped дополнительно упрощён до безопасного режима:
+  - убрана подмена/восстановление `RpAtomic::renderCallBack` при `Hide base ped`;
+  - скрытие выполняется только через временный `material alpha=0` с последующим
+    восстановлением цвета;
+  - сохранены guards по `ped+clump` и безопасный skip restore при смене clump.
+  Это исключает риск исполнения битого callback-указателя при асинхронной смене
+  clump со стороны SA:MP.
+- После ещё одного краша на смене скина SA:MP (`Access violation writing 0x0`)
+  скрытие базового скина переведено на `CVisibilityPlugins::SetClumpAlpha`:
+  - полностью удалены операции обхода/модификации материалов в `pedRenderEvent`;
+  - `before`: `SetClumpAlpha(oldClump, 0)`;
+  - `after`: восстановление `SetClumpAlpha(..., 255)` для старого clump и
+    принудительное восстановление текущего `ped->m_pRwClump`, если SA:MP успел
+    подменить clump между `before/after`;
+  - сохранён snapshot guard (`ped/clump`) и `__try/__except`.
+- В `RenderSelectedSkin` добавлен дополнительный guard на стабильность
+  `player->m_pRwClump` в пределах кадра (ранний выход при подмене clump в ходе
+  обработки), чтобы не продолжать bind/copy при гонке со сменой скина SA:MP.
+- Найден и устранён ещё один вероятный источник краша при смене скина/командах:
+  SA:MP command-hook был на самодельном inline detour (ручной trampoline с
+  копированием первых байт функции), что небезопасно для сложных прологов/rel32.
+  Путь заменён на MinHook.
+  - `source/samp_bridge.cpp`: удалён `InstallSimpleDetour`, подключён
+    `MH_Initialize/MH_CreateHook/MH_EnableHook` для `sendCommand`.
+  - `OrcOutFit.vcxproj`: в сборку добавлены исходники MinHook
+    (`buffer.c`, `hook.c`, `trampoline.c`, `hde32.c`).
+  Это исключает исполнение битого trampoline-адреса при вызовах `sendCommand`.
 - Исправлен визуальный баг с черным кастомным skin: в `RenderSelectedSkin`
   добавлен явный расчёт освещения через
   `CPointLights::GenerateLightsAffectingObject` +

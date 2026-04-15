@@ -30,6 +30,7 @@
 #include <unordered_set>
 
 #include "overlay.h"
+#include "samp_bridge.h"
 #include "imgui.h"
 
 using namespace plugin;
@@ -107,6 +108,9 @@ struct WeaponCfg {
 static bool g_enabled = true;
 static bool g_renderAllPedsWeapons = false;
 static float g_renderAllPedsRadius = 80.0f;
+static int  g_activationVk = VK_F7;
+static bool g_sampAllowActivationKey = false;
+static std::string g_toggleCommand = "/orcoutfit";
 static WeaponCfg g_cfg[64] = {};
 static RpAtomic* InitAtomicCB(RpAtomic* a, void*);
 static bool g_skinModeEnabled = false;
@@ -218,11 +222,81 @@ static void ReadSection(WeaponCfg& c, const char* section) {
     ReadSectionFromIni(c, section, g_iniPath);
 }
 
+static int ParseActivationVk(const char* text) {
+    if (!text || !text[0]) return VK_F7;
+    if (!lstrcmpiA(text, "F1")) return VK_F1;
+    if (!lstrcmpiA(text, "F2")) return VK_F2;
+    if (!lstrcmpiA(text, "F3")) return VK_F3;
+    if (!lstrcmpiA(text, "F4")) return VK_F4;
+    if (!lstrcmpiA(text, "F5")) return VK_F5;
+    if (!lstrcmpiA(text, "F6")) return VK_F6;
+    if (!lstrcmpiA(text, "F7")) return VK_F7;
+    if (!lstrcmpiA(text, "F8")) return VK_F8;
+    if (!lstrcmpiA(text, "F9")) return VK_F9;
+    if (!lstrcmpiA(text, "F10")) return VK_F10;
+    if (!lstrcmpiA(text, "F11")) return VK_F11;
+    if (!lstrcmpiA(text, "F12")) return VK_F12;
+
+    if (text[1] == '\0') {
+        const char c = text[0];
+        if (c >= 'A' && c <= 'Z') return c;
+        if (c >= 'a' && c <= 'z') return c - ('a' - 'A');
+        if (c >= '0' && c <= '9') return c;
+    }
+    const int vk = atoi(text);
+    if (vk >= 1 && vk <= 255) return vk;
+    return VK_F7;
+}
+
+static const char* VkToString(int vk) {
+    switch (vk) {
+    case VK_F1: return "F1";
+    case VK_F2: return "F2";
+    case VK_F3: return "F3";
+    case VK_F4: return "F4";
+    case VK_F5: return "F5";
+    case VK_F6: return "F6";
+    case VK_F7: return "F7";
+    case VK_F8: return "F8";
+    case VK_F9: return "F9";
+    case VK_F10: return "F10";
+    case VK_F11: return "F11";
+    case VK_F12: return "F12";
+    default: break;
+    }
+    static char buf[16];
+    _snprintf_s(buf, _TRUNCATE, "%d", vk);
+    return buf;
+}
+
+static void NormalizeCommand() {
+    if (g_toggleCommand.empty()) g_toggleCommand = "/orcoutfit";
+    if (g_toggleCommand[0] != '/') g_toggleCommand.insert(g_toggleCommand.begin(), '/');
+}
+
+static void ToggleOverlayFromSamp() {
+    overlay::Toggle();
+}
+
+static void RefreshActivationRouting() {
+    overlay::SetToggleVirtualKey(g_activationVk);
+    const bool hotkeyAllowed = !samp_bridge::IsSampPresent() || g_sampAllowActivationKey;
+    overlay::SetHotkeyEnabled(hotkeyAllowed);
+}
+
 static void LoadConfig() {
     SetupDefaults();
     g_enabled = GetPrivateProfileIntA("Main", "Enabled", 1, g_iniPath) != 0;
     g_renderAllPedsWeapons = GetPrivateProfileIntA("Main", "RenderAllPedsWeapons", 0, g_iniPath) != 0;
     g_renderAllPedsRadius = (float)GetPrivateProfileIntA("Main", "RenderAllPedsRadius", 80, g_iniPath);
+    g_sampAllowActivationKey = GetPrivateProfileIntA("Main", "SampAllowActivationKey", 0, g_iniPath) != 0;
+    char keyBuf[32] = {};
+    GetPrivateProfileStringA("Main", "ActivationKey", "F7", keyBuf, sizeof(keyBuf), g_iniPath);
+    g_activationVk = ParseActivationVk(keyBuf);
+    char cmdBuf[64] = {};
+    GetPrivateProfileStringA("Main", "Command", "/orcoutfit", cmdBuf, sizeof(cmdBuf), g_iniPath);
+    g_toggleCommand = cmdBuf;
+    NormalizeCommand();
     if (g_renderAllPedsRadius < 5.0f) g_renderAllPedsRadius = 5.0f;
     for (int i = 0; i < 64; i++) {
         auto& c = g_cfg[i];
@@ -241,6 +315,7 @@ static void LoadConfig() {
     GetPrivateProfileStringA("SkinMode", "Selected", "", skinName, sizeof(skinName), g_iniPath);
     g_skinSelectedName = skinName;
     LoadWeaponSettingOverrides();
+    RefreshActivationRouting();
 }
 
 static void SaveDefaultConfig() {
@@ -259,7 +334,13 @@ static void SaveDefaultConfig() {
           ";   RX tilts around bone right, RY around up, RZ around at.\n"
           "; Для нестандартного оружия (мод) можно добавить секцию [WeaponNN],\n"
           "; где NN = числовой eWeaponType (например [Weapon50]).\n\n"
-          "[Main]\nEnabled=1\nRenderAllPedsWeapons=0\nRenderAllPedsRadius=80\n\n", f);
+          "[Main]\n"
+          "Enabled=1\n"
+          "RenderAllPedsWeapons=0\n"
+          "RenderAllPedsRadius=80\n"
+          "ActivationKey=F7\n"
+          "SampAllowActivationKey=0\n"
+          "Command=/orcoutfit\n\n", f);
     for (int i = 0; i < 64; i++) {
         const auto& c = g_cfg[i];
         if (!c.name) continue;
@@ -1023,6 +1104,7 @@ static RpAtomic* BindSkinHierarchyCB(RpAtomic* a, void* data) {
 
 static void RenderSelectedSkin(CPlayerPed* player) {
     if (!g_skinModeEnabled || !player || !player->m_pRwClump) return;
+    RpClump* playerClump = player->m_pRwClump;
     CustomSkinCfg* sel = GetSelectedSkin();
     if (!sel) return;
     if (!EnsureCustomSkinLoaded(*sel)) {
@@ -1036,7 +1118,7 @@ static void RenderSelectedSkin(CPlayerPed* player) {
         return;
     }
     RpClump* clump = reinterpret_cast<RpClump*>(sel->rwObject);
-    RwFrame* srcFrame = RpClumpGetFrame(player->m_pRwClump);
+    RwFrame* srcFrame = RpClumpGetFrame(playerClump);
     RwFrame* dstFrame = RpClumpGetFrame(clump);
     if (!srcFrame || !dstFrame) {
         static bool onceNoFrame = false;
@@ -1046,7 +1128,7 @@ static void RenderSelectedSkin(CPlayerPed* player) {
     static bool loggedSkinInfo = false;
     if (!loggedSkinInfo) {
         loggedSkinInfo = true;
-        RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(player->m_pRwClump);
+        RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(playerClump);
         RpHAnimHierarchy* dstH = GetAnimHierarchyFromSkinClump(clump);
         int skinnedAtomics = 0;
         RpClumpForAllAtomics(clump, +[](RpAtomic* a, void* d)->RpAtomic* {
@@ -1058,11 +1140,13 @@ static void RenderSelectedSkin(CPlayerPed* player) {
     }
     std::memcpy(RwFrameGetMatrix(dstFrame), RwFrameGetMatrix(srcFrame), sizeof(RwMatrix));
     RwMatrixUpdate(RwFrameGetMatrix(dstFrame));
-    RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(player->m_pRwClump);
+    RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(playerClump);
     g_skinBindCount = 0;
     if (srcH) RpClumpForAllAtomics(clump, BindSkinHierarchyCB, srcH);
     g_skinCanAnimate = (srcH && g_skinBindCount > 0);
     if (g_skinCanAnimate) {
+        // Abort this frame if SA:MP swapped local player clump during render.
+        if (player->m_pRwClump != playerClump) return;
         CopySkinHierarchyPose(player, clump);
     } else {
         static bool loggedNoSkinHierarchy = false;
@@ -1230,34 +1314,9 @@ static const BoneOption kBones[] = {
 static int g_uiWeaponIdx = WEAPONTYPE_M4;
 static int g_uiCustomIdx = 0;
 
-struct HiddenMatState { RpMaterial* mat; RwRGBA color; };
-static std::vector<HiddenMatState> g_hiddenMats;
-struct HiddenAtomicState { RpAtomic* atomic; RpAtomicCallBackRender cb; };
-static std::vector<HiddenAtomicState> g_hiddenAtomics;
-
-static RpMaterial* HideMatCB(RpMaterial* m, void*) {
-    if (!m) return m;
-    for (const auto& it : g_hiddenMats) if (it.mat == m) return m;
-    g_hiddenMats.push_back({ m, m->color });
-    m->color.alpha = 0;
-    return m;
-}
-
-static RpAtomic* HideAtomicCB(RpAtomic* a, void*) {
-    if (a && a->geometry) RpGeometryForAllMaterials(a->geometry, HideMatCB, nullptr);
-    return a;
-}
-
-static RpAtomic* NoRenderAtomicCB(RpAtomic* a) {
-    return a;
-}
-
-static RpAtomic* CaptureAndHideAtomicCB(RpAtomic* a, void*) {
-    if (!a) return a;
-    g_hiddenAtomics.push_back({ a, RpAtomicGetRenderCallBack(a) });
-    RpAtomicSetRenderCallBack(a, NoRenderAtomicCB);
-    return a;
-}
+static CPed* g_hiddenPed = nullptr;
+static RpClump* g_hiddenClump = nullptr;
+static bool g_hideSnapshotValid = false;
 
 static int BoneComboIndex(int boneId) {
     for (int i = 0; i < IM_ARRAYSIZE(kBones); i++)
@@ -1271,7 +1330,7 @@ static void DrawUI() {
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 400, 120), ImGuiCond_FirstUseEver);
 
     bool open = true;
-    if (!ImGui::Begin("weapons on ped // OrcOutFit [F7]",
+    if (!ImGui::Begin("weapons on ped // OrcOutFit",
                       &open,
                       ImGuiWindowFlags_NoCollapse))
     { ImGui::End(); if (!open) overlay::SetOpen(false); return; }
@@ -1377,7 +1436,15 @@ static void DrawUI() {
         WritePrivateProfileStringA("Main", "RenderAllPedsRadius", mainBuf, g_iniPath);
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("F7 toggle");
+    if (samp_bridge::IsSampPresent()) {
+        if (g_sampAllowActivationKey) {
+            ImGui::TextDisabled("cmd: %s | key: %s", g_toggleCommand.c_str(), VkToString(g_activationVk));
+        } else {
+            ImGui::TextDisabled("cmd: %s", g_toggleCommand.c_str());
+        }
+    } else {
+        ImGui::TextDisabled("key: %s", VkToString(g_activationVk));
+    }
 
     ImGui::End();
 
@@ -1527,6 +1594,8 @@ public:
                 overlay::SetDrawCallback(&DrawUI);
                 Log("Plugin init. Enabled=%d", (int)g_enabled);
             }
+            samp_bridge::Poll(g_toggleCommand.c_str(), &ToggleOverlayFromSamp);
+            RefreshActivationRouting();
             overlay::Init();  // no-op после первого раза
             __try { SyncAndRender(); }
             __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1539,23 +1608,44 @@ public:
             if (!g_skinModeEnabled || !g_skinHideBasePed || !g_skinCanAnimate) return;
             CPlayerPed* player = FindPlayerPed(0);
             if (!player || ped != player || !ped->m_pRwClump) return;
-            g_hiddenMats.clear();
-            g_hiddenAtomics.clear();
-            RpClumpForAllAtomics(ped->m_pRwClump, CaptureAndHideAtomicCB, nullptr);
-            RpClumpForAllAtomics(ped->m_pRwClump, HideAtomicCB, nullptr);
+            g_hiddenPed = ped;
+            g_hiddenClump = ped->m_pRwClump;
+            __try {
+                g_hideSnapshotValid = true;
+                CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 0);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                g_hideSnapshotValid = false;
+                g_hiddenPed = nullptr;
+                g_hiddenClump = nullptr;
+            }
             static int hideLogTick = 0;
             if ((hideLogTick++ % 300) == 0) {
-                Log("skin hide base ped: atomics=%d mats=%d", (int)g_hiddenAtomics.size(), (int)g_hiddenMats.size());
+                Log("skin hide base ped: clump=%p", g_hiddenClump);
             }
         };
         Events::pedRenderEvent.after += [](CPed* ped) {
-            if (!g_skinModeEnabled || !g_skinHideBasePed || !g_skinCanAnimate) return;
+            // Always try to finish previously captured hide snapshot, even if toggles changed.
+            if (!g_hideSnapshotValid) return;
             CPlayerPed* player = FindPlayerPed(0);
             if (!player || ped != player) return;
-            for (auto& it : g_hiddenAtomics) if (it.atomic) RpAtomicSetRenderCallBack(it.atomic, it.cb);
-            g_hiddenAtomics.clear();
-            for (auto& it : g_hiddenMats) if (it.mat) it.mat->color = it.color;
-            g_hiddenMats.clear();
+
+            __try {
+                if (g_hiddenClump) CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 255);
+                if (ped->m_pRwClump && ped->m_pRwClump != g_hiddenClump) {
+                    CVisibilityPlugins::SetClumpAlpha(ped->m_pRwClump, 255);
+                    static int mismatchLogTick = 0;
+                    if ((mismatchLogTick++ % 120) == 0) {
+                        Log("skin hide restore: clump switched old=%p new=%p", g_hiddenClump, ped->m_pRwClump);
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                // nothing
+            }
+            g_hideSnapshotValid = false;
+            g_hiddenPed = nullptr;
+            g_hiddenClump = nullptr;
         };
         Events::d3dResetEvent += [] { overlay::OnResetBefore(); overlay::OnResetAfter(); };
         // При shutdownRwEvent сцена уже частично разобрана, RpClumpDestroy на
@@ -1566,6 +1656,9 @@ public:
             overlay::Shutdown();
             for (int i = 0; i < kMax; i++) g_rendered[i] = {};
             ClearAllOtherPeds();
+            g_hideSnapshotValid = false;
+            g_hiddenPed = nullptr;
+            g_hiddenClump = nullptr;
             for (auto& o : g_customObjects) {
                 DestroyCustomObjectInstance(o);
                 o.txdSlot = -1;

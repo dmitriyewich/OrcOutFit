@@ -12,6 +12,9 @@ void Shutdown();
 bool IsOpen();
 void SetOpen(bool);
 void Toggle();
+void SetToggleVirtualKey(int vk);
+int  GetToggleVirtualKey();
+void SetHotkeyEnabled(bool enabled);
 
 void SetDrawCallback(DrawFn);
 

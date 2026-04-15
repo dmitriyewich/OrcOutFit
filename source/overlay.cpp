@@ -25,6 +25,8 @@ static bool    g_needCreateObj = false;
 static HWND    g_hwnd          = nullptr;
 static WNDPROC g_origProc      = nullptr;
 static DrawFn  g_drawFn        = nullptr;
+static int     g_toggleVk      = VK_F7;
+static bool    g_hotkeyEnabled = true;
 
 // Курсор: патчим call-sites где игра центрует курсор каждый кадр.
 // Адреса и байты из известного рецепта для SA 1.0 US.
@@ -87,8 +89,8 @@ static bool IsKeyMsg(UINT m) {
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (g_inited && ImGui::GetCurrentContext()) {
-        // Global toggle: F7 (on down edge).
-        if (m == WM_KEYDOWN && w == VK_F7 && (HIWORD(l) & KF_REPEAT) == 0) {
+        // Global toggle key (on down edge).
+        if (g_hotkeyEnabled && m == WM_KEYDOWN && (int)w == g_toggleVk && (HIWORD(l) & KF_REPEAT) == 0) {
             g_menuOpen = !g_menuOpen;
             return 0;
         }
@@ -205,6 +207,9 @@ void Shutdown() {
 bool IsOpen()               { return g_menuOpen; }
 void SetOpen(bool o)        { g_menuOpen = o; }
 void Toggle()               { g_menuOpen = !g_menuOpen; }
+void SetToggleVirtualKey(int vk) { g_toggleVk = vk; }
+int  GetToggleVirtualKey()  { return g_toggleVk; }
+void SetHotkeyEnabled(bool enabled) { g_hotkeyEnabled = enabled; }
 void SetDrawCallback(DrawFn f) { g_drawFn = f; }
 
 } // namespace overlay
