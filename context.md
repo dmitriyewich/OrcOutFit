@@ -2,14 +2,14 @@
 
 ## Назначение проекта
 
-- `WeaponsOutFit` это нативный `ASI`-плагин для `GTA San Andreas / SA:MP`.
-- Плагин дорисовывает на теле локального игрока оружие из инвентаря:
-  - на спине
-  - на левом бедре
-  - на правом бедре
-- Оружие, которое сейчас находится в руках, на теле не рисуется.
+- `OrcOutFit` это нативный `ASI`-плагин для `GTA San Andreas / SA:MP`.
+- Плагин рендерит:
+  - оружие на теле ped (локальный игрок + опционально все ped),
+  - кастомные объекты из папки `object`,
+  - кастомный skin-режим для локального игрока из папки `SKINS`.
+- Оружие, которое сейчас в руках у ped, на теле не рисуется.
 - Выходной артефакт проекта:
-  - `WeaponsOutFit.asi`
+  - `OrcOutFit.asi`
 
 ## Целевая платформа
 
@@ -18,15 +18,26 @@
 
 ## Текущая рабочая логика
 
-- Плагин ждёт, пока игра догрузится (`kLoadState == 9`).
-- Ставится хук на целевую функцию `drawingEvent` (подход из `BaseModelRender`):
-  - call-site: `0x53E293` (`E8 rel32`)
-  - целевой адрес читается из `rel32` на старте и хукается через `MinHook`.
-- В хуке после вызова оригинала:
-  - берётся `FindPlayerPed(0)`
-  - синхронизируется список оружия в инвентаре
-  - для каждого `мапленного` оружия (не текущего) создаётся инстанс модели
-  - инстанс рендерится на нужной кости через `RpHAnim`-матрицу
+- Главный рендер идёт из `Events::drawingEvent`.
+- Оружие локального игрока:
+  - синхронизация слотов `m_aWeapons`,
+  - `CreateInstance(RwMatrix*)` для нужных моделей,
+  - рендер на кости через `RpHAnim` + `RpClumpRender`/atomic callback.
+- Оружие всех ped (опция):
+  - включается флагом `RenderAllPedsWeapons`,
+  - фильтруется по радиусу `RenderAllPedsRadius`,
+  - используется per-ped cache инстансов по `CPools::GetPedRef`.
+- Кастомные объекты:
+  - скан `*.dff` в `OrcOutFit\object`,
+  - отдельный `<name>.ini` на каждый объект.
+- Skin mode:
+  - скан `*.dff` в `OrcOutFit\SKINS`,
+  - рендер выбранного clump поверх локального ped,
+  - скрытие базового ped (опция),
+  - bind анимации через `RpSkinAtomicSetHAnimHierarchy`.
+- Per-model weapon overrides:
+  - папка `OrcOutFit\weaponsetting`,
+  - `lapd1.ini` применяется к модели `lapd1` (по `CKeyGen::GetUppercaseKey`).
 
 ## Важные файлы
 
@@ -35,11 +46,11 @@
 - MinHook:
   - `C:\Games\CODEX\WeaponsOutFit\source\external\MinHook\`
 - Проект Visual Studio:
-  - `C:\Games\CODEX\WeaponsOutFit\WeaponsOutFit.vcxproj`
+  - `C:\Games\CODEX\WeaponsOutFit\OrcOutFit.vcxproj`
 - Solution:
-  - `C:\Games\CODEX\WeaponsOutFit\WeaponsOutFit.sln`
+  - `C:\Games\CODEX\WeaponsOutFit\OrcOutFit.sln`
 - Конфиг:
-  - `C:\Games\CODEX\WeaponsOutFit\WeaponsOutFit.ini`
+  - рядом с ASI: `OrcOutFit.ini`
 - Этот контекст:
   - `C:\Games\CODEX\WeaponsOutFit\context.md`
 - Рабочий журнал:
@@ -82,11 +93,19 @@
 - Целевая конфигурация:
   - `Release | Win32`
 - Ожидаемый выходной файл:
-  - `C:\Games\CODEX\WeaponsOutFit\build\Release\WeaponsOutFit.asi`
+  - `C:\Games\CODEX\WeaponsOutFit\build\Release\OrcOutFit.asi`
 - **НЕЛЬЗЯ** автоматически копировать / перемещать `.asi` куда-либо.
-  - Единственное допустимое расположение — `build\Release\WeaponsOutFit.asi`.
+  - Единственное допустимое расположение — `build\Release\OrcOutFit.asi`.
   - Деплой в папку игры (`C:\Games\SAMP\GTA San Andreas\`) делает пользователь вручную.
   - Причина: `.asi` в игре бывает залочен запущенным процессом, а двойная копия рассинхронизируется.
+
+## Пути данных плагина (runtime)
+
+- Путь считается относительно расположения `OrcOutFit.asi` (modloader-friendly).
+- Ожидаемые подпапки:
+  - `OrcOutFit\object`
+  - `OrcOutFit\SKINS`
+  - `OrcOutFit\weaponsetting`
 
 ## Правила `reference`
 

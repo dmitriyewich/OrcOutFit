@@ -166,6 +166,14 @@
   - `<asi-dir>\OrcOutFit\SKINS`
   Это позволяет размещать плагин в `modloader\OrcOutFit\...` без хардкода пути
   к корню игры.
+- Исправлен визуальный баг с черным кастомным skin: в `RenderSelectedSkin`
+  добавлен явный расчёт освещения через
+  `CPointLights::GenerateLightsAffectingObject` +
+  `SetLightColoursForPedsCarsAndObjects`.
+  Теперь skin не зависит от того, рендерились ли перед ним оружие/объекты.
+- Текущая стабильная линия коммитов:
+  - `3bcb1b0` — stable checkpoint до нового направления;
+  - `4da738f` — all-peds radius + `weaponsetting` overrides.
 - Добавлен переключаемый режим рендера оружия для всех ped:
   - новый флаг `Main.RenderAllPedsWeapons` в `OrcOutFit.ini` (по умолчанию `0`);
   - checkbox в UI: `Render weapons for all peds`;
