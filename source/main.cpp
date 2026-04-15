@@ -18,7 +18,11 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <array>
+
+#include "overlay.h"
+#include "imgui.h"
 
 using namespace plugin;
 
@@ -232,6 +236,30 @@ static void SaveDefaultConfig() {
 }
 
 // ----------------------------------------------------------------------------
+// Save single weapon section
+// ----------------------------------------------------------------------------
+static void SaveWeaponSection(int wt) {
+    auto& c = g_cfg[wt];
+    char sec[32];
+    if (c.name) _snprintf_s(sec, _TRUNCATE, "%s", c.name);
+    else        _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
+
+    char buf[32];
+    auto W = [&](const char* key, const char* v) {
+        WritePrivateProfileStringA(sec, key, v, g_iniPath);
+    };
+    _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);     W("Enabled", buf);
+    _snprintf_s(buf, _TRUNCATE, "%d", c.boneId);              W("Bone", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", c.x);                 W("OffsetX", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", c.y);                 W("OffsetY", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", c.z);                 W("OffsetZ", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", c.rx / D2R);          W("RotationX", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", c.ry / D2R);          W("RotationY", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", c.rz / D2R);          W("RotationZ", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);             W("Scale", buf);
+}
+
+// ----------------------------------------------------------------------------
 // Render state
 // ----------------------------------------------------------------------------
 struct RenderedWeapon {
@@ -306,6 +334,19 @@ static RpAtomic* ResetAtomicCB(RpAtomic* atomic, void* /*data*/) {
     return atomic;
 }
 
+// AddRef материалов чтобы при teardown движка refcount не упал до 0
+// и CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB не упал (плагин-данные
+// уже невалидны к этому моменту). OS освободит память при выходе процесса.
+static RpMaterial* LeakMaterialCB(RpMaterial* mat, void*) {
+    if (mat) mat->refCount++;
+    return mat;
+}
+static RpAtomic* LeakAtomicCB(RpAtomic* a, void*) {
+    if (a && a->geometry)
+        RpGeometryForAllMaterials(a->geometry, LeakMaterialCB, nullptr);
+    return a;
+}
+
 // ----------------------------------------------------------------------------
 // Apply matrix
 // ----------------------------------------------------------------------------
@@ -315,14 +356,27 @@ static void ApplyOffset(RwMatrix* m, float ox, float oy, float oz) {
     m->pos.z += m->right.z * ox + m->up.z * oy + m->at.z * oz;
 }
 
+// M = M * R  (локально в bone space), R = Rx * Ry * Rz (ZYX Euler).
 static void RotateMatrix(RwMatrix* m, float rx, float ry, float rz) {
     if (rx == 0 && ry == 0 && rz == 0) return;
-    RwV3d pos = m->pos;
-    RwV3d ax = { 1,0,0 }, ay = { 0,1,0 }, az = { 0,0,1 };
-    RwMatrixRotate(m, &az, rz, rwCOMBINEPRECONCAT);
-    RwMatrixRotate(m, &ay, ry, rwCOMBINEPRECONCAT);
-    RwMatrixRotate(m, &ax, rx, rwCOMBINEPRECONCAT);
-    m->pos = pos;
+    float cx = cosf(rx), sx = sinf(rx);
+    float cy = cosf(ry), sy = sinf(ry);
+    float cz = cosf(rz), sz = sinf(rz);
+    // Row-major rotation; columns = rotated basis in source frame.
+    float r00 =  cy*cz,            r01 = -cy*sz,           r02 =  sy;
+    float r10 =  sx*sy*cz + cx*sz, r11 = -sx*sy*sz + cx*cz, r12 = -sx*cy;
+    float r20 = -cx*sy*cz + sx*sz, r21 =  cx*sy*sz + sx*cz, r22 =  cx*cy;
+
+    RwV3d rg = m->right, up = m->up, at = m->at;
+    m->right.x = rg.x*r00 + up.x*r10 + at.x*r20;
+    m->right.y = rg.y*r00 + up.y*r10 + at.y*r20;
+    m->right.z = rg.z*r00 + up.z*r10 + at.z*r20;
+    m->up.x    = rg.x*r01 + up.x*r11 + at.x*r21;
+    m->up.y    = rg.y*r01 + up.y*r11 + at.y*r21;
+    m->up.z    = rg.z*r01 + up.z*r11 + at.z*r21;
+    m->at.x    = rg.x*r02 + up.x*r12 + at.x*r22;
+    m->at.y    = rg.y*r02 + up.y*r12 + at.y*r22;
+    m->at.z    = rg.z*r02 + up.z*r12 + at.z*r22;
 }
 
 // ----------------------------------------------------------------------------
@@ -353,9 +407,13 @@ static bool CreateWeaponInstance(int wt, int slot, CPed* ped) {
 
     // Сброс render-callback на дефолтный RW — как в BaseModelRender::SetRelatedModelInfoCB.
     if (inst->type == rpCLUMP) {
-        RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), ResetAtomicCB, nullptr);
+        auto* c = reinterpret_cast<RpClump*>(inst);
+        RpClumpForAllAtomics(c, ResetAtomicCB, nullptr);
+        RpClumpForAllAtomics(c, LeakAtomicCB,  nullptr);
     } else if (inst->type == rpATOMIC) {
-        ResetAtomicCB(reinterpret_cast<RpAtomic*>(inst), nullptr);
+        auto* a = reinterpret_cast<RpAtomic*>(inst);
+        ResetAtomicCB(a, nullptr);
+        LeakAtomicCB (a, nullptr);
     }
 
     int fi = FindFree();
@@ -431,13 +489,18 @@ static void SyncAndRender() {
     int curType = 0;
     if (curSlot < 13) curType = (int)player->m_aWeapons[curSlot].m_eWeaponType;
 
-    // Собираем набор типов в инвентаре (не текущего).
+    // Собираем набор типов в инвентаре (не текущего). Ammo==0 -> оружие ушло из слота.
     bool want[64] = {};
     for (int s = 0; s < 13; s++) {
-        int wt = (int)player->m_aWeapons[s].m_eWeaponType;
+        auto& w = player->m_aWeapons[s];
+        int wt = (int)w.m_eWeaponType;
         if (wt <= 0 || wt >= 64) continue;
         if (wt == curType) continue;
         if (!g_cfg[wt].enabled || g_cfg[wt].boneId == 0) continue;
+        // Слот 0 (unarmed) / 1 (melee) / gifts / specials — без патронов.
+        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+        bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+        if (needsAmmo && w.m_nAmmoTotal == 0) continue;
         want[wt] = true;
     }
 
@@ -485,6 +548,141 @@ static void SyncAndRender() {
 }
 
 // ----------------------------------------------------------------------------
+// ImGui UI
+// ----------------------------------------------------------------------------
+struct BoneOption { int id; const char* label; };
+static const BoneOption kBones[] = {
+    { 0,              "(none)" },
+    { 1,              "Root" },
+    { BONE_PELVIS,    "Pelvis" },
+    { BONE_SPINE1,    "Spine1" },
+    { 4,              "Spine" },
+    { 5,              "Neck" },
+    { 6,              "Head" },
+    { BONE_R_CLAVIC,  "R Clavicle" },
+    { BONE_R_UPARM,   "R UpperArm" },
+    { 23,             "R Forearm" },
+    { 24,             "R Hand" },
+    { BONE_L_CLAVIC,  "L Clavicle" },
+    { BONE_L_UPARM,   "L UpperArm" },
+    { 33,             "L Forearm" },
+    { 34,             "L Hand" },
+    { BONE_L_THIGH,   "L Thigh" },
+    { BONE_L_CALF,    "L Calf" },
+    { 43,             "L Foot" },
+    { BONE_R_THIGH,   "R Thigh" },
+    { BONE_R_CALF,    "R Calf" },
+    { 53,             "R Foot" },
+};
+
+static int  g_uiWeaponIdx  = WEAPONTYPE_M4;
+static bool g_uiDirty      = false;
+
+static int BoneComboIndex(int boneId) {
+    for (int i = 0; i < IM_ARRAYSIZE(kBones); i++)
+        if (kBones[i].id == boneId) return i;
+    return 0;
+}
+
+static void DrawUI() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowSize(ImVec2(380, 0), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 400, 120), ImGuiCond_FirstUseEver);
+
+    bool open = true;
+    if (!ImGui::Begin("weapons on ped // WeaponsOutFit [F7]",
+                      &open,
+                      ImGuiWindowFlags_NoCollapse))
+    { ImGui::End(); if (!open) overlay::SetOpen(false); return; }
+    if (!open) overlay::SetOpen(false);
+
+    ImGui::Checkbox("Plugin enabled", &g_enabled);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reload INI")) LoadConfig();
+
+    ImGui::Separator();
+
+    // --- weapon selector ---
+    char preview[64];
+    const auto& pc = g_cfg[g_uiWeaponIdx];
+    _snprintf_s(preview, _TRUNCATE, "%s [%d]", pc.name ? pc.name : "Weapon", g_uiWeaponIdx);
+    if (ImGui::BeginCombo("set object weapon", preview)) {
+        for (int i = 1; i < 64; i++) {
+            if (!g_cfg[i].name) continue;
+            char lbl[64];
+            _snprintf_s(lbl, _TRUNCATE, "%s [%d]", g_cfg[i].name, i);
+            if (ImGui::Selectable(lbl, i == g_uiWeaponIdx)) g_uiWeaponIdx = i;
+        }
+        ImGui::EndCombo();
+    }
+
+    // id/index stepper (для кастомного оружия)
+    int idx = g_uiWeaponIdx;
+    ImGui::SetNextItemWidth(140);
+    if (ImGui::InputInt("index/id object", &idx, 1, 1)) {
+        if (idx >= 1 && idx < 64) g_uiWeaponIdx = idx;
+    }
+
+    ImGui::Separator();
+
+    auto& c = g_cfg[g_uiWeaponIdx];
+
+    ImGui::Checkbox("show", &c.enabled); g_uiDirty |= ImGui::IsItemEdited();
+
+    // --- bone combo ---
+    int bi = BoneComboIndex(c.boneId);
+    const char* bonePreview = kBones[bi].label;
+    if (ImGui::BeginCombo("bone", bonePreview)) {
+        for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
+            if (ImGui::Selectable(kBones[i].label, i == bi)) {
+                c.boneId = kBones[i].id;
+                g_uiDirty = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::PushItemWidth(80);
+    ImGui::DragFloat("##ox", &c.x, 0.005f, -2.0f, 2.0f, "%.3f"); ImGui::SameLine();
+    ImGui::DragFloat("##oy", &c.y, 0.005f, -2.0f, 2.0f, "%.3f"); ImGui::SameLine();
+    ImGui::DragFloat("##oz", &c.z, 0.005f, -2.0f, 2.0f, "%.3f"); ImGui::SameLine();
+    ImGui::TextUnformatted("offset");
+
+    // radians stored, show degrees
+    float rxd = c.rx / D2R, ryd = c.ry / D2R, rzd = c.rz / D2R;
+    if (ImGui::DragFloat("##rx", &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) c.rx = rxd * D2R;
+    ImGui::SameLine();
+    if (ImGui::DragFloat("##ry", &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) c.ry = ryd * D2R;
+    ImGui::SameLine();
+    if (ImGui::DragFloat("##rz", &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) c.rz = rzd * D2R;
+    ImGui::SameLine();
+    ImGui::TextUnformatted("rot");
+
+    ImGui::DragFloat("##scale", &c.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+    ImGui::SameLine();
+    ImGui::TextUnformatted("scale");
+    ImGui::PopItemWidth();
+
+    ImGui::Separator();
+    if (ImGui::Button("SAVE", ImVec2(80, 0))) {
+        SaveWeaponSection(g_uiWeaponIdx);
+        char mainBuf[4]; _snprintf_s(mainBuf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
+        WritePrivateProfileStringA("Main", "Enabled", mainBuf, g_iniPath);
+        g_uiDirty = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("SAVE ALL")) {
+        for (int i = 1; i < 64; i++) if (g_cfg[i].name || g_cfg[i].boneId) SaveWeaponSection(i);
+        char mainBuf[4]; _snprintf_s(mainBuf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
+        WritePrivateProfileStringA("Main", "Enabled", mainBuf, g_iniPath);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("F7 toggle");
+
+    ImGui::End();
+}
+
+// ----------------------------------------------------------------------------
 // Plugin entry
 // ----------------------------------------------------------------------------
 class WeaponsOutFit {
@@ -502,19 +700,32 @@ public:
                 SetupDefaults();
                 SaveDefaultConfig();
                 LoadConfig();
+                overlay::SetDrawCallback(&DrawUI);
                 Log("Plugin init. Enabled=%d", (int)g_enabled);
             }
+            overlay::Init();  // no-op после первого раза
             __try { SyncAndRender(); }
             __except (EXCEPTION_EXECUTE_HANDLER) {
                 static bool once = false;
                 if (!once) { once = true; Log("EXCEPTION in SyncAndRender"); }
             }
+            overlay::DrawFrame();
         };
+        Events::d3dResetEvent += [] { overlay::OnResetBefore(); overlay::OnResetAfter(); };
         // При shutdownRwEvent сцена уже частично разобрана, RpClumpDestroy на
-        // клонированных материалах падает в CCustomCarEnvMapPipeline dtor.
-        // Просто помечаем слоты свободными — RW сам очистит память процесса.
+        // клонированных материалах падает в CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB
+        // (env map plugin data ссылается на уже освобождённую текстуру).
+        // Патчим сам деструктор на RET — безвредно т.к. процесс всё равно завершается.
         Events::shutdownRwEvent += [] {
+            overlay::Shutdown();
             for (int i = 0; i < kMax; i++) g_rendered[i] = {};
+            // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.
+            DWORD oldProt;
+            BYTE* p = reinterpret_cast<BYTE*>(0x5D95B0);
+            if (VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                *p = 0xC3;
+                DWORD tmp; VirtualProtect(p, 1, oldProt, &tmp);
+            }
         };
     }
 } g_plugin;

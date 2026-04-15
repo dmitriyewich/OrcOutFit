@@ -75,7 +75,7 @@
       <Optimization>MaxSpeed</Optimization>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
-      <AdditionalIncludeDirectories>$(PluginSdkDir)\plugin_sa;$(PluginSdkDir)\plugin_sa\game_sa;$(PluginSdkDir)\plugin_sa\game_sa\rw;$(PluginSdkDir)\shared;$(PluginSdkDir)\shared\game;$(PluginSdkDir)\shared\dxsdk;$(PluginSdkDir)\injector;$(PluginSdkDir)\hooking;$(PluginSdkDir)\safetyhook;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(PluginSdkDir)\plugin_sa;$(PluginSdkDir)\plugin_sa\game_sa;$(PluginSdkDir)\plugin_sa\game_sa\rw;$(PluginSdkDir)\shared;$(PluginSdkDir)\shared\game;$(PluginSdkDir)\shared\dxsdk;$(PluginSdkDir)\injector;$(PluginSdkDir)\hooking;$(PluginSdkDir)\safetyhook;$(ProjectDir)source\external\imgui;$(ProjectDir)source\external\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -88,6 +88,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />
+    <ClCompile Include="source\overlay.cpp" />
+    <ClCompile Include="source\external\imgui\imgui.cpp" />
+    <ClCompile Include="source\external\imgui\imgui_draw.cpp" />
+    <ClCompile Include="source\external\imgui\imgui_tables.cpp" />
+    <ClCompile Include="source\external\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="source\external\imgui\backends\imgui_impl_dx9.cpp" />
+    <ClCompile Include="source\external\imgui\backends\imgui_impl_win32.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
