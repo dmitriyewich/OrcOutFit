@@ -1,4 +1,4 @@
-// WeaponsOutFit — рисует оружие из инвентаря на теле игрока.
+// OrcOutFit — рисует оружие/объекты/скины на локальном игроке.
 // Использует plugin-sdk и логику BaseModelRender.
 
 #include "plugin.h"
@@ -10,9 +10,11 @@
 #include "CBaseModelInfo.h"
 #include "CVisibilityPlugins.h"
 #include "CPointLights.h"
+#include "CTxdStore.h"
 #include "RenderWare.h"
 #include "eWeaponType.h"
 #include "game_sa/rw/rphanim.h"
+#include "game_sa/rw/rpskin.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -20,6 +22,8 @@
 #include <cstring>
 #include <cmath>
 #include <array>
+#include <string>
+#include <vector>
 
 #include "overlay.h"
 #include "imgui.h"
@@ -32,16 +36,29 @@ using namespace plugin;
 static HMODULE g_module = nullptr;
 static char    g_logPath[MAX_PATH] = {};
 static char    g_iniPath[MAX_PATH] = {};
+static char    g_gameObjDir[MAX_PATH] = {};
+static char    g_gameSkinDir[MAX_PATH] = {};
 
 static void LogInit() {
     char modPath[MAX_PATH] = {};
     GetModuleFileNameA(g_module, modPath, MAX_PATH);
+    char moduleDir[MAX_PATH] = {};
+    _snprintf_s(moduleDir, _TRUNCATE, "%s", modPath);
+    char* slash = strrchr(moduleDir, '\\');
+    if (!slash) slash = strrchr(moduleDir, '/');
+    if (slash) *slash = 0;
+
     char* dot = strrchr(modPath, '.');
     if (dot) *dot = 0;
     _snprintf_s(g_logPath, _TRUNCATE, "%s.log", modPath);
     _snprintf_s(g_iniPath, _TRUNCATE, "%s.ini", modPath);
+    // Relative to plugin location (modloader-friendly):
+    // <asi-dir>\OrcOutFit\object and <asi-dir>\OrcOutFit\SKINS
+    _snprintf_s(g_gameObjDir, _TRUNCATE, "%s\\OrcOutFit\\object", moduleDir);
+    _snprintf_s(g_gameSkinDir, _TRUNCATE, "%s\\OrcOutFit\\SKINS", moduleDir);
+
     FILE* f = fopen(g_logPath, "w");
-    if (f) { fputs("WeaponsOutFit debug log\n", f); fclose(f); }
+    if (f) { fputs("OrcOutFit debug log\n", f); fclose(f); }
 }
 
 static void Log(const char* fmt, ...) {
@@ -83,6 +100,12 @@ struct WeaponCfg {
 
 static bool g_enabled = true;
 static WeaponCfg g_cfg[64] = {};
+static RpAtomic* InitAtomicCB(RpAtomic* a, void*);
+static bool g_skinModeEnabled = false;
+static bool g_skinHideBasePed = true;
+static std::string g_skinSelectedName;
+static bool g_skinCanAnimate = false;
+static int  g_skinBindCount = 0;
 
 // Секция INI → индекс оружия. Дефолтные расположения в стиле тактической выкладки.
 // Оси кости (наблюдение): X = вдоль "right", Y = вдоль "up" (spine) / "at" (бедро), Z = "at/up".
@@ -195,13 +218,18 @@ static void LoadConfig() {
             ReadSection(c, sec);
         }
     }
+    g_skinModeEnabled = GetPrivateProfileIntA("SkinMode", "Enabled", 0, g_iniPath) != 0;
+    g_skinHideBasePed = GetPrivateProfileIntA("SkinMode", "HideBasePed", 1, g_iniPath) != 0;
+    char skinName[128] = {};
+    GetPrivateProfileStringA("SkinMode", "Selected", "", skinName, sizeof(skinName), g_iniPath);
+    g_skinSelectedName = skinName;
 }
 
 static void SaveDefaultConfig() {
     if (GetFileAttributesA(g_iniPath) != INVALID_FILE_ATTRIBUTES) return;
     FILE* f = fopen(g_iniPath, "w");
     if (!f) return;
-    fputs("; WeaponsOutFit configuration.\n"
+    fputs("; OrcOutFit configuration.\n"
           "; Bone IDs (RpHAnim NODE IDs):\n"
           ";   1=Root 2=Pelvis 3=Spine1 4=Spine 5=Neck 6=Head\n"
           ";   21=R_Clavicle 22=R_UpperArm 23=R_Forearm 24=R_Hand 25=R_Finger\n"
@@ -228,6 +256,356 @@ static void SaveDefaultConfig() {
             c.scale);
     }
     fclose(f);
+}
+
+// ----------------------------------------------------------------------------
+// Custom objects discovery (game folder) + per-object INI
+// ----------------------------------------------------------------------------
+struct CustomObjectCfg {
+    std::string name;
+    std::string dffPath;
+    std::string txdPath;
+    std::string iniPath;
+    int txdSlot = -1;
+    RwObject* rwObject = nullptr;
+    bool txdMissingLogged = false;
+    bool  enabled = true;
+    int   boneId = BONE_R_THIGH;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    float rx = 0.0f, ry = 0.0f, rz = 0.0f;
+    float scale = 1.0f;
+};
+
+static std::vector<CustomObjectCfg> g_customObjects;
+
+struct CustomSkinCfg {
+    std::string name;
+    std::string dffPath;
+    std::string txdPath;
+    int txdSlot = -1;
+    RwObject* rwObject = nullptr;
+    bool txdMissingLogged = false;
+};
+static std::vector<CustomSkinCfg> g_customSkins;
+static int g_uiSkinIdx = 0;
+
+static std::string JoinPath(const std::string& a, const std::string& b) {
+    if (a.empty()) return b;
+    if (a.back() == '\\' || a.back() == '/') return a + b;
+    return a + "\\" + b;
+}
+
+static bool FileExistsA(const char* p) {
+    DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static std::string BaseNameNoExt(const std::string& file) {
+    size_t slash = file.find_last_of("\\/");
+    size_t start = (slash == std::string::npos) ? 0 : (slash + 1);
+    size_t dot = file.find_last_of('.');
+    if (dot == std::string::npos || dot < start) dot = file.size();
+    return file.substr(start, dot - start);
+}
+
+static std::string LowerExt(const std::string& file) {
+    size_t dot = file.find_last_of('.');
+    if (dot == std::string::npos) return {};
+    std::string ext = file.substr(dot);
+    for (char& c : ext) {
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    }
+    return ext;
+}
+
+static std::string ToLowerAscii(std::string s) {
+    for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return s;
+}
+
+static std::string FindBestTxdPath(const std::string& dir, const std::string& base) {
+    // 1) strict same-base match (case-insensitive)
+    std::string mask = JoinPath(dir, "*.*");
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return {};
+
+    const std::string baseLo = ToLowerAscii(base);
+    std::string fallbackSingle;
+    int txdCount = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::string fname = fd.cFileName;
+        if (LowerExt(fname) != ".txd") continue;
+        txdCount++;
+        const std::string fbase = BaseNameNoExt(fname);
+        if (ToLowerAscii(fbase) == baseLo) {
+            FindClose(h);
+            return JoinPath(dir, fname);
+        }
+        if (fallbackSingle.empty()) fallbackSingle = JoinPath(dir, fname);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    // 2) if there is exactly one TXD in folder, use it as fallback
+    if (txdCount == 1) return fallbackSingle;
+    return {};
+}
+
+static void CreateDefaultObjectIniIfMissing(const std::string& iniPath, const std::string& baseName) {
+    if (FileExistsA(iniPath.c_str())) return;
+    FILE* f = fopen(iniPath.c_str(), "w");
+    if (!f) return;
+    fprintf(f,
+        "; OrcOutFit custom object config for %s\n"
+        "; Generated automatically from object folder scan.\n\n"
+        "[Main]\n"
+        "Enabled=1\n"
+        "Bone=%d\n"
+        "OffsetX=0.000\nOffsetY=0.000\nOffsetZ=0.000\n"
+        "RotationX=0.0\nRotationY=0.0\nRotationZ=0.0\n"
+        "Scale=1.000\n",
+        baseName.c_str(), BONE_R_THIGH);
+    fclose(f);
+}
+
+static void LoadObjectCfgFromIni(CustomObjectCfg& o) {
+    char buf[64];
+    auto F = [&](const char* key, float def)->float{
+        GetPrivateProfileStringA("Main", key, "", buf, sizeof(buf), o.iniPath.c_str());
+        if (!buf[0]) return def;
+        return (float)atof(buf);
+    };
+    o.enabled = GetPrivateProfileIntA("Main", "Enabled", o.enabled ? 1 : 0, o.iniPath.c_str()) != 0;
+    o.boneId  = GetPrivateProfileIntA("Main", "Bone", o.boneId, o.iniPath.c_str());
+    o.x = F("OffsetX", o.x);
+    o.y = F("OffsetY", o.y);
+    o.z = F("OffsetZ", o.z);
+    o.rx = F("RotationX", o.rx / D2R) * D2R;
+    o.ry = F("RotationY", o.ry / D2R) * D2R;
+    o.rz = F("RotationZ", o.rz / D2R) * D2R;
+    o.scale = F("Scale", o.scale);
+}
+
+static void DestroyCustomObjectInstance(CustomObjectCfg& o) {
+    if (!o.rwObject) return;
+    if (o.rwObject->type == rpCLUMP) {
+        RpClumpDestroy(reinterpret_cast<RpClump*>(o.rwObject));
+    } else if (o.rwObject->type == rpATOMIC) {
+        auto* a = reinterpret_cast<RpAtomic*>(o.rwObject);
+        RwFrame* f = RpAtomicGetFrame(a);
+        RpAtomicDestroy(a);
+        if (f) RwFrameDestroy(f);
+    }
+    o.rwObject = nullptr;
+}
+
+static void DestroyCustomSkinInstance(CustomSkinCfg& s) {
+    if (!s.rwObject) return;
+    if (s.rwObject->type == rpCLUMP) {
+        RpClumpDestroy(reinterpret_cast<RpClump*>(s.rwObject));
+    } else if (s.rwObject->type == rpATOMIC) {
+        auto* a = reinterpret_cast<RpAtomic*>(s.rwObject);
+        RwFrame* f = RpAtomicGetFrame(a);
+        RpAtomicDestroy(a);
+        if (f) RwFrameDestroy(f);
+    }
+    s.rwObject = nullptr;
+}
+
+static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
+    if (o.rwObject) return true;
+    if (!FileExistsA(o.dffPath.c_str())) return false;
+    if (o.txdPath.empty() || !FileExistsA(o.txdPath.c_str())) {
+        if (!o.txdMissingLogged) {
+            o.txdMissingLogged = true;
+            Log("custom txd missing for '%s' (dff=%s)", o.name.c_str(), o.dffPath.c_str());
+        }
+        return false;
+    }
+
+    int txdSlot = CTxdStore::FindTxdSlot(o.name.c_str());
+    if (txdSlot == -1) txdSlot = CTxdStore::AddTxdSlot(o.name.c_str());
+    if (txdSlot == -1) return false;
+    bool txdOk = false;
+    RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)o.txdPath.c_str());
+    if (txdStream) {
+        txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
+        RwStreamClose(txdStream, nullptr);
+    }
+    if (!txdOk) {
+        if (!o.txdMissingLogged) {
+            o.txdMissingLogged = true;
+            Log("txd load failed for '%s': %s", o.name.c_str(), o.txdPath.c_str());
+        }
+        return false;
+    }
+    o.txdSlot = txdSlot;
+    CTxdStore::PushCurrentTxd();
+    CTxdStore::SetCurrentTxd(txdSlot);
+
+    RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)o.dffPath.c_str());
+    if (!stream) { CTxdStore::PopCurrentTxd(); return false; }
+
+    bool ok = false;
+    if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr)) {
+        RpClump* readClump = RpClumpStreamRead(stream);
+        if (readClump) {
+            o.rwObject = reinterpret_cast<RwObject*>(readClump);
+            RpClumpForAllAtomics(readClump, InitAtomicCB, nullptr);
+            ok = true;
+        }
+    }
+    RwStreamClose(stream, nullptr);
+    CTxdStore::PopCurrentTxd();
+    return ok;
+}
+
+static bool EnsureCustomSkinLoaded(CustomSkinCfg& s) {
+    if (s.rwObject) return true;
+    if (!FileExistsA(s.dffPath.c_str())) return false;
+    if (s.txdPath.empty() || !FileExistsA(s.txdPath.c_str())) {
+        if (!s.txdMissingLogged) {
+            s.txdMissingLogged = true;
+            Log("skin txd missing for '%s' (dff=%s)", s.name.c_str(), s.dffPath.c_str());
+        }
+        return false;
+    }
+
+    int txdSlot = CTxdStore::FindTxdSlot(s.name.c_str());
+    if (txdSlot == -1) txdSlot = CTxdStore::AddTxdSlot(s.name.c_str());
+    if (txdSlot == -1) return false;
+    bool txdOk = false;
+    RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)s.txdPath.c_str());
+    if (txdStream) {
+        txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
+        RwStreamClose(txdStream, nullptr);
+    }
+    if (!txdOk) return false;
+    s.txdSlot = txdSlot;
+
+    CTxdStore::PushCurrentTxd();
+    CTxdStore::SetCurrentTxd(txdSlot);
+    RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)s.dffPath.c_str());
+    if (!stream) { CTxdStore::PopCurrentTxd(); return false; }
+    bool ok = false;
+    if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr)) {
+        RpClump* c = RpClumpStreamRead(stream);
+        if (c) {
+            s.rwObject = reinterpret_cast<RwObject*>(c);
+            RpClumpForAllAtomics(c, InitAtomicCB, nullptr);
+            ok = true;
+        }
+    }
+    RwStreamClose(stream, nullptr);
+    CTxdStore::PopCurrentTxd();
+    return ok;
+}
+
+static void DiscoverCustomObjectsAndEnsureIni() {
+    for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
+    g_customObjects.clear();
+
+    DWORD attr = GetFileAttributesA(g_gameObjDir);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        Log("custom objects dir missing: %s", g_gameObjDir);
+        return;
+    }
+
+    std::string dir = g_gameObjDir;
+    std::string mask = JoinPath(dir, "*.*");
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        Log("custom objects scan failed: %s", dir.c_str());
+        return;
+    }
+
+    int foundDff = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::string fname = fd.cFileName;
+        if (LowerExt(fname) != ".dff") continue;
+
+        const std::string base = BaseNameNoExt(fname);
+        CustomObjectCfg o;
+        o.name = base;
+        o.dffPath = JoinPath(dir, base + ".dff");
+        o.txdPath = FindBestTxdPath(dir, base);
+        o.iniPath = JoinPath(dir, base + ".ini");
+        CreateDefaultObjectIniIfMissing(o.iniPath, base);
+        LoadObjectCfgFromIni(o);
+        if (o.txdPath.empty()) {
+            Log("warning: no matching txd for %s.dff in %s", base.c_str(), dir.c_str());
+        }
+        g_customObjects.push_back(o);
+        foundDff++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    Log("custom objects discovered: %d (dir=%s)", foundDff, dir.c_str());
+}
+
+static void DiscoverCustomSkins() {
+    for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+    g_customSkins.clear();
+    DWORD attr = GetFileAttributesA(g_gameSkinDir);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        Log("skins dir missing: %s", g_gameSkinDir);
+        return;
+    }
+    std::string dir = g_gameSkinDir;
+    std::string mask = JoinPath(dir, "*.*");
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::string fname = fd.cFileName;
+        if (LowerExt(fname) != ".dff") continue;
+        const std::string base = BaseNameNoExt(fname);
+        CustomSkinCfg s;
+        s.name = base;
+        s.dffPath = JoinPath(dir, base + ".dff");
+        s.txdPath = FindBestTxdPath(dir, base);
+        g_customSkins.push_back(s);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    Log("custom skins discovered: %d (dir=%s)", (int)g_customSkins.size(), g_gameSkinDir);
+    if (!g_skinSelectedName.empty()) {
+        for (int i = 0; i < (int)g_customSkins.size(); i++) {
+            if (ToLowerAscii(g_customSkins[i].name) == ToLowerAscii(g_skinSelectedName)) {
+                g_uiSkinIdx = i;
+                break;
+            }
+        }
+    }
+    if (g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
+}
+
+static void SaveCustomObjectIni(const CustomObjectCfg& o) {
+    auto W = [&](const char* key, const char* v) {
+        WritePrivateProfileStringA("Main", key, v, o.iniPath.c_str());
+    };
+    char buf[64];
+    _snprintf_s(buf, _TRUNCATE, "%d", o.enabled ? 1 : 0); W("Enabled", buf);
+    _snprintf_s(buf, _TRUNCATE, "%d", o.boneId);          W("Bone", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", o.x);             W("OffsetX", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", o.y);             W("OffsetY", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", o.z);             W("OffsetZ", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", o.rx / D2R);      W("RotationX", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", o.ry / D2R);      W("RotationY", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", o.rz / D2R);      W("RotationZ", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", o.scale);         W("Scale", buf);
+}
+
+static void SaveSkinModeIni() {
+    char buf[64];
+    _snprintf_s(buf, _TRUNCATE, "%d", g_skinModeEnabled ? 1 : 0);
+    WritePrivateProfileStringA("SkinMode", "Enabled", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", g_skinHideBasePed ? 1 : 0);
+    WritePrivateProfileStringA("SkinMode", "HideBasePed", buf, g_iniPath);
+    WritePrivateProfileStringA("SkinMode", "Selected", g_skinSelectedName.c_str(), g_iniPath);
 }
 
 // ----------------------------------------------------------------------------
@@ -468,10 +846,177 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
     }
 }
 
+static bool EnsureCustomInstance(CustomObjectCfg& o, CPed* ped) {
+    if (!o.enabled || o.boneId == 0) {
+        DestroyCustomObjectInstance(o);
+        return false;
+    }
+    if (!EnsureCustomModelLoaded(o)) return false;
+    (void)ped;
+    return o.rwObject != nullptr;
+}
+
+static void RenderCustomObject(CPed* ped, CustomObjectCfg& o) {
+    if (!o.rwObject) return;
+    RwMatrix* bone = GetBoneMatrix(ped, o.boneId);
+    if (!bone) return;
+
+    RpAtomic* atomic = nullptr;
+    RwFrame* frame = nullptr;
+    if (o.rwObject->type == rpATOMIC) {
+        atomic = reinterpret_cast<RpAtomic*>(o.rwObject);
+        frame = RpAtomicGetFrame(atomic);
+    } else if (o.rwObject->type == rpCLUMP) {
+        frame = RpClumpGetFrame(reinterpret_cast<RpClump*>(o.rwObject));
+    }
+    if (!frame) return;
+
+    RwMatrix mtx{};
+    std::memcpy(&mtx, bone, sizeof(RwMatrix));
+    ApplyOffset(&mtx, o.x, o.y, o.z);
+    RotateMatrix(&mtx, o.rx, o.ry, o.rz);
+    std::memcpy(RwFrameGetMatrix(frame), &mtx, sizeof(RwMatrix));
+    RwMatrixUpdate(RwFrameGetMatrix(frame));
+    if (o.scale != 1.0f) {
+        RwV3d s = { o.scale, o.scale, o.scale };
+        RwMatrixScale(RwFrameGetMatrix(frame), &s, rwCOMBINEPRECONCAT);
+    }
+    RwFrameUpdateObjects(frame);
+
+    CVector lightPos = { bone->pos.x, bone->pos.y, bone->pos.z };
+    float lightOut = 0.0f;
+    float light = CPointLights::GenerateLightsAffectingObject(&lightPos, &lightOut, nullptr) * 0.5f;
+    SetLightColoursForPedsCarsAndObjects(light);
+
+    if (o.rwObject->type == rpCLUMP) {
+        auto* clump = reinterpret_cast<RpClump*>(o.rwObject);
+        RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
+        RpClumpRender(clump);
+    } else {
+        PrepAtomicCB(atomic, nullptr);
+        atomic->renderCallBack(atomic);
+    }
+}
+
+static CustomSkinCfg* GetSelectedSkin() {
+    if (g_customSkins.empty()) return nullptr;
+    if (!g_skinSelectedName.empty()) {
+        for (auto& s : g_customSkins) {
+            if (ToLowerAscii(s.name) == ToLowerAscii(g_skinSelectedName)) return &s;
+        }
+    }
+    if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
+    g_skinSelectedName = g_customSkins[g_uiSkinIdx].name;
+    return &g_customSkins[g_uiSkinIdx];
+}
+
+static void CopySkinHierarchyPose(CPed* player, RpClump* skinClump) {
+    RpHAnimHierarchy* src = GetAnimHierarchyFromSkinClump(player->m_pRwClump);
+    RpHAnimHierarchy* dst = GetAnimHierarchyFromSkinClump(skinClump);
+    if (!src || !dst || !src->pMatrixArray || !dst->pMatrixArray) return;
+    for (int i = 0; i < src->numNodes; i++) {
+        int nodeId = src->pNodeInfo ? src->pNodeInfo[i].nodeID : -1;
+        if (nodeId < 0) continue;
+        int di = RpHAnimIDGetIndex(dst, nodeId);
+        if (di < 0 || di >= dst->numNodes) continue;
+        dst->pMatrixArray[di] = src->pMatrixArray[i];
+    }
+    RpHAnimHierarchyUpdateMatrices(dst);
+
+    // Some skin clumps render from frame matrices directly; mirror frame pose by node ID too.
+    if (src->pNodeInfo && dst->pNodeInfo) {
+        for (int i = 0; i < src->numNodes; i++) {
+            const int nodeId = src->pNodeInfo[i].nodeID;
+            const int di = RpHAnimIDGetIndex(dst, nodeId);
+            if (di < 0 || di >= dst->numNodes) continue;
+            RwFrame* sf = src->pNodeInfo[i].pFrame;
+            RwFrame* df = dst->pNodeInfo[di].pFrame;
+            if (!sf || !df) continue;
+            std::memcpy(RwFrameGetMatrix(df), RwFrameGetMatrix(sf), sizeof(RwMatrix));
+            RwMatrixUpdate(RwFrameGetMatrix(df));
+        }
+    }
+}
+
+static RpAtomic* BindSkinHierarchyCB(RpAtomic* a, void* data) {
+    if (!a || !data) return a;
+    if (RpSkinAtomicGetSkin(a)) {
+        RpSkinAtomicSetHAnimHierarchy(a, reinterpret_cast<RpHAnimHierarchy*>(data));
+        RpSkinAtomicSetType(a, rpSKINTYPEGENERIC);
+        g_skinBindCount++;
+    }
+    return a;
+}
+
+static void RenderSelectedSkin(CPlayerPed* player) {
+    if (!g_skinModeEnabled || !player || !player->m_pRwClump) return;
+    CustomSkinCfg* sel = GetSelectedSkin();
+    if (!sel) return;
+    if (!EnsureCustomSkinLoaded(*sel)) {
+        static int logCooldown = 0;
+        if ((logCooldown++ % 180) == 0) Log("skin load pending/failed: %s", sel->name.c_str());
+        return;
+    }
+    if (!sel->rwObject || sel->rwObject->type != rpCLUMP) {
+        static bool onceBadType = false;
+        if (!onceBadType) { onceBadType = true; Log("skin bad rwObject/type for %s", sel->name.c_str()); }
+        return;
+    }
+    RpClump* clump = reinterpret_cast<RpClump*>(sel->rwObject);
+    RwFrame* srcFrame = RpClumpGetFrame(player->m_pRwClump);
+    RwFrame* dstFrame = RpClumpGetFrame(clump);
+    if (!srcFrame || !dstFrame) {
+        static bool onceNoFrame = false;
+        if (!onceNoFrame) { onceNoFrame = true; Log("skin frame missing src=%p dst=%p", srcFrame, dstFrame); }
+        return;
+    }
+    static bool loggedSkinInfo = false;
+    if (!loggedSkinInfo) {
+        loggedSkinInfo = true;
+        RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(player->m_pRwClump);
+        RpHAnimHierarchy* dstH = GetAnimHierarchyFromSkinClump(clump);
+        int skinnedAtomics = 0;
+        RpClumpForAllAtomics(clump, +[](RpAtomic* a, void* d)->RpAtomic* {
+            if (RpSkinAtomicGetSkin(a)) (*reinterpret_cast<int*>(d))++;
+            return a;
+        }, &skinnedAtomics);
+        Log("skin selected=%s srcH=%p dstH=%p srcNodes=%d dstNodes=%d skinAtomics=%d",
+            sel->name.c_str(), srcH, dstH, srcH ? srcH->numNodes : -1, dstH ? dstH->numNodes : -1, skinnedAtomics);
+    }
+    std::memcpy(RwFrameGetMatrix(dstFrame), RwFrameGetMatrix(srcFrame), sizeof(RwMatrix));
+    RwMatrixUpdate(RwFrameGetMatrix(dstFrame));
+    RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(player->m_pRwClump);
+    g_skinBindCount = 0;
+    if (srcH) RpClumpForAllAtomics(clump, BindSkinHierarchyCB, srcH);
+    g_skinCanAnimate = (srcH && g_skinBindCount > 0);
+    if (g_skinCanAnimate) {
+        CopySkinHierarchyPose(player, clump);
+    } else {
+        static bool loggedNoSkinHierarchy = false;
+        if (!loggedNoSkinHierarchy) {
+            loggedNoSkinHierarchy = true;
+            Log("selected skin cannot bind anim hierarchy (srcH=%p bindCount=%d)", srcH, g_skinBindCount);
+        }
+    }
+    RwFrameUpdateObjects(dstFrame);
+    RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
+    RpClumpRender(clump);
+}
+
 static void SyncAndRender() {
-    if (!g_enabled) { ClearAll(); return; }
+    if (!g_enabled) {
+        ClearAll();
+        for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
+        for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+        return;
+    }
     CPlayerPed* player = FindPlayerPed(0);
-    if (!player) { ClearAll(); return; }
+    if (!player) {
+        ClearAll();
+        for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
+        for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+        return;
+    }
 
     unsigned char curSlot = player->m_nSelectedWepSlot;
     int curType = 0;
@@ -507,6 +1052,10 @@ static void SyncAndRender() {
     // Рендер.
     int active = 0;
     for (int i = 0; i < kMax; i++) if (g_rendered[i].active) active++;
+    for (auto& o : g_customObjects) {
+        if (EnsureCustomInstance(o, player)) active++;
+    }
+    if (g_skinModeEnabled && GetSelectedSkin()) active++;
     if (!active) return;
 
     int oldCull, oldZT, oldZW, oldShade, oldFog;
@@ -527,6 +1076,11 @@ static void SyncAndRender() {
         if (!g_rendered[i].active) continue;
         RenderOneWeapon(player, g_rendered[i]);
     }
+    for (auto& o : g_customObjects) {
+        if (!o.enabled || o.boneId == 0) continue;
+        RenderCustomObject(player, o);
+    }
+    RenderSelectedSkin(player);
 
     RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(oldCull));
     RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(oldZT));
@@ -564,6 +1118,36 @@ static const BoneOption kBones[] = {
 };
 
 static int g_uiWeaponIdx = WEAPONTYPE_M4;
+static int g_uiCustomIdx = 0;
+
+struct HiddenMatState { RpMaterial* mat; RwRGBA color; };
+static std::vector<HiddenMatState> g_hiddenMats;
+struct HiddenAtomicState { RpAtomic* atomic; RpAtomicCallBackRender cb; };
+static std::vector<HiddenAtomicState> g_hiddenAtomics;
+
+static RpMaterial* HideMatCB(RpMaterial* m, void*) {
+    if (!m) return m;
+    for (const auto& it : g_hiddenMats) if (it.mat == m) return m;
+    g_hiddenMats.push_back({ m, m->color });
+    m->color.alpha = 0;
+    return m;
+}
+
+static RpAtomic* HideAtomicCB(RpAtomic* a, void*) {
+    if (a && a->geometry) RpGeometryForAllMaterials(a->geometry, HideMatCB, nullptr);
+    return a;
+}
+
+static RpAtomic* NoRenderAtomicCB(RpAtomic* a) {
+    return a;
+}
+
+static RpAtomic* CaptureAndHideAtomicCB(RpAtomic* a, void*) {
+    if (!a) return a;
+    g_hiddenAtomics.push_back({ a, RpAtomicGetRenderCallBack(a) });
+    RpAtomicSetRenderCallBack(a, NoRenderAtomicCB);
+    return a;
+}
 
 static int BoneComboIndex(int boneId) {
     for (int i = 0; i < IM_ARRAYSIZE(kBones); i++)
@@ -577,7 +1161,7 @@ static void DrawUI() {
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 400, 120), ImGuiCond_FirstUseEver);
 
     bool open = true;
-    if (!ImGui::Begin("weapons on ped // WeaponsOutFit [F7]",
+    if (!ImGui::Begin("weapons on ped // OrcOutFit [F7]",
                       &open,
                       ImGuiWindowFlags_NoCollapse))
     { ImGui::End(); if (!open) overlay::SetOpen(false); return; }
@@ -585,7 +1169,16 @@ static void DrawUI() {
 
     ImGui::Checkbox("Plugin enabled", &g_enabled);
     ImGui::SameLine();
-    if (ImGui::SmallButton("Reload INI")) LoadConfig();
+    if (ImGui::SmallButton("Reload INI")) {
+        LoadConfig();
+        DiscoverCustomObjectsAndEnsureIni();
+        DiscoverCustomSkins();
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Rescan Objects")) {
+        DiscoverCustomObjectsAndEnsureIni();
+        if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
+    }
 
     ImGui::Separator();
 
@@ -664,14 +1257,136 @@ static void DrawUI() {
     ImGui::TextDisabled("F7 toggle");
 
     ImGui::End();
+
+    // separate window for custom object configs from game folder
+    {
+        ImGui::SetNextWindowSize(ImVec2(430, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 450, 460), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("custom objects // OrcOutFit", nullptr, ImGuiWindowFlags_NoCollapse)) {
+            ImGui::End();
+            return;
+        }
+
+        ImGui::TextUnformatted("Folder: C:\\Games\\SAMP\\GTA San Andreas\\OrcOutFit\\object");
+        ImGui::Separator();
+
+        if (g_customObjects.empty()) {
+            ImGui::TextDisabled("No *.dff objects found.");
+            if (ImGui::Button("Rescan", ImVec2(100, 0))) {
+                DiscoverCustomObjectsAndEnsureIni();
+            }
+            ImGui::End();
+            return;
+        }
+
+        if (g_uiCustomIdx < 0 || g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
+        auto& obj = g_customObjects[g_uiCustomIdx];
+
+        char preview[128];
+        _snprintf_s(preview, _TRUNCATE, "%s [%d/%d]", obj.name.c_str(), g_uiCustomIdx + 1, (int)g_customObjects.size());
+        if (ImGui::BeginCombo("object", preview)) {
+            for (int i = 0; i < (int)g_customObjects.size(); i++) {
+                const bool selected = (i == g_uiCustomIdx);
+                if (ImGui::Selectable(g_customObjects[i].name.c_str(), selected)) g_uiCustomIdx = i;
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::Checkbox("show", &obj.enabled);
+
+        int bi = BoneComboIndex(obj.boneId);
+        const char* bonePreview = kBones[bi].label;
+        if (ImGui::BeginCombo("bone", bonePreview)) {
+            for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
+                if (ImGui::Selectable(kBones[i].label, i == bi))
+                    obj.boneId = kBones[i].id;
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::PushItemWidth(90);
+        ImGui::DragFloat("##cox", &obj.x, 0.005f, -2.0f, 2.0f, "%.3f"); ImGui::SameLine();
+        ImGui::DragFloat("##coy", &obj.y, 0.005f, -2.0f, 2.0f, "%.3f"); ImGui::SameLine();
+        ImGui::DragFloat("##coz", &obj.z, 0.005f, -2.0f, 2.0f, "%.3f"); ImGui::SameLine();
+        ImGui::TextUnformatted("offset");
+
+        float rxd = obj.rx / D2R, ryd = obj.ry / D2R, rzd = obj.rz / D2R;
+        if (ImGui::DragFloat("##crx", &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.rx = rxd * D2R;
+        ImGui::SameLine();
+        if (ImGui::DragFloat("##cry", &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.ry = ryd * D2R;
+        ImGui::SameLine();
+        if (ImGui::DragFloat("##crz", &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.rz = rzd * D2R;
+        ImGui::SameLine();
+        ImGui::TextUnformatted("rot");
+
+        ImGui::DragFloat("##cscale", &obj.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("scale");
+        ImGui::PopItemWidth();
+
+        ImGui::Separator();
+        if (ImGui::Button("SAVE OBJECT", ImVec2(120, 0))) {
+            SaveCustomObjectIni(obj);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("SAVE ALL OBJECTS", ImVec2(150, 0))) {
+            for (const auto& it : g_customObjects) SaveCustomObjectIni(it);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("RESCAN", ImVec2(90, 0))) {
+            DiscoverCustomObjectsAndEnsureIni();
+            if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
+        }
+
+        ImGui::End();
+    }
+
+    {
+        ImGui::SetNextWindowSize(ImVec2(430, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 450, 760), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("skins mode // OrcOutFit", nullptr, ImGuiWindowFlags_NoCollapse)) {
+            ImGui::End();
+            return;
+        }
+        ImGui::TextUnformatted("Folder: C:\\Games\\SAMP\\GTA San Andreas\\OrcOutFit\\SKINS");
+        ImGui::Checkbox("Skin mode enabled", &g_skinModeEnabled);
+        ImGui::SameLine();
+        ImGui::Checkbox("Hide base ped", &g_skinHideBasePed);
+        ImGui::Separator();
+
+        if (g_customSkins.empty()) {
+            ImGui::TextDisabled("No *.dff skins found.");
+        } else {
+            if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
+            char previewSkin[128];
+            _snprintf_s(previewSkin, _TRUNCATE, "%s [%d/%d]", g_customSkins[g_uiSkinIdx].name.c_str(), g_uiSkinIdx + 1, (int)g_customSkins.size());
+            if (ImGui::BeginCombo("skin", previewSkin)) {
+                for (int i = 0; i < (int)g_customSkins.size(); i++) {
+                    if (ImGui::Selectable(g_customSkins[i].name.c_str(), i == g_uiSkinIdx)) {
+                        g_uiSkinIdx = i;
+                        g_skinSelectedName = g_customSkins[i].name;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+
+        if (ImGui::Button("SAVE SKIN MODE", ImVec2(140, 0))) SaveSkinModeIni();
+        ImGui::SameLine();
+        if (ImGui::Button("RESCAN SKINS", ImVec2(120, 0))) {
+            DiscoverCustomSkins();
+            if (g_uiSkinIdx < (int)g_customSkins.size()) g_skinSelectedName = g_customSkins[g_uiSkinIdx].name;
+        }
+        ImGui::End();
+    }
 }
 
 // ----------------------------------------------------------------------------
 // Plugin entry
 // ----------------------------------------------------------------------------
-class WeaponsOutFit {
+class OrcOutFit {
 public:
-    WeaponsOutFit() {
+    OrcOutFit() {
         // LoadConfig откладываем до первого кадра: к этому моменту DllMain уже
         // проставит g_iniPath через LogInit().
         Events::initRwEvent.after += [] {
@@ -684,6 +1399,8 @@ public:
                 SetupDefaults();
                 SaveDefaultConfig();
                 LoadConfig();
+                DiscoverCustomObjectsAndEnsureIni();
+                DiscoverCustomSkins();
                 overlay::SetDrawCallback(&DrawUI);
                 Log("Plugin init. Enabled=%d", (int)g_enabled);
             }
@@ -695,6 +1412,28 @@ public:
             }
             overlay::DrawFrame();
         };
+        Events::pedRenderEvent.before += [](CPed* ped) {
+            if (!g_skinModeEnabled || !g_skinHideBasePed || !g_skinCanAnimate) return;
+            CPlayerPed* player = FindPlayerPed(0);
+            if (!player || ped != player || !ped->m_pRwClump) return;
+            g_hiddenMats.clear();
+            g_hiddenAtomics.clear();
+            RpClumpForAllAtomics(ped->m_pRwClump, CaptureAndHideAtomicCB, nullptr);
+            RpClumpForAllAtomics(ped->m_pRwClump, HideAtomicCB, nullptr);
+            static int hideLogTick = 0;
+            if ((hideLogTick++ % 300) == 0) {
+                Log("skin hide base ped: atomics=%d mats=%d", (int)g_hiddenAtomics.size(), (int)g_hiddenMats.size());
+            }
+        };
+        Events::pedRenderEvent.after += [](CPed* ped) {
+            if (!g_skinModeEnabled || !g_skinHideBasePed || !g_skinCanAnimate) return;
+            CPlayerPed* player = FindPlayerPed(0);
+            if (!player || ped != player) return;
+            for (auto& it : g_hiddenAtomics) if (it.atomic) RpAtomicSetRenderCallBack(it.atomic, it.cb);
+            g_hiddenAtomics.clear();
+            for (auto& it : g_hiddenMats) if (it.mat) it.mat->color = it.color;
+            g_hiddenMats.clear();
+        };
         Events::d3dResetEvent += [] { overlay::OnResetBefore(); overlay::OnResetAfter(); };
         // При shutdownRwEvent сцена уже частично разобрана, RpClumpDestroy на
         // клонированных материалах падает в CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB
@@ -703,6 +1442,14 @@ public:
         Events::shutdownRwEvent += [] {
             overlay::Shutdown();
             for (int i = 0; i < kMax; i++) g_rendered[i] = {};
+            for (auto& o : g_customObjects) {
+                DestroyCustomObjectInstance(o);
+                o.txdSlot = -1;
+            }
+            for (auto& s : g_customSkins) {
+                DestroyCustomSkinInstance(s);
+                s.txdSlot = -1;
+            }
             // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.
             DWORD oldProt;
             BYTE* p = reinterpret_cast<BYTE*>(0x5D95B0);

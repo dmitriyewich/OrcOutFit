@@ -73,3 +73,102 @@
   `imgui_demo.cpp` (уже не включён), но таблицы используются в будущих
   настройках. При необходимости — `/O1` вместо `MaxSpeed` или динамический
   CRT (`MultiThreadedDLL`) уменьшит размер ценой зависимости от vcruntime.
+- Добавлено автообнаружение кастомных объектов из папки игры
+  `C:\Games\SAMP\GTA San Andreas\WeaponsOutFit`:
+  сканируются все `*.dff`, для каждого объекта формируется запись в runtime-
+  списке и автоматически создаётся отдельный INI рядом с моделью
+  (`<name>.dff` -> `<name>.ini`), если INI отсутствует.
+- Формат авто-INI: секция `[Main]` с `Enabled`, `Bone`, `Offset*`,
+  `Rotation*`, `Scale` (дефолтная кость — `BONE_R_THIGH`).
+- Инициализация скана подключена в первый `drawingEvent` после загрузки
+  основного конфига плагина.
+- Реализован реальный рендер кастомных объектов (как в `BaseModelRender`) без
+  сущностей/пулов: для каждого найденного `*.dff` объект загружается через
+  plugin-sdk (`CTxdStore` + `CFileLoader::SetRelatedModelInfoCB` в
+  `CAtomicModelInfo`), затем создаётся `CreateInstance(RwMatrix*)` и рендерится
+  из `drawingEvent` через `RpClumpRender`/atomic callback.
+- Для каждого кастомного объекта читается собственный `<name>.ini`
+  (секция `[Main]`: `Enabled`, `Bone`, `Offset*`, `Rotation*`, `Scale`), а
+  кнопка `Reload INI` теперь перезагружает и основной конфиг, и конфиги
+  кастомных объектов из папки игры.
+- Добавлена синхронная очистка инстансов кастомных объектов при отключении
+  плагина, потере игрока и в `shutdownRwEvent`.
+- ImGui расширен отдельным окном `custom objects // WeaponsOutFit`:
+  выбор обнаруженного объекта (`*.dff`), редактирование `Enabled/Bone`,
+  `OffsetX/Y/Z`, `RotationX/Y/Z`, `Scale`, сохранение в его `<name>.ini`
+  (`SAVE OBJECT` / `SAVE ALL OBJECTS`) и перескан папки (`RESCAN`).
+- В основном окне добавлена кнопка `Rescan Objects`; `Reload INI` теперь также
+  пересканирует и перечитывает конфиги кастомных объектов.
+- Исправлен поиск `.txd` для кастомных `*.dff`: вместо жёсткого `<base>.txd`
+  добавлен поиск по папке с case-insensitive совпадением basename.
+  Fallback: если в папке ровно один `.txd`, используется он.
+  При отсутствии подходящего `.txd` объект пропускается с единичной записью в лог.
+- Устранён источник ошибки `...Holster.txd cannot be found`: загрузка TXD
+  переведена на потоковый путь (через `RwStreamOpen` + `CTxdStore::LoadTxd(slot, stream)`),
+  что обходит проблемный файловый резолв `LoadTxd(slot, filename)` с абсолютными путями.
+- После краша в `CAutomobile::SetupSuspensionLines` убран рискованный путь
+  `CAtomicModelInfo + CFileLoader::SetRelatedModelInfoCB` для кастом-объектов.
+  Кастомный `dff` теперь грузится и хранится как `RpClump` напрямую, без
+  регистрации model info в игровых структурах, и рендерится напрямую на кости.
+- Изменён путь скана кастом-объектов на
+  `C:\Games\SAMP\GTA San Andreas\WeaponsOutFit\object`.
+- Добавлен прототип `SKINS`-режима для локального игрока:
+  скан папки `C:\Games\SAMP\GTA San Andreas\WeaponsOutFit\SKINS`,
+  загрузка `dff/txd` в RW, выбор активного скина, рендер выбранного clump в
+  `drawingEvent`, копирование позы по `RpHAnimHierarchy` из локального ped в
+  кастомный clump.
+- Добавлено скрытие базового локального скина в `pedRenderEvent.before/after`
+  (через временный alpha=0 материалов с восстановлением после рендера).
+- Добавлен INI-блок `[SkinMode]` в `WeaponsOutFit.ini`:
+  `Enabled`, `HideBasePed`, `Selected`, плюс UI-кнопка сохранения.
+- Исправления `SKINS`-режима после первого прогона:
+  - анимация теперь копируется не по индексу матриц, а по `nodeID` через
+    `RpHAnimIDGetIndex` (source->destination), затем `RpHAnimHierarchyUpdateMatrices`;
+  - скрытие базового локального ped усилено: перед его рендером сохраняются
+    и временно подменяются atomic render callbacks (`NoRenderAtomicCB`), после
+    рендера callbacks восстанавливаются; alpha-скрытие материалов оставлено.
+  - добавлены диагностические записи в `WeaponsOutFit.log` по состоянию
+    скрытия ped и загрузки/рендера выбранного skin clump.
+- Дополнительный фикс анимации кастомного skin:
+  после обновления `dst->pMatrixArray` добавлено зеркалирование позы прямо в
+  `RwFrame` узлов по `nodeID` (`src pNodeInfo[i].pFrame` -> `dst pNodeInfo[di].pFrame`)
+  с `RwMatrixUpdate`. Это покрывает clump-и, которые рендерятся по frame-матрицам
+  и ранее оставались в T-pose.
+- Лог расширен: добавлен отчёт о количестве найденных скинов и одноразовый лог
+  по выбранному skin (`src/dst hierarchy pointer + numNodes`).
+- По логу выявлено: `dstH == nullptr` у выбранного skin, т.е. в DFF отсутствует
+  skin/hanim hierarchy для анимации. Добавлен guard `g_skinCanAnimate`:
+  базовый ped скрывается только когда у кастомного skin есть валидный hierarchy.
+  При `dstH == nullptr` пишется явный лог о невозможности анимации для этого DFF.
+- Переработан источник анимации для кастомного skin:
+  вместо требования `dstH` у clump внедрена привязка `srcH` локального ped к
+  skinned atomic-ам кастомного clump через `RpSkinAtomicSetHAnimHierarchy` +
+  `RpSkinAtomicSetType(rpSKINTYPEGENERIC)`.
+  `g_skinCanAnimate` теперь определяется по `bindCount>0`.
+- Лог дополнен `skinAtomics` и сообщением о невозможности bind (`srcH/bindCount`).
+- Выполнен ребрендинг проекта на `OrcOutFit`:
+  - target binary: `OrcOutFit.asi` (vcxproj `TargetName`);
+  - runtime файлы автоматически: `OrcOutFit.log` / `OrcOutFit.ini`;
+  - обновлены UI заголовки на `OrcOutFit`;
+  - игровые папки изменены на
+    `C:\Games\SAMP\GTA San Andreas\OrcOutFit\object` и
+    `C:\Games\SAMP\GTA San Andreas\OrcOutFit\SKINS`;
+  - имя проекта в solution отображается как `OrcOutFit`.
+- Файлы проекта физически переименованы:
+  - `WeaponsOutFit.sln` -> `OrcOutFit.sln`
+  - `WeaponsOutFit.vcxproj` -> `OrcOutFit.vcxproj`
+  и ссылка внутри solution обновлена на новый `.vcxproj`.
+- Изолирован `IntDir` для нового имени проекта:
+  `build\obj\$(Configuration)\OrcOutFit\` (убран warning о shared intermediate dir).
+- Для сценария modloader пути к данным переведены на вычисление относительно
+  расположения `OrcOutFit.asi`:
+  - `<asi-dir>\OrcOutFit\object`
+  - `<asi-dir>\OrcOutFit\SKINS`
+  Это позволяет размещать плагин в `modloader\OrcOutFit\...` без хардкода пути
+  к корню игры.
+- Для сценария modloader пути к данным переведены на вычисление относительно
+  расположения `OrcOutFit.asi`:
+  - `<asi-dir>\OrcOutFit\object`
+  - `<asi-dir>\OrcOutFit\SKINS`
+  Это позволяет размещать плагин в `modloader\OrcOutFit\...` без хардкода пути
+  к корню игры.
