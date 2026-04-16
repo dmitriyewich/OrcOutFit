@@ -3,6 +3,7 @@
 #include <string>
 #include <array>
 #include <vector>
+#include <cstdint>
 
 struct RwObject;
 
@@ -43,6 +44,12 @@ struct CustomObjectCfg {
     float x = 0.0f, y = 0.0f, z = 0.0f;
     float rx = 0.0f, ry = 0.0f, rz = 0.0f;
     float scale = 1.0f;
+
+    // Weapon filter: if mask==0 -> render always. Otherwise render only when condition is met.
+    // Bits correspond to eWeaponType (0..63).
+    std::uint64_t weaponMask = 0;
+    bool weaponRequireAll = false;     // false: any selected weapon present; true: all selected weapons present
+    bool hideSelectedWeapons = false;  // when condition is met, hide selected weapon(s) on body
 };
 
 struct CustomSkinCfg {
@@ -58,14 +65,15 @@ struct CustomSkinCfg {
     bool txdMissingLogged = false;
 };
 
-// Overrides for standard ped skin under `OrcOutFit\object\other\<skinName>\`.
+// Overrides for standard ped skin under `OrcOutFit/object/other/<skinName>/`.
 // Keyed by standard ped model key (see `CModelInfo::m_nKey`).
 struct SkinOtherOverrides {
-    std::string skinName;       // folder name under object\other\
-    std::string dirPath;        // ...\OrcOutFit\object\other\<skinName>
-    std::string weaponsIniPath; // ...\OrcOutFit\object\other\<skinName>\weapons.ini
+    std::string skinName;       // folder name under object\\other\\<skinName>
+    std::string dirPath;        // .../OrcOutFit/object/other/<skinName>
+    std::string weaponsIniPath; // .../OrcOutFit/object/other/<skinName>/weapons.ini
 
     bool hasWeaponOverrides = false; // whether weapons.ini exists and was loaded
     std::array<WeaponCfg, 64> weaponCfg = {};
+    std::array<WeaponCfg, 64> weaponCfg2 = {}; // secondary (dual-wield) weapon placement
     std::vector<CustomObjectCfg> objects; // *.dff discovered in the skin folder
 };

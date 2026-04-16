@@ -11,6 +11,7 @@
 - Отображение моделей оружия на выбранной кости (RpHAnim node ID) со смещением/поворотом/масштабом.
 - Оружие в активном слоте (в руках) на теле не дублируется.
 - Секции по имени оружия (например [code]M4[/code]) и резервные секции [code][WeaponNN][/code] для кастомных типов.
+- Dual wield (skills): при прокачке навыка (PRO) и поддержке типа оружия игра может выдавать второй ствол (например для [code]Pistol [22][/code]); плагин умеет рендерить и настраивать вторую копию.
 
 [b]Все педы в радиусе (опционально)[/b]
 - Режим «оружие у всех педов» с ограничением по радиусу от локального игрока.
@@ -19,6 +20,7 @@
 [b]Кастомные объекты[/b]
 - Сканирование [code]*.dff[/code] в папке [code]OrcOutFit\object[/code]
 - Для каждого объекта — свой [code]<имя>.ini[/code]: кость, смещение, поворот, масштаб, вкл/выкл.
+- Можно задать условие «рендерить объект только при наличии выбранного оружия» (и опционально скрывать это оружие на теле).
 
 [b]Кастомные объекты по стандартной модели (скину) ped[/b]
 - Папка [code]OrcOutFit\object\other\<skin>\[/code содержит объекты и настройки для конкретной стандартной модели.
@@ -63,4 +65,44 @@ MSBuild (платформа решения: [b]x86[/b]):
 [code]"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OrcOutFit.sln /p:Configuration=Release /p:Platform=x86[/code]
 
 Артефакт: [code]build\Release\OrcOutFit.asi[/code
+ 
+[hr]
 
+[size=140][b]OrcOutFit.ini[/b][/size]
+
+[b]Секция [code][Main][/code][/b]
+- [code]Enabled[/code] — 0/1
+- [code]RenderAllPedsWeapons[/code] — 0/1
+- [code]RenderAllPedsRadius[/code] — радиус в метрах
+- [code]ConsiderWeaponSkills[/code] — 0/1 (dual wield / второй ствол)
+- [code]ActivationKey[/code] — клавиша (SP)
+- [code]SampAllowActivationKey[/code] — 0/1
+- [code]Command[/code] — чат-команда (SA:MP)
+
+[b]Секции оружия[/b]
+- Именованные: [code][M4][/code], [code][Pistol][/code], ...
+- Числовые: [code][WeaponNN][/code]
+- Для второго ствола (dual wield): [code][Pistol2][/code] или [code][Weapon22_2][/code] (аналогичные поля)
+
+[hr]
+
+[size=140][b]INI кастомного объекта[/b][/size]
+
+Файл: [code]OrcOutFit\object\<имя>.ini[/code (и аналогично внутри [code]object\other\<skin>\[/code)
+
+[b]Секция [code][Main][/code][/b]
+- Базовые поля: [code]Enabled[/code], [code]Bone[/code], [code]OffsetX/Y/Z[/code], [code]RotationX/Y/Z[/code], [code]Scale[/code
+- Условие по оружию (опционально):
+  - [code]Weapons[/code] = CSV weapon ids, например [code]22,23[/code
+  - [code]WeaponsMode[/code] = [code]any[/code] или [code]all[/code
+  - [code]HideWeapons[/code] = 0/1 (скрывать выбранное оружие на теле, когда объект рендерится)
+
+[hr]
+
+[size=140][b]INI кастомного скина[/b][/size]
+
+Файл: [code]OrcOutFit\SKINS\<имя>.ini[/code (или в [code]SKINS\random\...[/code)
+
+[b]Секция [code][NickBinding][/code][/b]
+- [code]Enabled[/code] — 0/1
+- [code]Nicks[/code] — только через запятую, например [code]Testovik,Walcher_Flett,OtherNick[/code (без учёта регистра)

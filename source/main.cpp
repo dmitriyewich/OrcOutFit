@@ -93,7 +93,9 @@ float g_renderAllPedsRadius = 80.0f;
 int  g_activationVk = VK_F7;
 bool g_sampAllowActivationKey = false;
 std::string g_toggleCommand = "/orcoutfit";
+bool g_considerWeaponSkills = true;
 WeaponCfg g_cfg[64] = {};
+WeaponCfg g_cfg2[64] = {}; // secondary dual-wield placement
 bool g_skinModeEnabled = false;
 bool g_skinHideBasePed = true;
 bool g_skinNickMode = true;
@@ -128,11 +130,25 @@ static void Set(int wt, const char* name, int bone,
     c.scale = scale;
 }
 
+static void Set2(int wt, int bone,
+                float x, float y, float z,
+                float rxDeg = 0, float ryDeg = 0, float rzDeg = 0,
+                float scale = 1.0f) {
+    auto& c = g_cfg2[wt];
+    c.enabled = true;
+    c.name    = nullptr;
+    c.boneId  = bone;
+    c.x = x; c.y = y; c.z = z;
+    c.rx = rxDeg * D2R; c.ry = ryDeg * D2R; c.rz = rzDeg * D2R;
+    c.scale = scale;
+}
+
 // 10 слотов SA → распределение по разным костям.
 // Slot 1 melee / Slot 2 pistols / Slot 3 shotguns / Slot 4 SMG /
 // Slot 5 assault / Slot 6 rifles / Slot 7 heavy / Slot 8 thrown и т.д.
 static void SetupDefaults() {
     for (int i = 0; i < 64; i++) { g_cfg[i] = {}; g_cfg[i].scale = 1.0f; }
+    for (int i = 0; i < 64; i++) { g_cfg2[i] = {}; g_cfg2[i].scale = 1.0f; }
 
     // --- Slot 1: холодное оружие ---
     Set(WEAPONTYPE_KNIFE,        "Knife",        BONE_R_CALF,   0.02f, -0.08f,  0.05f,   0, 0,   0);
@@ -148,6 +164,10 @@ static void SetupDefaults() {
     Set(WEAPONTYPE_PISTOL,          "Pistol",          BONE_R_THIGH, 0.05f, -0.08f, 0.08f);
     Set(WEAPONTYPE_PISTOL_SILENCED, "PistolSilenced",  BONE_R_THIGH, 0.05f, -0.08f, 0.08f);
     Set(WEAPONTYPE_DESERT_EAGLE,    "DesertEagle",     BONE_R_THIGH, 0.06f, -0.08f, 0.10f);
+    // Secondary (dual wield) defaults: left thigh holster.
+    Set2(WEAPONTYPE_PISTOL,          BONE_L_THIGH, 0.05f, -0.08f, -0.08f);
+    Set2(WEAPONTYPE_PISTOL_SILENCED, BONE_L_THIGH, 0.05f, -0.08f, -0.08f);
+    Set2(WEAPONTYPE_DESERT_EAGLE,    BONE_L_THIGH, 0.06f, -0.08f, -0.10f);
 
     // --- Slot 3: дробовики ---
     Set(WEAPONTYPE_SHOTGUN, "Shotgun", BONE_SPINE1,  0.27f, -0.13f,  0.00f,  20, 0, 0);
@@ -279,6 +299,7 @@ void LoadConfig() {
     g_enabled = GetPrivateProfileIntA("Main", "Enabled", 1, g_iniPath) != 0;
     g_renderAllPedsWeapons = GetPrivateProfileIntA("Main", "RenderAllPedsWeapons", 0, g_iniPath) != 0;
     g_renderAllPedsRadius = (float)GetPrivateProfileIntA("Main", "RenderAllPedsRadius", 80, g_iniPath);
+    g_considerWeaponSkills = GetPrivateProfileIntA("Main", "ConsiderWeaponSkills", 1, g_iniPath) != 0;
     g_sampAllowActivationKey = GetPrivateProfileIntA("Main", "SampAllowActivationKey", 0, g_iniPath) != 0;
     char keyBuf[32] = {};
     GetPrivateProfileStringA("Main", "ActivationKey", "F7", keyBuf, sizeof(keyBuf), g_iniPath);
@@ -296,6 +317,24 @@ void LoadConfig() {
         _snprintf_s(sec, _TRUNCATE, "Weapon%d", i);
         if (GetPrivateProfileIntA(sec, "Bone", 0, g_iniPath) != 0) {
             if (!c.name) { c.scale = 1.0f; c.enabled = true; }
+            ReadSection(c, sec);
+        }
+    }
+    // Secondary configs: [<Name>2] and [WeaponNN_2]
+    for (int i = 0; i < 64; i++) {
+        auto& c = g_cfg2[i];
+        if (g_cfg[i].name) {
+            char sec2[64];
+            _snprintf_s(sec2, _TRUNCATE, "%s2", g_cfg[i].name);
+            if (GetPrivateProfileIntA(sec2, "Bone", 0, g_iniPath) != 0) {
+                c.enabled = true;
+                ReadSection(c, sec2);
+            }
+        }
+        char sec[20];
+        _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", i);
+        if (GetPrivateProfileIntA(sec, "Bone", 0, g_iniPath) != 0) {
+            c.enabled = true;
             ReadSection(c, sec);
         }
     }
@@ -330,6 +369,7 @@ static void SaveDefaultConfig() {
           "Enabled=1\n"
           "RenderAllPedsWeapons=0\n"
           "RenderAllPedsRadius=80\n"
+          "ConsiderWeaponSkills=1\n"
           "ActivationKey=F7\n"
           "SampAllowActivationKey=0\n"
           "Command=/orcoutfit\n\n", f);
@@ -347,6 +387,17 @@ static void SaveDefaultConfig() {
             c.scale);
     }
     fclose(f);
+}
+
+void SaveMainIni() {
+    if (GetFileAttributesA(g_iniPath) == INVALID_FILE_ATTRIBUTES) {
+        FILE* t = fopen(g_iniPath, "w");
+        if (!t) return;
+        fclose(t);
+    }
+    char buf[16];
+    _snprintf_s(buf, _TRUNCATE, "%d", g_considerWeaponSkills ? 1 : 0);
+    WritePrivateProfileStringA("Main", "ConsiderWeaponSkills", buf, g_iniPath);
 }
 
 // ----------------------------------------------------------------------------
@@ -464,11 +515,6 @@ std::vector<std::string> ParseNickCsv(const std::string& csv) {
             flush();
             continue;
         }
-        if (c == '\n' || c == '\r') {
-            flush();
-            if (c == '\r' && i + 1 < csv.size() && csv[i + 1] == '\n') ++i;
-            continue;
-        }
         token += static_cast<char>(c);
     }
     flush();
@@ -516,9 +562,47 @@ static void CreateDefaultObjectIniIfMissing(const std::string& iniPath, const st
         "Bone=%d\n"
         "OffsetX=0.000\nOffsetY=0.000\nOffsetZ=0.000\n"
         "RotationX=0.0\nRotationY=0.0\nRotationZ=0.0\n"
-        "Scale=1.000\n",
+        "Scale=1.000\n"
+        "; Optional: render only when ped has weapon(s).\n"
+        "; Weapons is a comma-separated list of weapon IDs (eWeaponType), e.g. 22,23.\n"
+        "; If empty, object renders always.\n"
+        "Weapons=\n"
+        "; WeaponsMode: any|all\n"
+        "WeaponsMode=any\n"
+        "; If enabled, hide selected weapon(s) on body when object renders.\n"
+        "HideWeapons=0\n",
         baseName.c_str(), BONE_R_THIGH);
     fclose(f);
+}
+
+static std::uint64_t ParseWeaponMaskCsv(const char* csv) {
+    if (!csv || !csv[0]) return 0;
+    std::uint64_t mask = 0;
+    const char* p = csv;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',' || *p == ';') ++p;
+        if (!*p) break;
+        char* end = nullptr;
+        long v = strtol(p, &end, 10);
+        if (end == p) { ++p; continue; }
+        if (v >= 0 && v < 64) mask |= (std::uint64_t(1) << v);
+        p = end;
+    }
+    return mask;
+}
+
+static void WeaponMaskToCsv(std::uint64_t mask, char* out, size_t outSize) {
+    if (!out || outSize == 0) return;
+    out[0] = 0;
+    bool first = true;
+    for (int i = 0; i < 64; i++) {
+        if ((mask & (std::uint64_t(1) << i)) == 0) continue;
+        char tmp[8];
+        _snprintf_s(tmp, _TRUNCATE, "%d", i);
+        if (!first) strncat_s(out, outSize, ",", _TRUNCATE);
+        strncat_s(out, outSize, tmp, _TRUNCATE);
+        first = false;
+    }
 }
 
 static void CreateDefaultSkinIniIfMissing(const std::string& iniPath, const std::string& baseName) {
@@ -554,6 +638,14 @@ static void LoadObjectCfgFromIni(CustomObjectCfg& o) {
     o.ry = F("RotationY", o.ry / D2R) * D2R;
     o.rz = F("RotationZ", o.rz / D2R) * D2R;
     o.scale = F("Scale", o.scale);
+
+    char wcsv[256] = {};
+    GetPrivateProfileStringA("Main", "Weapons", "", wcsv, sizeof(wcsv), o.iniPath.c_str());
+    o.weaponMask = ParseWeaponMaskCsv(wcsv);
+    char mode[16] = {};
+    GetPrivateProfileStringA("Main", "WeaponsMode", "any", mode, sizeof(mode), o.iniPath.c_str());
+    o.weaponRequireAll = (ToLowerAscii(mode) == "all");
+    o.hideSelectedWeapons = GetPrivateProfileIntA("Main", "HideWeapons", o.hideSelectedWeapons ? 1 : 0, o.iniPath.c_str()) != 0;
 }
 
 static void DestroySkinOtherOverrides(SkinOtherOverrides& so) {
@@ -894,6 +986,12 @@ void SaveCustomObjectIni(const CustomObjectCfg& o) {
     _snprintf_s(buf, _TRUNCATE, "%.2f", o.ry / D2R);      W("RotationY", buf);
     _snprintf_s(buf, _TRUNCATE, "%.2f", o.rz / D2R);      W("RotationZ", buf);
     _snprintf_s(buf, _TRUNCATE, "%.3f", o.scale);         W("Scale", buf);
+
+    char wcsv[256];
+    WeaponMaskToCsv(o.weaponMask, wcsv, sizeof(wcsv));
+    W("Weapons", wcsv);
+    W("WeaponsMode", o.weaponRequireAll ? "all" : "any");
+    _snprintf_s(buf, _TRUNCATE, "%d", o.hideSelectedWeapons ? 1 : 0); W("HideWeapons", buf);
 }
 
 void SaveSkinModeIni() {
@@ -944,6 +1042,36 @@ static bool LoadWeaponOverridesFromIni(const char* fullIni, std::array<WeaponCfg
     return any;
 }
 
+static bool LoadWeaponOverridesFromIni2(const char* fullIni,
+                                       std::array<WeaponCfg, 64>* outCfg,
+                                       std::array<WeaponCfg, 64>* outCfg2) {
+    if (!outCfg || !outCfg2) return false;
+    const bool any1 = LoadWeaponOverridesFromIni(fullIni, outCfg);
+    if (!fullIni || !FileExistsA(fullIni)) { for (int i = 0; i < 64; i++) (*outCfg2)[i] = g_cfg2[i]; return any1; }
+    for (int i = 0; i < 64; i++) (*outCfg2)[i] = g_cfg2[i];
+    bool any2 = false;
+    for (int i = 0; i < 64; i++) {
+        auto& c = (*outCfg2)[i];
+        if (g_cfg[i].name) {
+            char sec2[64];
+            _snprintf_s(sec2, _TRUNCATE, "%s2", g_cfg[i].name);
+            if (GetPrivateProfileIntA(sec2, "Bone", 0, fullIni) != 0) {
+                c.enabled = true;
+                ReadSectionFromIni(c, sec2, fullIni);
+                any2 = true;
+            }
+        }
+        char sec[20];
+        _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", i);
+        if (GetPrivateProfileIntA(sec, "Bone", 0, fullIni) != 0) {
+            c.enabled = true;
+            ReadSectionFromIni(c, sec, fullIni);
+            any2 = true;
+        }
+    }
+    return any1 || any2;
+}
+
 static const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
     if (!ped || wt < 0 || wt >= 64) return g_cfg[0];
     CPlayerPed* local = FindPlayerPed(0);
@@ -956,6 +1084,20 @@ static const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
         }
     }
     return g_cfg[wt];
+}
+
+static const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt) {
+    if (!ped || wt < 0 || wt >= 64) return g_cfg2[0];
+    CPlayerPed* local = FindPlayerPed(0);
+    if (local && ped == local) {
+        auto* mi = CModelInfo::GetModelInfo(ped->m_nModelIndex);
+        if (mi) {
+            auto it = g_otherByModelKey.find(mi->m_nKey);
+            if (it != g_otherByModelKey.end() && it->second.hasWeaponOverrides)
+                return it->second.weaponCfg2[wt];
+        }
+    }
+    return g_cfg2[wt];
 }
 
 void DiscoverOtherOverridesAndObjects() {
@@ -989,7 +1131,7 @@ void DiscoverOtherOverridesAndObjects() {
         so.skinName = folderName; // folder name = standard ped model name (or id###)
         so.weaponsIniPath = JoinPath(skinDir, "weapons.ini");
 
-        so.hasWeaponOverrides = LoadWeaponOverridesFromIni(so.weaponsIniPath.c_str(), &so.weaponCfg);
+        so.hasWeaponOverrides = LoadWeaponOverridesFromIni2(so.weaponsIniPath.c_str(), &so.weaponCfg, &so.weaponCfg2);
         if (so.hasWeaponOverrides) weaponIniFound++;
 
         std::string dmask = JoinPath(skinDir, "*.*");
@@ -1069,6 +1211,27 @@ void SaveWeaponSection(int wt) {
     _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);             W("Scale", buf);
 }
 
+void SaveWeaponSection2(int wt) {
+    auto& c = g_cfg2[wt];
+    char sec[32];
+    if (g_cfg[wt].name) _snprintf_s(sec, _TRUNCATE, "%s2", g_cfg[wt].name);
+    else               _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", wt);
+
+    char buf[32];
+    auto W = [&](const char* key, const char* v) {
+        WritePrivateProfileStringA(sec, key, v, g_iniPath);
+    };
+    _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);     W("Enabled", buf);
+    _snprintf_s(buf, _TRUNCATE, "%d", c.boneId);              W("Bone", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", c.x);                 W("OffsetX", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", c.y);                 W("OffsetY", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", c.z);                 W("OffsetZ", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", c.rx / D2R);          W("RotationX", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", c.ry / D2R);          W("RotationY", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.2f", c.rz / D2R);          W("RotationZ", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);             W("Scale", buf);
+}
+
 SkinOtherOverrides* EnsureOtherOverridesForLocalSkin() {
     CPlayerPed* player = FindPlayerPed(0);
     if (!player) return nullptr;
@@ -1099,6 +1262,7 @@ SkinOtherOverrides* EnsureOtherOverridesForLocalSkin() {
 
     so.hasWeaponOverrides = true; // we want runtime to use per-skin overrides immediately
     for (int i = 0; i < 64; i++) so.weaponCfg[i] = g_cfg[i];
+    for (int i = 0; i < 64; i++) so.weaponCfg2[i] = g_cfg2[i];
 
     auto [newIt, ok] = g_otherByModelKey.emplace(modelKey, std::move(so));
     (void)ok;
@@ -1149,6 +1313,28 @@ void SaveOtherSkinWeaponsIni(const SkinOtherOverrides& so) {
         _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);
         WritePrivateProfileStringA(sec, "Scale", buf, so.weaponsIniPath.c_str());
     }
+    for (int wt = 1; wt < 64; wt++) {
+        const WeaponCfg& c = so.weaponCfg2[wt];
+        _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", wt);
+        _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);
+        WritePrivateProfileStringA(sec, "Enabled", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%d", c.boneId);
+        WritePrivateProfileStringA(sec, "Bone", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.3f", c.x);
+        WritePrivateProfileStringA(sec, "OffsetX", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.3f", c.y);
+        WritePrivateProfileStringA(sec, "OffsetY", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.3f", c.z);
+        WritePrivateProfileStringA(sec, "OffsetZ", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.2f", c.rx / D2R);
+        WritePrivateProfileStringA(sec, "RotationX", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.2f", c.ry / D2R);
+        WritePrivateProfileStringA(sec, "RotationY", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.2f", c.rz / D2R);
+        WritePrivateProfileStringA(sec, "RotationZ", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);
+        WritePrivateProfileStringA(sec, "Scale", buf, so.weaponsIniPath.c_str());
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1157,18 +1343,19 @@ void SaveOtherSkinWeaponsIni(const SkinOtherOverrides& so) {
 struct RenderedWeapon {
     bool      active;
     int       weaponType;
+    bool      secondary;
     int       modelId;
     int       slot;
     RwObject* rwObject;
 };
-static constexpr int kMax = 13;
+static constexpr int kMax = 20;
 static RenderedWeapon g_rendered[kMax] = {};
 using PedWeaponCache = std::array<RenderedWeapon, kMax>;
 static std::unordered_map<int, PedWeaponCache> g_otherPedsRendered;
 
-static int FindSlotByType(RenderedWeapon* arr, int wt) {
+static int FindSlotByType(RenderedWeapon* arr, int wt, bool secondary) {
     for (int i = 0; i < kMax; i++)
-        if (arr[i].active && arr[i].weaponType == wt) return i;
+        if (arr[i].active && arr[i].weaponType == wt && arr[i].secondary == secondary) return i;
     return -1;
 }
 static int FindFree(RenderedWeapon* arr) {
@@ -1283,11 +1470,11 @@ static void RotateMatrix(RwMatrix* m, float rx, float ry, float rz) {
 // ----------------------------------------------------------------------------
 // Create / render
 // ----------------------------------------------------------------------------
-static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, int slot, CPed* ped) {
+static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, int slot, CPed* ped) {
     if (wt <= 0 || wt >= 64) return false;
-    const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
+    const WeaponCfg& wc = secondary ? GetWeaponCfg2ForPed(ped, wt) : GetWeaponCfgForPed(ped, wt);
     if (!wc.enabled || wc.boneId == 0) return false;
-    if (FindSlotByType(arr, wt) >= 0) return true;
+    if (FindSlotByType(arr, wt, secondary) >= 0) return true;
 
     CWeaponInfo* info = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
     if (!info) return false;
@@ -1318,10 +1505,10 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, int slot, CPed* pe
         if (inst->type == rpCLUMP) RpClumpDestroy(reinterpret_cast<RpClump*>(inst));
         return false;
     }
-    arr[fi] = { true, wt, mid, 0, inst };
+    arr[fi] = { true, wt, secondary, mid, 0, inst };
 
     static bool logged[64] = {};
-    if (!logged[wt]) {
+    if (!logged[wt] && !secondary) {
         logged[wt] = true;
         Log("created wt=%d mid=%d bone=%d rwo=%p type=%d", wt, mid, wc.boneId, inst, (int)inst->type);
     }
@@ -1332,7 +1519,7 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, int slot, CPed* pe
 static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
     if (!r.rwObject) return;
 
-    const WeaponCfg& wc = GetWeaponCfgForPed(ped, r.weaponType);
+    const WeaponCfg& wc = r.secondary ? GetWeaponCfg2ForPed(ped, r.weaponType) : GetWeaponCfgForPed(ped, r.weaponType);
     RwMatrix* bone = GetBoneMatrix(ped, wc.boneId);
     if (!bone) return;
 
@@ -1371,6 +1558,48 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
     } else {
         PrepAtomicCB(atomic, nullptr);
         atomic->renderCallBack(atomic);
+    }
+}
+
+static bool PedHasWeaponType(CPed* ped, int wt) {
+    if (!ped || wt <= 0 || wt >= 64) return false;
+    for (int s = 0; s < 13; s++) {
+        auto& w = ped->m_aWeapons[s];
+        if ((int)w.m_eWeaponType != wt) continue;
+        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+        bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+        if (needsAmmo && w.m_nAmmoTotal == 0) return false;
+        return true;
+    }
+    return false;
+}
+
+static bool ShouldRenderObjectForPed(CPed* ped, const CustomObjectCfg& o) {
+    if (!o.enabled || o.boneId == 0) return false;
+    if (o.weaponMask == 0) return true;
+
+    bool any = false;
+    for (int wt = 1; wt < 64; wt++) {
+        if ((o.weaponMask & (std::uint64_t(1) << wt)) == 0) continue;
+        const bool has = PedHasWeaponType(ped, wt);
+        if (o.weaponRequireAll) {
+            if (!has) return false;
+        } else {
+            if (has) any = true;
+        }
+    }
+    return o.weaponRequireAll ? true : any;
+}
+
+static void ApplyObjectWeaponSuppression(CPed* ped, const std::vector<CustomObjectCfg>& objs, bool suppress[64]) {
+    if (!ped || !suppress) return;
+    for (const auto& o : objs) {
+        if (!o.hideSelectedWeapons) continue;
+        if (o.weaponMask == 0) continue; // nothing selected -> do not suppress anything
+        if (!ShouldRenderObjectForPed(ped, o)) continue;
+        for (int wt = 1; wt < 64; wt++) {
+            if ((o.weaponMask & (std::uint64_t(1) << wt)) != 0) suppress[wt] = true;
+        }
     }
 }
 
@@ -1592,16 +1821,18 @@ static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
     RpClumpRender(clump);
 }
 
-static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr) {
+static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr, const bool suppress[64] = nullptr) {
     if (!ped) return;
     unsigned char curSlot = ped->m_nSelectedWepSlot;
     int curType = 0;
     if (curSlot < 13) curType = (int)ped->m_aWeapons[curSlot].m_eWeaponType;
     bool want[64] = {};
+    bool want2[64] = {};
     for (int s = 0; s < 13; s++) {
         auto& w = ped->m_aWeapons[s];
         int wt = (int)w.m_eWeaponType;
         if (wt <= 0 || wt >= 64) continue;
+        if (suppress && suppress[wt]) continue;
         if (wt == curType) continue;
         const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
         if (!wc.enabled || wc.boneId == 0) continue;
@@ -1609,13 +1840,23 @@ static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr) {
         bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
         if (needsAmmo && w.m_nAmmoTotal == 0) continue;
         want[wt] = true;
+
+        if (g_considerWeaponSkills && wi && wi->m_nFlags.bTwinPistol) {
+            const char skill = ped->GetWeaponSkill(static_cast<eWeaponType>(wt));
+            if (skill == WEAPSKILL_PRO) {
+                const WeaponCfg& wc2 = GetWeaponCfg2ForPed(ped, wt);
+                if (wc2.enabled && wc2.boneId != 0) want2[wt] = true;
+            }
+        }
     }
     for (int i = 0; i < kMax; i++) {
         if (!arr[i].active) continue;
         int wt = arr[i].weaponType;
-        if (wt < 0 || wt >= 64 || !want[wt]) DestroyRendered(arr[i]);
+        const bool keep = (wt >= 0 && wt < 64) && (arr[i].secondary ? want2[wt] : want[wt]);
+        if (!keep) DestroyRendered(arr[i]);
     }
-    for (int wt = 1; wt < 64; wt++) if (want[wt]) CreateWeaponInstance(arr, wt, 0, ped);
+    for (int wt = 1; wt < 64; wt++) if (want[wt])  CreateWeaponInstance(arr, wt, false, 0, ped);
+    for (int wt = 1; wt < 64; wt++) if (want2[wt]) CreateWeaponInstance(arr, wt, true,  0, ped);
 }
 
 static int RenderPedWeapons(CPed* ped, RenderedWeapon* arr) {
@@ -1672,10 +1913,20 @@ static void SyncAndRender() {
         return;
     }
 
-    SyncPedWeapons(player, g_rendered);
+    bool suppress[64] = {};
+    ApplyObjectWeaponSuppression(player, g_customObjects, suppress);
+    {
+        CBaseModelInfo* mi = CModelInfo::GetModelInfo(player->m_nModelIndex);
+        if (mi) {
+            auto it = g_otherByModelKey.find(mi->m_nKey);
+            if (it != g_otherByModelKey.end())
+                ApplyObjectWeaponSuppression(player, it->second.objects, suppress);
+        }
+    }
+    SyncPedWeapons(player, g_rendered, suppress);
     int active = 0;
     for (int i = 0; i < kMax; i++) if (g_rendered[i].active) active++;
-    for (auto& o : g_customObjects) if (EnsureCustomInstance(o, player)) active++;
+    for (auto& o : g_customObjects) if (ShouldRenderObjectForPed(player, o) && EnsureCustomInstance(o, player)) active++;
     // object\other overrides are also rendered (regardless of Skin mode),
     // so they must be included into the early-out `active` check.
     {
@@ -1684,7 +1935,7 @@ static void SyncAndRender() {
             auto it = g_otherByModelKey.find(mi->m_nKey);
             if (it != g_otherByModelKey.end()) {
                 for (auto& o : it->second.objects) {
-                    if (!o.enabled || o.boneId == 0) continue;
+                    if (!ShouldRenderObjectForPed(player, o)) continue;
                     if (EnsureCustomInstance(o, player)) active++;
                 }
             }
@@ -1724,7 +1975,8 @@ static void SyncAndRender() {
 
     RenderPedWeapons(player, g_rendered);
     for (auto& o : g_customObjects) {
-        if (!o.enabled || o.boneId == 0) continue;
+        if (!ShouldRenderObjectForPed(player, o)) { DestroyCustomObjectInstance(o); continue; }
+        EnsureCustomInstance(o, player);
         RenderCustomObject(player, o);
     }
     {
@@ -1733,7 +1985,7 @@ static void SyncAndRender() {
             auto it = g_otherByModelKey.find(mi->m_nKey);
             if (it != g_otherByModelKey.end()) {
                 for (auto& o : it->second.objects) {
-                    if (!o.enabled || o.boneId == 0) continue;
+                    if (!ShouldRenderObjectForPed(player, o)) { DestroyCustomObjectInstance(o); continue; }
                     EnsureCustomInstance(o, player);
                     RenderCustomObject(player, o);
                 }

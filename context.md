@@ -23,6 +23,11 @@
   - синхронизация слотов `m_aWeapons`,
   - `CreateInstance(RwMatrix*)` для нужных моделей,
   - рендер на кости через `RpHAnim` + `RpClumpRender`/atomic callback.
+- Dual wield (weapon skills):
+  - опция `Main.ConsiderWeaponSkills`,
+  - если у оружия `CWeaponInfo::m_nFlags.bTwinPistol` и `ped->GetWeaponSkill(wt) == WEAPSKILL_PRO` —
+    рендерится второй инстанс оружия,
+  - настройки второго ствола хранятся отдельно (`WeaponNN_2` / `[Pistol2]`, etc.).
 - Оружие всех ped (опция):
   - включается флагом `RenderAllPedsWeapons`,
   - фильтруется по радиусу `RenderAllPedsRadius`,
@@ -30,6 +35,10 @@
 - Кастомные объекты:
   - скан `*.dff` в `OrcOutFit\object`,
   - отдельный `<name>.ini` на каждый объект.
+  - объект может быть условным по оружию:
+    - `Weapons=` (csv weapon ids),
+    - `WeaponsMode=any|all`,
+    - `HideWeapons=1` — при срабатывании условия скрывать выбранное оружие на теле.
 - Кастомные объекты по стандартной модели ped:
   - папка `OrcOutFit\object\other\<skin>\` (где `<skin>` — имя стандартной модели, например `wmyclot`,
     либо `id217` / `217` для проектов с добавленными ped-models по id),

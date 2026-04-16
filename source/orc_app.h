@@ -19,8 +19,10 @@ extern float g_renderAllPedsRadius;
 extern int g_activationVk;
 extern bool g_sampAllowActivationKey;
 extern std::string g_toggleCommand;
+extern bool g_considerWeaponSkills;
 
 extern WeaponCfg g_cfg[64];
+extern WeaponCfg g_cfg2[64];
 
 extern std::vector<CustomObjectCfg> g_customObjects;
 extern std::vector<CustomSkinCfg> g_customSkins;
@@ -53,9 +55,11 @@ SkinOtherOverrides* EnsureOtherOverridesForLocalSkin();
 void SaveOtherSkinWeaponsIni(const SkinOtherOverrides& so);
 
 void SaveWeaponSection(int weaponIndex);
+void SaveWeaponSection2(int weaponIndex);
 void SaveCustomObjectIni(const CustomObjectCfg& o);
 void SaveSkinCfgToIni(const CustomSkinCfg& s);
 void SaveSkinModeIni();
+void SaveMainIni();
 
 std::vector<std::string> ParseNickCsv(const std::string& csv);
 const char* VkToString(int vk);

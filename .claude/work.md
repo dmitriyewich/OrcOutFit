@@ -305,3 +305,13 @@
 
 - `orc_ui.cpp` (`Weapons` вкладка): добавлен блок per-skin weapon offsets (`object\\other\\<skin>\\weapons.ini`) с подвкладками `Local skin` и `Other skin`.
 
+- `Weapons`: учёт навыков оружия (dual wield).
+  - `Main.ConsiderWeaponSkills=1` включает второй ствол для `bTwinPistol` при `WEAPSKILL_PRO`.
+  - Добавлены отдельные конфиги второго ствола: секции `WeaponNN_2` / `[Pistol2]`, и per-skin `weaponCfg2` в `object\\other\\<skin>\\weapons.ini`.
+
+- `Objects`: условный рендер кастомных объектов по наличию оружия.
+  - Для каждого кастомного объекта (`<obj>.ini`) добавлены ключи:
+    - `Weapons=` (csv weapon ids), `WeaponsMode=any|all`.
+    - `HideWeapons=1` — скрывать выбранное оружие на теле, когда объект рендерится.
+  - В UI добавлен multi-select список оружия и переключатель any/all + hide.
+
