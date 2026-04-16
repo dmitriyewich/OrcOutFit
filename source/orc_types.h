@@ -2,6 +2,7 @@
 
 #include <string>
 #include <array>
+#include <cstdint>
 #include <vector>
 #include <cstdint>
 
@@ -45,9 +46,10 @@ struct CustomObjectCfg {
     float rx = 0.0f, ry = 0.0f, rz = 0.0f;
     float scale = 1.0f;
 
-    // Weapon filter: if mask==0 -> render always. Otherwise render only when condition is met.
-    // Bits correspond to eWeaponType (0..63).
-    std::uint64_t weaponMask = 0;
+    // Weapon filter:
+    // - if weaponTypes.empty() -> render always
+    // - otherwise render only when condition is met
+    std::vector<int> weaponTypes;
     bool weaponRequireAll = false;     // false: any selected weapon present; true: all selected weapons present
     bool hideSelectedWeapons = false;  // when condition is met, hide selected weapon(s) on body
 };
@@ -73,7 +75,7 @@ struct SkinOtherOverrides {
     std::string weaponsIniPath; // .../OrcOutFit/object/other/<skinName>/weapons.ini
 
     bool hasWeaponOverrides = false; // whether weapons.ini exists and was loaded
-    std::array<WeaponCfg, 64> weaponCfg = {};
-    std::array<WeaponCfg, 64> weaponCfg2 = {}; // secondary (dual-wield) weapon placement
+    std::vector<WeaponCfg> weaponCfg;  // resized at runtime to available weapon range
+    std::vector<WeaponCfg> weaponCfg2; // secondary (dual-wield) weapon placement
     std::vector<CustomObjectCfg> objects; // *.dff discovered in the skin folder
 };

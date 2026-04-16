@@ -24,8 +24,10 @@
   - `CreateInstance(RwMatrix*)` для нужных моделей,
   - рендер на кости через `RpHAnim` + `RpClumpRender`/atomic callback.
 - Авто-скан оружия (modded weapon.dat friendly):
-  - при загрузке INI плагин дополняет список оружия по данным `CWeaponInfo` (`ms_aWeaponNames` + `GetWeaponInfo()`),
-    чтобы в UI появлялись типы оружия, которые есть в игре, даже если они не были захардкожены в дефолтах;
+  - основной источник — хук `CFileLoader::LoadWeaponObject` (`0x5B3FB0`, MinHook), который заполняет кеш
+    `wt -> modelId` по реально загруженным строкам `weapon.dat`;
+  - fallback/дополнение — чтение `aWeaponInfo`/`GetWeaponInfo` (SEH-safe) для совместимости;
+  - UI показывает оружие в формате `Name [weaponTypeId][modelId]`, а также поддерживает полный диапазон `0..256` для отладки;
   - если при рендере оружия его модель ещё не загружена, плагин автоматически запрашивает стриминг
     (`CStreaming::RequestModel` + `LoadAllRequestedModels`) и начинает рендерить со следующего кадра.
 - Dual wield (weapon skills):
@@ -48,6 +50,9 @@
   - папка `OrcOutFit\object\other\<skin>\` (где `<skin>` — имя стандартной модели, например `wmyclot`,
     либо `id217` / `217` для проектов с добавленными ped-models по id),
   - скан `*.dff` в каждой подпапке, `<name>.ini` на каждый объект.
+- Разрешение имени модели ped (для `object\other` и `SKINS\random`):
+  - хук `CFileLoader::LoadPedObject` (`0x5B7420`, MinHook) кеширует `modelId -> modelName`;
+  - приоритет резолва папок: имя модели (`CModelInfo`) -> имя из кеша `LoadPedObject` -> `id###/###` fallback.
 - Skin mode:
   - скан `*.dff` в `OrcOutFit\SKINS`,
   - рендер выбранного clump поверх локального ped,

@@ -8,6 +8,9 @@
 #include "imgui.h"
 #include "eWeaponType.h"
 #include "CWeaponInfo.h"
+#include "common.h"
+#include "CPed.h"
+#include "CPlayerPed.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -72,21 +75,26 @@ static void WeaponFilterEditor(CustomObjectCfg& obj) {
 
     const float childH = 150.0f;
     if (ImGui::BeginChild("##obj_weapon_filter_list", ImVec2(-FLT_MIN, childH), true)) {
-        for (int wt = 1; wt < 64; wt++) {
+        for (int wt : g_availableWeaponTypes) {
+            if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
             if (!g_cfg[wt].name) continue;
-            bool sel = (obj.weaponMask & (std::uint64_t(1) << wt)) != 0;
+            bool sel = std::find(obj.weaponTypes.begin(), obj.weaponTypes.end(), wt) != obj.weaponTypes.end();
             char lbl[96];
             _snprintf_s(lbl, _TRUNCATE, "%s [%d]", g_cfg[wt].name, wt);
             if (ImGui::Checkbox(lbl, &sel)) {
-                if (sel) obj.weaponMask |= (std::uint64_t(1) << wt);
-                else     obj.weaponMask &= ~(std::uint64_t(1) << wt);
+                if (sel) {
+                    if (std::find(obj.weaponTypes.begin(), obj.weaponTypes.end(), wt) == obj.weaponTypes.end())
+                        obj.weaponTypes.push_back(wt);
+                } else {
+                    obj.weaponTypes.erase(std::remove(obj.weaponTypes.begin(), obj.weaponTypes.end(), wt), obj.weaponTypes.end());
+                }
             }
         }
     }
     ImGui::EndChild();
 
     if (ImGui::Button("Clear weapon selection", ImVec2(-FLT_MIN, 0))) {
-        obj.weaponMask = 0;
+        obj.weaponTypes.clear();
     }
 }
 
@@ -158,8 +166,8 @@ void OrcUiDraw() {
             ImGui::RadioButton("Local skin (weapons.ini)", &editTarget, LocalSkinIni);
             ImGui::RadioButton("Other skin (weapons.ini)", &editTarget, OtherSkinIni);
 
-            WeaponCfg* activeArr = g_cfg;
-            WeaponCfg* activeArr2 = g_cfg2;
+            WeaponCfg* activeArr = g_cfg.empty() ? nullptr : g_cfg.data();
+            WeaponCfg* activeArr2 = g_cfg2.empty() ? nullptr : g_cfg2.data();
             SkinOtherOverrides* activeSkin = nullptr;
 
             if (editTarget == LocalSkinIni) {
@@ -183,8 +191,9 @@ void OrcUiDraw() {
                     activeSkin = &g_otherByModelKey[g_uiOtherModelKey];
                     activeArr = activeSkin->weaponCfg.data();
                     if (!activeSkin->hasWeaponOverrides) {
-                        for (int i = 0; i < 64; i++) activeSkin->weaponCfg[i] = g_cfg[i];
-                        for (int i = 0; i < 64; i++) activeSkin->weaponCfg2[i] = g_cfg2[i];
+                        // Create per-skin configs from current global defaults.
+                        activeSkin->weaponCfg = g_cfg;
+                        activeSkin->weaponCfg2 = g_cfg2;
                         activeSkin->hasWeaponOverrides = true;
                     }
 
@@ -214,24 +223,61 @@ void OrcUiDraw() {
             ImGui::PushItemWidth(-FLT_MIN);
             static bool g_uiWeaponSecondary = false;
             auto IsDualCapable = [](int wt) -> bool {
-                if (wt <= 0 || wt >= 64) return false;
+                if (wt <= 0 || g_cfg.empty() || wt >= (int)g_cfg.size()) return false;
                 CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo((eWeaponType)wt, 1);
                 return wi && wi->m_nFlags.bTwinPistol;
             };
-            char preview[64];
-            const auto& pc = g_cfg[g_uiWeaponIdx];
-            _snprintf_s(preview, _TRUNCATE, "%s%s [%d]", pc.name ? pc.name : "Weapon", g_uiWeaponSecondary ? " 2" : "", g_uiWeaponIdx);
+            char preview[128];
+            const WeaponCfg* pc = (g_uiWeaponIdx >= 0 && g_uiWeaponIdx < (int)g_cfg.size()) ? &g_cfg[g_uiWeaponIdx] : nullptr;
+            const int previewModelId = (g_uiWeaponIdx > 0 && g_uiWeaponIdx < (int)g_weaponModelId.size())
+                ? (g_uiWeaponSecondary ? g_weaponModelId2[g_uiWeaponIdx] : g_weaponModelId[g_uiWeaponIdx])
+                : 0;
+            _snprintf_s(preview, _TRUNCATE, "%s%s [%d][%d]",
+                         (pc && pc->name) ? pc->name : "Weapon",
+                         g_uiWeaponSecondary ? " 2" : "",
+                         g_uiWeaponIdx, previewModelId);
             ImGui::TextUnformatted("Weapon");
             if (ImGui::BeginCombo("##weapon", preview)) {
-                for (int i = 1; i < 64; i++) {
-                    const char* baseName = g_cfg[i].name ? g_cfg[i].name : "Weapon";
-                    char lbl[64];
-                    _snprintf_s(lbl, _TRUNCATE, "%s [%d]", baseName, i);
-                    if (ImGui::Selectable(lbl, (i == g_uiWeaponIdx) && !g_uiWeaponSecondary)) { g_uiWeaponIdx = i; g_uiWeaponSecondary = false; }
-                    if (g_considerWeaponSkills && IsDualCapable(i)) {
-                        char lbl2[64];
-                        _snprintf_s(lbl2, _TRUNCATE, "%s 2 [%d]", baseName, i);
-                        if (ImGui::Selectable(lbl2, (i == g_uiWeaponIdx) && g_uiWeaponSecondary)) { g_uiWeaponIdx = i; g_uiWeaponSecondary = true; }
+                std::vector<char> localHas;
+                localHas.assign(g_cfg.size(), 0);
+                CPlayerPed* ped = FindPlayerPed(0);
+                if (ped) {
+                    for (int s = 0; s < 13; s++) {
+                        auto& w = ped->m_aWeapons[s];
+                        const int wt = (int)w.m_eWeaponType;
+                        if (wt <= 0 || wt >= (int)localHas.size()) continue;
+                        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+                        const bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+                        if (needsAmmo && w.m_nAmmoTotal == 0) continue;
+                        localHas[wt] = 1;
+                    }
+                }
+                // Full range list (for inspection): 0..256
+                const int maxWtUi = std::min(256, (int)g_cfg.size() - 1);
+                for (int wt = 0; wt <= maxWtUi; wt++) {
+                    const char* baseName = (wt >= 0 && wt < (int)g_cfg.size() && g_cfg[wt].name) ? g_cfg[wt].name : "Weapon";
+                    char lbl[128];
+                    const int modelId = (wt > 0 && wt < (int)g_weaponModelId.size()) ? g_weaponModelId[wt] : 0;
+                    _snprintf_s(lbl, _TRUNCATE, "%s [%d][%d]", baseName, wt, modelId);
+                    const bool hasNow = (wt > 0 && wt < (int)localHas.size() && localHas[wt] != 0);
+                    if (ImGui::Selectable(lbl, (wt == g_uiWeaponIdx) && !g_uiWeaponSecondary)) { g_uiWeaponIdx = wt; g_uiWeaponSecondary = false; }
+                    if (hasNow) {
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        const ImVec2 mn = ImGui::GetItemRectMin();
+                        const ImVec2 mx = ImGui::GetItemRectMax();
+                        dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
+                    }
+                    if (g_considerWeaponSkills && IsDualCapable(wt)) {
+                        char lbl2[128];
+                        const int modelId2 = (wt > 0 && wt < (int)g_weaponModelId2.size()) ? g_weaponModelId2[wt] : 0;
+                        _snprintf_s(lbl2, _TRUNCATE, "%s 2 [%d][%d]", baseName, wt, modelId2);
+                        if (ImGui::Selectable(lbl2, (wt == g_uiWeaponIdx) && g_uiWeaponSecondary)) { g_uiWeaponIdx = wt; g_uiWeaponSecondary = true; }
+                        if (hasNow) {
+                            ImDrawList* dl = ImGui::GetWindowDrawList();
+                            const ImVec2 mn = ImGui::GetItemRectMin();
+                            const ImVec2 mx = ImGui::GetItemRectMax();
+                            dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
+                        }
                     }
                 }
                 ImGui::EndCombo();
@@ -240,7 +286,7 @@ void OrcUiDraw() {
             ImGui::TextUnformatted("Weapon slot / id");
             int idx = g_uiWeaponIdx;
             if (ImGui::InputInt("##weaponid", &idx, 1, 1)) {
-                if (idx >= 1 && idx < 64) { g_uiWeaponIdx = idx; g_uiWeaponSecondary = false; }
+                if (idx >= 1 && idx < (int)g_cfg.size()) { g_uiWeaponIdx = idx; g_uiWeaponSecondary = false; }
             }
 
             if (g_considerWeaponSkills && IsDualCapable(g_uiWeaponIdx)) {
@@ -302,8 +348,8 @@ void OrcUiDraw() {
                     WritePrivateProfileStringA("Main", "ConsiderWeaponSkills", mainBuf, g_iniPath);
                 }
                 if (saveAll) {
-                    for (int i = 1; i < 64; i++) if (g_cfg[i].name || g_cfg[i].boneId) SaveWeaponSection(i);
-                    for (int i = 1; i < 64; i++) if (g_cfg2[i].enabled || g_cfg2[i].boneId) SaveWeaponSection2(i);
+                    for (int wt : g_availableWeaponTypes) if (g_cfg[wt].name || g_cfg[wt].boneId) SaveWeaponSection(wt);
+                    for (int wt : g_availableWeaponTypes) if (g_cfg2[wt].enabled || g_cfg2[wt].boneId) SaveWeaponSection2(wt);
                     char mainBuf[32];
                     _snprintf_s(mainBuf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
                     WritePrivateProfileStringA("Main", "Enabled", mainBuf, g_iniPath);

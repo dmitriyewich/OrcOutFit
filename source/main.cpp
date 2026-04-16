@@ -7,6 +7,7 @@
 #include "CPlayerPed.h"
 #include "CPlayerInfo.h"
 #include "CWeaponInfo.h"
+#include "CFileLoader.h"
 #include "CStreaming.h"
 #include "CModelInfo.h"
 #include "CBaseModelInfo.h"
@@ -37,6 +38,7 @@
 #include "orc_types.h"
 #include "orc_app.h"
 #include "orc_ui.h"
+#include "external/MinHook/include/MinHook.h"
 
 using namespace plugin;
 
@@ -95,28 +97,270 @@ int  g_activationVk = VK_F7;
 bool g_sampAllowActivationKey = false;
 std::string g_toggleCommand = "/orcoutfit";
 bool g_considerWeaponSkills = true;
-WeaponCfg g_cfg[64] = {};
-WeaponCfg g_cfg2[64] = {}; // secondary dual-wield placement
-static std::array<std::string, 64> g_weaponNameStore;
+std::vector<WeaponCfg> g_cfg;
+std::vector<WeaponCfg> g_cfg2; // secondary dual-wield placement
+std::vector<int> g_availableWeaponTypes;
+std::vector<int> g_weaponModelId;
+std::vector<int> g_weaponModelId2;
+static std::vector<std::string> g_weaponNameStore;
+static bool g_weaponTypesReady = false;
 
-static void DiscoverAvailableWeaponsFromGame() {
-    // Make weapon list resilient to modded weapon.dat: if weapon info exists and has model id,
-    // ensure UI has a stable name string even when we didn't hardcode it in defaults.
-    for (int wt = 1; wt < 64; wt++) {
-        if (g_cfg[wt].name) continue;
-        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
-        if (!wi || wi->m_nModelId <= 0) continue;
+// --- weapon.dat ground-truth (filled by LoadWeaponObject hook) ---
+static bool g_weaponDatHookInstalled = false;
+static int(__cdecl* g_LoadWeaponObject_Orig)(const char* line) = nullptr;
+static std::vector<int> g_weaponDatModelId; // wt -> modelId
 
-        const char* nm = nullptr;
-        if (CWeaponInfo::ms_aWeaponNames)
-            nm = CWeaponInfo::ms_aWeaponNames[wt];
+static bool g_pedDatHookInstalled = false;
+static int(__cdecl* g_LoadPedObject_Orig)(const char* line) = nullptr;
+static std::vector<std::string> g_pedModelNameById; // modelId -> name
 
-        if (nm && nm[0]) {
-            g_weaponNameStore[wt] = nm;
-        } else {
-            g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+static int __cdecl LoadWeaponObject_Detour(const char* line) {
+    // weapon.dat line begins with weapon type name token
+    char name[64] = {};
+    if (line) {
+        int i = 0;
+        while (line[i] && i < (int)sizeof(name) - 1) {
+            const char c = line[i];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
+            name[i] = c;
+            i++;
         }
-        g_cfg[wt].name = g_weaponNameStore[wt].c_str();
+        name[i] = 0;
+    }
+
+    int modelId = 0;
+    if (g_LoadWeaponObject_Orig) modelId = g_LoadWeaponObject_Orig(line);
+
+    if (name[0]) {
+        const int wt = (int)CWeaponInfo::FindWeaponType(name);
+        if (wt > 0 && wt <= 255 && modelId > 0) {
+            if ((int)g_weaponDatModelId.size() <= wt) g_weaponDatModelId.resize(wt + 1, 0);
+            g_weaponDatModelId[wt] = modelId;
+        }
+    }
+    return modelId;
+}
+
+static int __cdecl LoadPedObject_Detour(const char* line) {
+    char name[64] = {};
+    if (line) {
+        int i = 0;
+        while (line[i] && i < (int)sizeof(name) - 1) {
+            const char c = line[i];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
+            name[i] = c;
+            i++;
+        }
+        name[i] = 0;
+    }
+
+    int modelId = 0;
+    if (g_LoadPedObject_Orig) modelId = g_LoadPedObject_Orig(line);
+
+    if (name[0] && modelId > 0) {
+        if ((int)g_pedModelNameById.size() <= modelId) g_pedModelNameById.resize(modelId + 1);
+        if (g_pedModelNameById[modelId].empty()) g_pedModelNameById[modelId] = name;
+    }
+    return modelId;
+}
+
+static void EnsureWeaponDatHookInstalled() {
+    if (g_weaponDatHookInstalled) return;
+    g_weaponDatHookInstalled = true;
+    g_weaponDatModelId.assign(256 + 1, 0);
+
+    if (MH_Initialize() != MH_OK) return;
+    if (MH_CreateHook(reinterpret_cast<void*>(0x5B3FB0),
+                      reinterpret_cast<void*>(&LoadWeaponObject_Detour),
+                      reinterpret_cast<void**>(&g_LoadWeaponObject_Orig)) != MH_OK) return;
+    (void)MH_EnableHook(reinterpret_cast<void*>(0x5B3FB0));
+}
+
+static void EnsurePedDatHookInstalled() {
+    if (g_pedDatHookInstalled) return;
+    g_pedDatHookInstalled = true;
+    g_pedModelNameById.clear();
+    g_pedModelNameById.resize(1000); // grows on demand
+
+    // MinHook can be already initialized by other hooks.
+    (void)MH_Initialize();
+    if (MH_CreateHook(reinterpret_cast<void*>(0x5B7420),
+                      reinterpret_cast<void*>(&LoadPedObject_Detour),
+                      reinterpret_cast<void**>(&g_LoadPedObject_Orig)) != MH_OK) return;
+    (void)MH_EnableHook(reinterpret_cast<void*>(0x5B7420));
+}
+
+static const char* TryGetPedModelNameById(int modelId) {
+    if (modelId <= 0) return nullptr;
+    if (modelId >= (int)g_pedModelNameById.size()) return nullptr;
+    if (g_pedModelNameById[modelId].empty()) return nullptr;
+    return g_pedModelNameById[modelId].c_str();
+}
+
+static std::string LowerAsciiLocal(std::string s) {
+    for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return s;
+}
+
+static bool TryParseModelIdFolder(const std::string& folder, int* outId) {
+    if (!outId) return false;
+    if (folder.empty()) return false;
+    // Accept "217" or "id217"
+    const std::string low = LowerAsciiLocal(folder);
+    const char* p = low.c_str();
+    if (low.rfind("id", 0) == 0) p += 2;
+    if (!*p) return false;
+    for (const char* t = p; *t; t++) if (*t < '0' || *t > '9') return false;
+    const int v = atoi(p);
+    if (v <= 0) return false;
+    *outId = v;
+    return true;
+}
+
+static CBaseModelInfo* ResolvePedModelInfoFromFolderName(const std::string& folderName, int* outModelId) {
+    if (outModelId) *outModelId = -1;
+    int modelId = -1;
+
+    // 1) Vanilla path: model name is known by CModelInfo.
+    CBaseModelInfo* mi = CModelInfo::GetModelInfo(folderName.c_str(), &modelId);
+    if (mi && modelId >= 0) {
+        if (outModelId) *outModelId = modelId;
+        return mi;
+    }
+
+    // 2) Server/mod path: folder is model name known only from ped.dat load.
+    const std::string want = LowerAsciiLocal(folderName);
+    for (int id = 0; id < (int)g_pedModelNameById.size(); id++) {
+        if (g_pedModelNameById[id].empty()) continue;
+        if (LowerAsciiLocal(g_pedModelNameById[id]) == want) {
+            mi = CModelInfo::GetModelInfo(id);
+            if (mi) {
+                if (outModelId) *outModelId = id;
+                return mi;
+            }
+        }
+    }
+
+    // 3) Fallback: folder is id### / digits.
+    int parsedId = -1;
+    if (TryParseModelIdFolder(folderName, &parsedId)) {
+        mi = CModelInfo::GetModelInfo(parsedId);
+        if (mi) {
+            if (outModelId) *outModelId = parsedId;
+            return mi;
+        }
+    }
+
+    return nullptr;
+}
+
+static void InitWeaponTypesAndStorage() {
+    // Важно: `WeaponCfg::name` хранит `const char*` на строковые буферы `g_weaponNameStore`.
+    // Поэтому скан делаем однократно, чтобы не инвалидировать эти указатели при повторных `SetupDefaults()`.
+    if (g_weaponTypesReady) return;
+    g_weaponTypesReady = false;
+
+    // Ensure we capture weapon.dat loads as early as possible.
+    EnsureWeaponDatHookInstalled();
+    EnsurePedDatHookInstalled();
+
+    Log("Weapon scan pre-try");
+    __try {
+        Log("Weapon scan begin");
+
+        // Primary source of truth: weapon.dat hook results (wt -> modelId).
+        // Fallback: `aWeaponInfo[]` (SDK fixed array).
+        const int baseMax = MAX_WEAPON_INFOS - 1;
+        int maxId = 0;
+        g_availableWeaponTypes.clear();
+
+        for (int wt = 1; wt <= 255; wt++) {
+            int mid = 0;
+            if (wt < (int)g_weaponDatModelId.size()) mid = g_weaponDatModelId[wt];
+            if (mid <= 0 && wt <= baseMax) mid = aWeaponInfo[wt].m_nModelId;
+            if (mid > 0) {
+                g_availableWeaponTypes.push_back(wt);
+                if (wt > maxId) maxId = wt;
+            }
+        }
+        Log("Weapon scan base end: found=%lu maxId=%d", (unsigned long)g_availableWeaponTypes.size(), maxId);
+
+        Log("Weapon scan extra end: found=%lu maxId=%d", (unsigned long)g_availableWeaponTypes.size(), maxId);
+
+        if (maxId <= 0) maxId = baseMax;
+
+        std::sort(g_availableWeaponTypes.begin(), g_availableWeaponTypes.end());
+        g_availableWeaponTypes.erase(std::unique(g_availableWeaponTypes.begin(), g_availableWeaponTypes.end()), g_availableWeaponTypes.end());
+
+        g_cfg.assign(maxId + 1, {});
+        g_cfg2.assign(maxId + 1, {});
+        g_weaponModelId.assign(maxId + 1, 0);
+        g_weaponModelId2.assign(maxId + 1, 0);
+        g_weaponNameStore.assign(maxId + 1, {});
+
+        for (int wt : g_availableWeaponTypes) {
+            // Don't touch ms_aWeaponNames here: in some modpacks it can be invalid early
+            // and trigger SEH; stable names are enough for UI.
+            g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+            g_cfg[wt].name = g_weaponNameStore[wt].c_str();
+
+            // Prefer weapon.dat hook model id, fallback to aWeaponInfo.
+            if (wt < (int)g_weaponDatModelId.size() && g_weaponDatModelId[wt] > 0)
+                g_weaponModelId[wt] = g_weaponDatModelId[wt];
+            else if (wt <= baseMax)
+                g_weaponModelId[wt] = aWeaponInfo[wt].m_nModelId;
+
+            if (wt <= baseMax)
+                g_weaponModelId2[wt] = aWeaponInfo[wt].m_nModelId2;
+        }
+
+        Log("Weapon scan end: cfgSize=%lu", (unsigned long)g_cfg.size());
+        g_weaponTypesReady = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("Weapon scan exception -> fallback");
+        // Если список уже частично заполнен (часто бывает из-за SEH в extra-скане),
+        // не обнуляем его обратно в `1..68`. Оставляем то, что успело найтись,
+        // и просто строим cfg под текущий maxId.
+        if (!g_availableWeaponTypes.empty()) {
+            int maxId = 0;
+            for (int wt : g_availableWeaponTypes) if (wt > maxId) maxId = wt;
+            if (maxId <= 0) maxId = MAX_WEAPON_INFOS - 1;
+
+            std::sort(g_availableWeaponTypes.begin(), g_availableWeaponTypes.end());
+            g_availableWeaponTypes.erase(std::unique(g_availableWeaponTypes.begin(), g_availableWeaponTypes.end()), g_availableWeaponTypes.end());
+
+            g_cfg.assign(maxId + 1, {});
+            g_cfg2.assign(maxId + 1, {});
+            g_weaponModelId.assign(maxId + 1, 0);
+            g_weaponModelId2.assign(maxId + 1, 0);
+            g_weaponNameStore.assign(maxId + 1, {});
+            for (int wt : g_availableWeaponTypes) {
+                g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+                g_cfg[wt].name = g_weaponNameStore[wt].c_str();
+                const int baseMax2 = MAX_WEAPON_INFOS - 1;
+                if (wt <= baseMax2) {
+                    g_weaponModelId[wt] = aWeaponInfo[wt].m_nModelId;
+                    g_weaponModelId2[wt] = aWeaponInfo[wt].m_nModelId2;
+                }
+            }
+        } else {
+            const int fallbackMax = 68;
+            g_availableWeaponTypes.clear();
+            for (int wt = 1; wt <= fallbackMax; wt++) g_availableWeaponTypes.push_back(wt);
+
+            g_cfg.assign(fallbackMax + 1, {});
+            g_cfg2.assign(fallbackMax + 1, {});
+            g_weaponModelId.assign(fallbackMax + 1, 0);
+            g_weaponModelId2.assign(fallbackMax + 1, 0);
+            g_weaponNameStore.assign(fallbackMax + 1, {});
+            for (int wt : g_availableWeaponTypes) {
+                g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+                g_cfg[wt].name = g_weaponNameStore[wt].c_str();
+                g_weaponModelId[wt] = aWeaponInfo[wt].m_nModelId;
+                g_weaponModelId2[wt] = aWeaponInfo[wt].m_nModelId2;
+            }
+        }
+        g_weaponTypesReady = true;
     }
 }
 bool g_skinModeEnabled = false;
@@ -144,6 +388,7 @@ static void Set(int wt, const char* name, int bone,
                 float x, float y, float z,
                 float rxDeg = 0, float ryDeg = 0, float rzDeg = 0,
                 float scale = 1.0f) {
+    if (wt <= 0 || wt >= (int)g_cfg.size()) return;
     auto& c = g_cfg[wt];
     c.enabled = true;
     c.name    = name;
@@ -157,6 +402,7 @@ static void Set2(int wt, int bone,
                 float x, float y, float z,
                 float rxDeg = 0, float ryDeg = 0, float rzDeg = 0,
                 float scale = 1.0f) {
+    if (wt <= 0 || wt >= (int)g_cfg2.size()) return;
     auto& c = g_cfg2[wt];
     c.enabled = true;
     c.name    = nullptr;
@@ -170,8 +416,18 @@ static void Set2(int wt, int bone,
 // Slot 1 melee / Slot 2 pistols / Slot 3 shotguns / Slot 4 SMG /
 // Slot 5 assault / Slot 6 rifles / Slot 7 heavy / Slot 8 thrown и т.д.
 static void SetupDefaults() {
-    for (int i = 0; i < 64; i++) { g_cfg[i] = {}; g_cfg[i].scale = 1.0f; }
-    for (int i = 0; i < 64; i++) { g_cfg2[i] = {}; g_cfg2[i].scale = 1.0f; }
+    InitWeaponTypesAndStorage();
+
+    for (auto& c : g_cfg) { c = {}; }
+    for (auto& c : g_cfg2) { c = {}; }
+
+    // Re-apply stable names for all ids (needed for full-range combo 0..256).
+    for (int wt = 0; wt < (int)g_cfg.size(); wt++) {
+        if (wt >= (int)g_weaponNameStore.size()) continue;
+        if (g_weaponNameStore[wt].empty())
+            g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+        g_cfg[wt].name = g_weaponNameStore[wt].c_str();
+    }
 
     // --- Slot 1: холодное оружие ---
     Set(WEAPONTYPE_KNIFE,        "Knife",        BONE_R_CALF,   0.02f, -0.08f,  0.05f,   0, 0,   0);
@@ -332,30 +588,32 @@ void LoadConfig() {
     g_toggleCommand = cmdBuf;
     NormalizeCommand();
     if (g_renderAllPedsRadius < 5.0f) g_renderAllPedsRadius = 5.0f;
-    for (int i = 0; i < 64; i++) {
-        auto& c = g_cfg[i];
-        if (c.name) ReadSection(c, c.name);
+    for (int wt : g_availableWeaponTypes) {
+        if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
+        auto& c = g_cfg[wt];
+        if (c.name && c.name[0]) ReadSection(c, c.name);
         // Fallback для кастомного оружия: секция [WeaponNN].
-        char sec[16];
-        _snprintf_s(sec, _TRUNCATE, "Weapon%d", i);
+        char sec[32];
+        _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
         if (GetPrivateProfileIntA(sec, "Bone", 0, g_iniPath) != 0) {
-            if (!c.name) { c.scale = 1.0f; c.enabled = true; }
+            if (!c.name || !c.name[0]) { c.scale = 1.0f; c.enabled = true; }
             ReadSection(c, sec);
         }
     }
     // Secondary configs: [<Name>2] and [WeaponNN_2]
-    for (int i = 0; i < 64; i++) {
-        auto& c = g_cfg2[i];
-        if (g_cfg[i].name) {
+    for (int wt : g_availableWeaponTypes) {
+        if (wt <= 0 || wt >= (int)g_cfg2.size()) continue;
+        auto& c = g_cfg2[wt];
+        if (wt < (int)g_cfg.size() && g_cfg[wt].name && g_cfg[wt].name[0]) {
             char sec2[64];
-            _snprintf_s(sec2, _TRUNCATE, "%s2", g_cfg[i].name);
+            _snprintf_s(sec2, _TRUNCATE, "%s2", g_cfg[wt].name);
             if (GetPrivateProfileIntA(sec2, "Bone", 0, g_iniPath) != 0) {
                 c.enabled = true;
                 ReadSection(c, sec2);
             }
         }
-        char sec[20];
-        _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", i);
+        char sec[32];
+        _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", wt);
         if (GetPrivateProfileIntA(sec, "Bone", 0, g_iniPath) != 0) {
             c.enabled = true;
             ReadSection(c, sec);
@@ -370,8 +628,7 @@ void LoadConfig() {
     GetPrivateProfileStringA("SkinMode", "Selected", "", skinName, sizeof(skinName), g_iniPath);
     g_skinSelectedName = skinName;
     RefreshActivationRouting();
-
-    DiscoverAvailableWeaponsFromGame();
+    // Weapon types are discovered in SetupDefaults (InitWeaponTypesAndStorage).
 }
 
 static void SaveDefaultConfig() {
@@ -398,8 +655,9 @@ static void SaveDefaultConfig() {
           "ActivationKey=F7\n"
           "SampAllowActivationKey=0\n"
           "Command=/orcoutfit\n\n", f);
-    for (int i = 0; i < 64; i++) {
-        const auto& c = g_cfg[i];
+    for (int wt : g_availableWeaponTypes) {
+        if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
+        const auto& c = g_cfg[wt];
         if (!c.name) continue;
         fprintf(f,
             "[%s]\nEnabled=%d\nBone=%d\n"
@@ -600,9 +858,11 @@ static void CreateDefaultObjectIniIfMissing(const std::string& iniPath, const st
     fclose(f);
 }
 
-static std::uint64_t ParseWeaponMaskCsv(const char* csv) {
-    if (!csv || !csv[0]) return 0;
-    std::uint64_t mask = 0;
+static std::vector<int> ParseWeaponTypesCsv(const char* csv) {
+    // Parses only commas/whitespace as separators.
+    std::vector<int> out;
+    if (!csv || !csv[0]) return out;
+
     const char* p = csv;
     while (*p) {
         while (*p == ' ' || *p == '\t' || *p == ',' || *p == ';') ++p;
@@ -610,20 +870,22 @@ static std::uint64_t ParseWeaponMaskCsv(const char* csv) {
         char* end = nullptr;
         long v = strtol(p, &end, 10);
         if (end == p) { ++p; continue; }
-        if (v >= 0 && v < 64) mask |= (std::uint64_t(1) << v);
+        if (v > 0 && v < (long)g_cfg.size()) out.push_back((int)v);
         p = end;
     }
-    return mask;
+    // De-dup (small list; keep it simple).
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
 }
 
-static void WeaponMaskToCsv(std::uint64_t mask, char* out, size_t outSize) {
+static void WeaponTypesToCsv(const std::vector<int>& types, char* out, size_t outSize) {
     if (!out || outSize == 0) return;
     out[0] = 0;
     bool first = true;
-    for (int i = 0; i < 64; i++) {
-        if ((mask & (std::uint64_t(1) << i)) == 0) continue;
-        char tmp[8];
-        _snprintf_s(tmp, _TRUNCATE, "%d", i);
+    for (int wt : types) {
+        char tmp[16];
+        _snprintf_s(tmp, _TRUNCATE, "%d", wt);
         if (!first) strncat_s(out, outSize, ",", _TRUNCATE);
         strncat_s(out, outSize, tmp, _TRUNCATE);
         first = false;
@@ -666,7 +928,7 @@ static void LoadObjectCfgFromIni(CustomObjectCfg& o) {
 
     char wcsv[256] = {};
     GetPrivateProfileStringA("Main", "Weapons", "", wcsv, sizeof(wcsv), o.iniPath.c_str());
-    o.weaponMask = ParseWeaponMaskCsv(wcsv);
+    o.weaponTypes = ParseWeaponTypesCsv(wcsv);
     char mode[16] = {};
     GetPrivateProfileStringA("Main", "WeaponsMode", "any", mode, sizeof(mode), o.iniPath.c_str());
     o.weaponRequireAll = (ToLowerAscii(mode) == "all");
@@ -901,7 +1163,7 @@ static void DiscoverRandomSkinPools(const std::string& skinRootDir) {
             continue;
         const std::string folderName = fd.cFileName;
         int modelId = -1;
-        CBaseModelInfo* mi = CModelInfo::GetModelInfo(folderName.c_str(), &modelId);
+        CBaseModelInfo* mi = ResolvePedModelInfoFromFolderName(folderName, &modelId);
         if (!mi || modelId < 0) {
             Log("random skin pool: unknown model name '%s' (skipped)", folderName.c_str());
             continue;
@@ -1013,7 +1275,7 @@ void SaveCustomObjectIni(const CustomObjectCfg& o) {
     _snprintf_s(buf, _TRUNCATE, "%.3f", o.scale);         W("Scale", buf);
 
     char wcsv[256];
-    WeaponMaskToCsv(o.weaponMask, wcsv, sizeof(wcsv));
+    WeaponTypesToCsv(o.weaponTypes, wcsv, sizeof(wcsv));
     W("Weapons", wcsv);
     W("WeaponsMode", o.weaponRequireAll ? "all" : "any");
     _snprintf_s(buf, _TRUNCATE, "%d", o.hideSelectedWeapons ? 1 : 0); W("HideWeapons", buf);
@@ -1044,40 +1306,36 @@ void SaveSkinModeIni() {
     WritePrivateProfileStringA("SkinMode", "RandomFromPools", buf, g_iniPath);
 }
 
-static bool LoadWeaponOverridesFromIni(const char* fullIni, std::array<WeaponCfg, 64>* outCfg) {
+static bool LoadWeaponOverridesFromIni(const char* fullIni, std::vector<WeaponCfg>* outCfg) {
     if (!fullIni || !outCfg) return false;
     if (!FileExistsA(fullIni)) return false;
-    for (int i = 0; i < 64; i++) (*outCfg)[i] = g_cfg[i];
+    *outCfg = g_cfg;
     bool any = false;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < (int)outCfg->size(); i++) {
         auto& c = (*outCfg)[i];
-        if (c.name) ReadSectionFromIni(c, c.name, fullIni);
-        char sec[16];
+        if (c.name && c.name[0]) ReadSectionFromIni(c, c.name, fullIni);
+        char sec[32];
         _snprintf_s(sec, _TRUNCATE, "Weapon%d", i);
         if (GetPrivateProfileIntA(sec, "Bone", 0, fullIni) != 0) {
-            if (!c.name) { c.scale = 1.0f; c.enabled = true; }
+            if (!c.name || !c.name[0]) { c.scale = 1.0f; c.enabled = true; }
             ReadSectionFromIni(c, sec, fullIni);
             any = true;
         }
-    }
-    // Also treat named sections as "any" if they exist.
-    if (!any) {
-        for (int i = 0; i < 64; i++) if ((*outCfg)[i].boneId != g_cfg[i].boneId || (*outCfg)[i].enabled != g_cfg[i].enabled) { any = true; break; }
     }
     return any;
 }
 
 static bool LoadWeaponOverridesFromIni2(const char* fullIni,
-                                       std::array<WeaponCfg, 64>* outCfg,
-                                       std::array<WeaponCfg, 64>* outCfg2) {
+                                       std::vector<WeaponCfg>* outCfg,
+                                       std::vector<WeaponCfg>* outCfg2) {
     if (!outCfg || !outCfg2) return false;
     const bool any1 = LoadWeaponOverridesFromIni(fullIni, outCfg);
-    if (!fullIni || !FileExistsA(fullIni)) { for (int i = 0; i < 64; i++) (*outCfg2)[i] = g_cfg2[i]; return any1; }
-    for (int i = 0; i < 64; i++) (*outCfg2)[i] = g_cfg2[i];
+    *outCfg2 = g_cfg2;
+    if (!fullIni || !FileExistsA(fullIni)) return any1;
     bool any2 = false;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < (int)outCfg2->size(); i++) {
         auto& c = (*outCfg2)[i];
-        if (g_cfg[i].name) {
+        if (g_cfg.size() > (size_t)i && g_cfg[i].name && g_cfg[i].name[0]) {
             char sec2[64];
             _snprintf_s(sec2, _TRUNCATE, "%s2", g_cfg[i].name);
             if (GetPrivateProfileIntA(sec2, "Bone", 0, fullIni) != 0) {
@@ -1098,28 +1356,32 @@ static bool LoadWeaponOverridesFromIni2(const char* fullIni,
 }
 
 static const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
-    if (!ped || wt < 0 || wt >= 64) return g_cfg[0];
+    if (!ped || wt < 0 || wt >= (int)g_cfg.size()) return g_cfg[0];
     CPlayerPed* local = FindPlayerPed(0);
     if (local && ped == local) {
         auto* mi = CModelInfo::GetModelInfo(ped->m_nModelIndex);
         if (mi) {
             auto it = g_otherByModelKey.find(mi->m_nKey);
-            if (it != g_otherByModelKey.end() && it->second.hasWeaponOverrides)
-                return it->second.weaponCfg[wt];
+            if (it != g_otherByModelKey.end() && it->second.hasWeaponOverrides) {
+                if (wt >= 0 && wt < (int)it->second.weaponCfg.size())
+                    return it->second.weaponCfg[wt];
+            }
         }
     }
     return g_cfg[wt];
 }
 
 static const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt) {
-    if (!ped || wt < 0 || wt >= 64) return g_cfg2[0];
+    if (!ped || wt < 0 || wt >= (int)g_cfg2.size()) return g_cfg2[0];
     CPlayerPed* local = FindPlayerPed(0);
     if (local && ped == local) {
         auto* mi = CModelInfo::GetModelInfo(ped->m_nModelIndex);
         if (mi) {
             auto it = g_otherByModelKey.find(mi->m_nKey);
-            if (it != g_otherByModelKey.end() && it->second.hasWeaponOverrides)
-                return it->second.weaponCfg2[wt];
+            if (it != g_otherByModelKey.end() && it->second.hasWeaponOverrides) {
+                if (wt >= 0 && wt < (int)it->second.weaponCfg2.size())
+                    return it->second.weaponCfg2[wt];
+            }
         }
     }
     return g_cfg2[wt];
@@ -1275,6 +1537,13 @@ SkinOtherOverrides* EnsureOtherOverridesForLocalSkin() {
     if (pi && pi->m_szSkinName[0]) skinName = pi->m_szSkinName;
 
     if (skinName.empty()) {
+        // Prefer model name captured from ped.dat load.
+        if (const char* nm = TryGetPedModelNameById((int)player->m_nModelIndex)) {
+            skinName = nm;
+        }
+    }
+
+    if (skinName.empty()) {
         char tmp[32];
         _snprintf_s(tmp, _TRUNCATE, "id%d", (int)player->m_nModelIndex);
         skinName = tmp;
@@ -1286,8 +1555,8 @@ SkinOtherOverrides* EnsureOtherOverridesForLocalSkin() {
     so.weaponsIniPath = dirPath + "\\weapons.ini";
 
     so.hasWeaponOverrides = true; // we want runtime to use per-skin overrides immediately
-    for (int i = 0; i < 64; i++) so.weaponCfg[i] = g_cfg[i];
-    for (int i = 0; i < 64; i++) so.weaponCfg2[i] = g_cfg2[i];
+    so.weaponCfg = g_cfg;
+    so.weaponCfg2 = g_cfg2;
 
     auto [newIt, ok] = g_otherByModelKey.emplace(modelKey, std::move(so));
     (void)ok;
@@ -1315,7 +1584,7 @@ void SaveOtherSkinWeaponsIni(const SkinOtherOverrides& so) {
 
     char sec[32];
     char buf[64];
-    for (int wt = 1; wt < 64; wt++) {
+    for (int wt = 1; wt < (int)so.weaponCfg.size(); wt++) {
         const WeaponCfg& c = so.weaponCfg[wt];
         _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
 
@@ -1338,7 +1607,7 @@ void SaveOtherSkinWeaponsIni(const SkinOtherOverrides& so) {
         _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);
         WritePrivateProfileStringA(sec, "Scale", buf, so.weaponsIniPath.c_str());
     }
-    for (int wt = 1; wt < 64; wt++) {
+    for (int wt = 1; wt < (int)so.weaponCfg2.size(); wt++) {
         const WeaponCfg& c = so.weaponCfg2[wt];
         _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", wt);
         _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);
@@ -1496,7 +1765,12 @@ static void RotateMatrix(RwMatrix* m, float rx, float ry, float rz) {
 // Create / render
 // ----------------------------------------------------------------------------
 static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, int slot, CPed* ped) {
-    if (wt <= 0 || wt >= 64) return false;
+    if (wt <= 0) return false;
+    if (secondary) {
+        if (g_cfg2.empty() || wt >= (int)g_cfg2.size()) return false;
+    } else {
+        if (g_cfg.empty() || wt >= (int)g_cfg.size()) return false;
+    }
     const WeaponCfg& wc = secondary ? GetWeaponCfg2ForPed(ped, wt) : GetWeaponCfgForPed(ped, wt);
     if (!wc.enabled || wc.boneId == 0) return false;
     if (FindSlotByType(arr, wt, secondary) >= 0) return true;
@@ -1542,9 +1816,8 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
     }
     arr[fi] = { true, wt, secondary, mid, 0, inst };
 
-    static bool logged[64] = {};
-    if (!logged[wt] && !secondary) {
-        logged[wt] = true;
+    static std::unordered_set<int> logged;
+    if (!secondary && logged.insert(wt).second) {
         Log("created wt=%d mid=%d bone=%d rwo=%p type=%d", wt, mid, wc.boneId, inst, (int)inst->type);
     }
     (void)slot;
@@ -1597,7 +1870,8 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
 }
 
 static bool PedHasWeaponType(CPed* ped, int wt) {
-    if (!ped || wt <= 0 || wt >= 64) return false;
+    if (!ped || wt <= 0) return false;
+    if (g_cfg.empty() || wt >= (int)g_cfg.size()) return false;
     for (int s = 0; s < 13; s++) {
         auto& w = ped->m_aWeapons[s];
         if ((int)w.m_eWeaponType != wt) continue;
@@ -1611,29 +1885,30 @@ static bool PedHasWeaponType(CPed* ped, int wt) {
 
 static bool ShouldRenderObjectForPed(CPed* ped, const CustomObjectCfg& o) {
     if (!o.enabled || o.boneId == 0) return false;
-    if (o.weaponMask == 0) return true;
+    if (o.weaponTypes.empty()) return true; // no filter -> always render
 
-    bool any = false;
-    for (int wt = 1; wt < 64; wt++) {
-        if ((o.weaponMask & (std::uint64_t(1) << wt)) == 0) continue;
-        const bool has = PedHasWeaponType(ped, wt);
-        if (o.weaponRequireAll) {
-            if (!has) return false;
-        } else {
-            if (has) any = true;
+    if (o.weaponRequireAll) {
+        for (int wt : o.weaponTypes) {
+            if (!PedHasWeaponType(ped, wt)) return false;
         }
+        return true;
     }
-    return o.weaponRequireAll ? true : any;
+
+    for (int wt : o.weaponTypes) {
+        if (PedHasWeaponType(ped, wt)) return true;
+    }
+    return false;
 }
 
-static void ApplyObjectWeaponSuppression(CPed* ped, const std::vector<CustomObjectCfg>& objs, bool suppress[64]) {
+static void ApplyObjectWeaponSuppression(CPed* ped, const std::vector<CustomObjectCfg>& objs, std::vector<char>* suppress) {
     if (!ped || !suppress) return;
     for (const auto& o : objs) {
         if (!o.hideSelectedWeapons) continue;
-        if (o.weaponMask == 0) continue; // nothing selected -> do not suppress anything
+        if (o.weaponTypes.empty()) continue; // nothing selected -> do not suppress anything
         if (!ShouldRenderObjectForPed(ped, o)) continue;
-        for (int wt = 1; wt < 64; wt++) {
-            if ((o.weaponMask & (std::uint64_t(1) << wt)) != 0) suppress[wt] = true;
+        for (int wt : o.weaponTypes) {
+            if (wt <= 0 || wt >= (int)suppress->size()) continue;
+            (*suppress)[wt] = 1;
         }
     }
 }
@@ -1856,18 +2131,20 @@ static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
     RpClumpRender(clump);
 }
 
-static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr, const bool suppress[64] = nullptr) {
+static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* suppress = nullptr) {
     if (!ped) return;
     unsigned char curSlot = ped->m_nSelectedWepSlot;
     int curType = 0;
     if (curSlot < 13) curType = (int)ped->m_aWeapons[curSlot].m_eWeaponType;
-    bool want[64] = {};
-    bool want2[64] = {};
+    if (g_cfg.empty()) return;
+    const int maxWt = (int)g_cfg.size();
+    std::vector<char> want(maxWt, 0);
+    std::vector<char> want2(maxWt, 0);
     for (int s = 0; s < 13; s++) {
         auto& w = ped->m_aWeapons[s];
         int wt = (int)w.m_eWeaponType;
-        if (wt <= 0 || wt >= 64) continue;
-        if (suppress && suppress[wt]) continue;
+        if (wt <= 0 || wt >= maxWt) continue;
+        if (suppress && wt < (int)suppress->size() && (*suppress)[wt]) continue;
         if (wt == curType) continue;
         const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
         if (!wc.enabled || wc.boneId == 0) continue;
@@ -1887,11 +2164,11 @@ static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr, const bool suppress[6
     for (int i = 0; i < kMax; i++) {
         if (!arr[i].active) continue;
         int wt = arr[i].weaponType;
-        const bool keep = (wt >= 0 && wt < 64) && (arr[i].secondary ? want2[wt] : want[wt]);
+        const bool keep = (wt >= 0 && wt < maxWt) && (arr[i].secondary ? want2[wt] : want[wt]);
         if (!keep) DestroyRendered(arr[i]);
     }
-    for (int wt = 1; wt < 64; wt++) if (want[wt])  CreateWeaponInstance(arr, wt, false, 0, ped);
-    for (int wt = 1; wt < 64; wt++) if (want2[wt]) CreateWeaponInstance(arr, wt, true,  0, ped);
+    for (int wt = 1; wt < maxWt; wt++) if (want[wt])  CreateWeaponInstance(arr, wt, false, 0, ped);
+    for (int wt = 1; wt < maxWt; wt++) if (want2[wt]) CreateWeaponInstance(arr, wt, true,  0, ped);
 }
 
 static int RenderPedWeapons(CPed* ped, RenderedWeapon* arr) {
@@ -1948,17 +2225,18 @@ static void SyncAndRender() {
         return;
     }
 
-    bool suppress[64] = {};
-    ApplyObjectWeaponSuppression(player, g_customObjects, suppress);
+    std::vector<char> suppress;
+    suppress.assign(g_cfg.size(), 0);
+    ApplyObjectWeaponSuppression(player, g_customObjects, &suppress);
     {
         CBaseModelInfo* mi = CModelInfo::GetModelInfo(player->m_nModelIndex);
         if (mi) {
             auto it = g_otherByModelKey.find(mi->m_nKey);
             if (it != g_otherByModelKey.end())
-                ApplyObjectWeaponSuppression(player, it->second.objects, suppress);
+                ApplyObjectWeaponSuppression(player, it->second.objects, &suppress);
         }
     }
-    SyncPedWeapons(player, g_rendered, suppress);
+    SyncPedWeapons(player, g_rendered, &suppress);
     int active = 0;
     for (int i = 0; i < kMax; i++) if (g_rendered[i].active) active++;
     for (auto& o : g_customObjects) if (ShouldRenderObjectForPed(player, o) && EnsureCustomInstance(o, player)) active++;
@@ -2078,14 +2356,29 @@ static void OnDrawingEvent() {
     static bool inited = false;
     if (!inited) {
         inited = true;
-        SetupDefaults();
-        SaveDefaultConfig();
-        LoadConfig();
-        DiscoverCustomObjectsAndEnsureIni();
-        DiscoverCustomSkins();
-        DiscoverOtherOverridesAndObjects();
-        overlay::SetDrawCallback(&OrcUiDraw);
-        Log("Plugin init. Enabled=%d", (int)g_enabled);
+        __try {
+            Log("Init begin");
+            SetupDefaults();
+            Log("SetupDefaults done (cfgSize=%lu, avail=%lu)", (unsigned long)g_cfg.size(), (unsigned long)g_availableWeaponTypes.size());
+            SaveDefaultConfig();
+            Log("SaveDefaultConfig done");
+            LoadConfig();
+            Log("LoadConfig done");
+            DiscoverCustomObjectsAndEnsureIni();
+            Log("CustomObjects done (%lu)", (unsigned long)g_customObjects.size());
+            DiscoverCustomSkins();
+            Log("CustomSkins done (%lu)", (unsigned long)g_customSkins.size());
+            DiscoverOtherOverridesAndObjects();
+            Log("OtherOverrides done (%lu)", (unsigned long)g_otherByModelKey.size());
+            overlay::SetDrawCallback(&OrcUiDraw);
+            Log("Plugin init. Enabled=%d", (int)g_enabled);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Если падаем на самом старте, хотя бы не дать игре умереть “без причин”.
+            Log("EXCEPTION during plugin init (SEH). Disable plugin UI.");
+            g_enabled = false;
+            overlay::SetOpen(false);
+        }
     }
     samp_bridge::Poll(g_toggleCommand.c_str(), &ToggleOverlayFromSamp);
     RefreshActivationRouting();

@@ -21,8 +21,13 @@ extern bool g_sampAllowActivationKey;
 extern std::string g_toggleCommand;
 extern bool g_considerWeaponSkills;
 
-extern WeaponCfg g_cfg[64];
-extern WeaponCfg g_cfg2[64];
+extern std::vector<WeaponCfg> g_cfg;
+extern std::vector<WeaponCfg> g_cfg2;
+// Weapon types discovered in current game (weapon.dat / modded weapon.dat).
+extern std::vector<int> g_availableWeaponTypes;
+// Cached model ids for each weapon type (same indexing as g_cfg).
+extern std::vector<int> g_weaponModelId;
+extern std::vector<int> g_weaponModelId2;
 
 extern std::vector<CustomObjectCfg> g_customObjects;
 extern std::vector<CustomSkinCfg> g_customSkins;

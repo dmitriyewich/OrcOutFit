@@ -64,6 +64,7 @@ struct RuntimeState {
     const char* command = nullptr;
     ToggleCallback onToggle = nullptr;
     bool minHookInitialized = false;
+    bool ownsMinHookInit = false;
 } g_state;
 
 int g_sampOverlayCursorMode = -1;
@@ -122,8 +123,10 @@ void Poll(const char* command, ToggleCallback onToggle) {
     g_state.version = DetectSampVersion(sampModule);
     if (!g_state.version) return;
     if (!g_state.minHookInitialized) {
-        if (MH_Initialize() != MH_OK) return;
+        const MH_STATUS st = MH_Initialize();
+        if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) return;
         g_state.minHookInitialized = true;
+        g_state.ownsMinHookInit = (st == MH_OK);
     }
 
     void* sendCommand = reinterpret_cast<void*>(g_state.base + g_state.version->sendCommandOffset);
@@ -246,8 +249,10 @@ void Shutdown() {
     g_state.command = nullptr;
     g_state.onToggle = nullptr;
 
-    MH_Uninitialize();
+    if (g_state.ownsMinHookInit)
+        MH_Uninitialize();
     g_state.minHookInitialized = false;
+    g_state.ownsMinHookInit = false;
 }
 
 } // namespace samp_bridge
