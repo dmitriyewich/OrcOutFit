@@ -50,7 +50,8 @@
   - используется per-ped cache инстансов по `CPools::GetPedRef`.
 - Кастомные объекты:
   - скан `*.dff` в `OrcOutFit\object`,
-  - отдельный `<name>.ini` на каждый объект.
+  - отдельный `<name>.ini` на каждый объект (кость, смещения, повороты, масштаб).
+  - масштаб: общий `Scale` и дополнительные множители `ScaleX/ScaleY/ScaleZ` (по осям).
   - объект может быть условным по оружию:
     - `Weapons=` (csv weapon ids),
     - `WeaponsMode=any|all`,

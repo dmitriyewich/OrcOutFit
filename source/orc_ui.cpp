@@ -439,6 +439,8 @@ void OrcUiDraw() {
 
                         ImGui::TextUnformatted("Scale");
                         ImGui::DragFloat("##osc_local", &obj.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+                        ImGui::TextUnformatted("Scale X/Y/Z");
+                        ImGui::DragFloat3("##oscxyz_local", &obj.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
                         ImGui::PopItemWidth();
 
                         WeaponFilterEditor(obj);
@@ -572,6 +574,8 @@ void OrcUiDraw() {
 
                                 ImGui::TextUnformatted("Scale");
                                 ImGui::DragFloat("##osc_other", &obj.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+                                ImGui::TextUnformatted("Scale X/Y/Z");
+                                ImGui::DragFloat3("##oscxyz_other", &obj.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
                                 ImGui::PopItemWidth();
 
                                 WeaponFilterEditor(obj);

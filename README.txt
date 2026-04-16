@@ -22,6 +22,7 @@
 [b]Кастомные объекты[/b]
 - Сканирование [code]*.dff[/code] в папке [code]OrcOutFit\object[/code]
 - Для каждого объекта — свой [code]<имя>.ini[/code]: кость, смещение, поворот, масштаб, вкл/выкл.
+- Масштаб: общий [code]Scale[/code] и дополнительные множители [code]ScaleX[/code]/[code]ScaleY[/code]/[code]ScaleZ[/code] по осям.
 - Можно задать условие «рендерить объект только при наличии выбранного оружия» (и опционально скрывать это оружие на теле).
 
 [b]Кастомные объекты по стандартной модели (скину) ped[/b]
@@ -110,7 +111,7 @@ premake5.exe --pluginsdkdir="C:\Games\CODEX\WeaponsOutFit\source\external\plugin
 Файл: [code]OrcOutFit\object\<имя>.ini[/code (и аналогично внутри [code]object\other\<skin>\[/code)
 
 [b]Секция [code][Main][/code][/b]
-- Базовые поля: [code]Enabled[/code], [code]Bone[/code], [code]OffsetX/Y/Z[/code], [code]RotationX/Y/Z[/code], [code]Scale[/code
+- Базовые поля: [code]Enabled[/code], [code]Bone[/code], [code]OffsetX/Y/Z[/code], [code]RotationX/Y/Z[/code], [code]Scale[/code], [code]ScaleX/Y/Z[/code]
 - Условие по оружию (опционально):
   - [code]Weapons[/code] = CSV weapon ids, например [code]22,23[/code
   - [code]WeaponsMode[/code] = [code]any[/code] или [code]all[/code

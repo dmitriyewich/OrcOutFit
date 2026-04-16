@@ -42,11 +42,7 @@
 
 using namespace plugin;
 
-// ----------------------------------------------------------------------------
-// Debug log
-// ----------------------------------------------------------------------------
 static HMODULE g_module = nullptr;
-static char    g_logPath[MAX_PATH] = {};
 char    g_iniPath[MAX_PATH] = {};
 char    g_gameObjDir[MAX_PATH] = {};
 static char    g_gameObjOtherDir[MAX_PATH] = {};
@@ -63,7 +59,6 @@ static void LogInit() {
 
     char* dot = strrchr(modPath, '.');
     if (dot) *dot = 0;
-    _snprintf_s(g_logPath, _TRUNCATE, "%s.log", modPath);
     _snprintf_s(g_iniPath, _TRUNCATE, "%s.ini", modPath);
     // Relative to plugin location (modloader-friendly):
     // <asi-dir>\OrcOutFit\object and <asi-dir>\OrcOutFit\SKINS
@@ -71,19 +66,7 @@ static void LogInit() {
     _snprintf_s(g_gameObjOtherDir, _TRUNCATE, "%s\\OrcOutFit\\object\\other", moduleDir);
     _snprintf_s(g_gameSkinDir, _TRUNCATE, "%s\\OrcOutFit\\SKINS", moduleDir);
 
-    FILE* f = fopen(g_logPath, "w");
-    if (f) { fputs("OrcOutFit debug log\n", f); fclose(f); }
     std::srand(static_cast<unsigned>(GetTickCount()));
-}
-
-static void Log(const char* fmt, ...) {
-    FILE* f = fopen(g_logPath, "a");
-    if (!f) return;
-    va_list ap; va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
 }
 
 // ----------------------------------------------------------------------------
@@ -109,57 +92,122 @@ static bool g_weaponTypesReady = false;
 static bool g_weaponDatHookInstalled = false;
 static int(__cdecl* g_LoadWeaponObject_Orig)(const char* line) = nullptr;
 static std::vector<int> g_weaponDatModelId; // wt -> modelId
+// Optional IDE/DFF basename from hooked line (second token), indexed by weapon type.
+static std::vector<std::string> g_weaponDatIdeName;
 
 static bool g_pedDatHookInstalled = false;
 static int(__cdecl* g_LoadPedObject_Orig)(const char* line) = nullptr;
 static std::vector<std::string> g_pedModelNameById; // modelId -> name
+static std::vector<std::string> g_pedDatTxdById; // modelId -> txd
 
+// SA `CFileLoader::LoadWeaponObject` receives a processed line, not raw weapon.dat:
+//   "<modelId> <dffName> <txdName> ..."  e.g. "346 colt45 colt45 colt45 1 30 0"
+// First token is IDE model id; second is the weapon model basename (matches FindWeaponType / IDE).
 static int __cdecl LoadWeaponObject_Detour(const char* line) {
-    // weapon.dat line begins with weapon type name token
-    char name[64] = {};
-    if (line) {
-        int i = 0;
-        while (line[i] && i < (int)sizeof(name) - 1) {
-            const char c = line[i];
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
-            name[i] = c;
-            i++;
-        }
-        name[i] = 0;
-    }
-
     int modelId = 0;
     if (g_LoadWeaponObject_Orig) modelId = g_LoadWeaponObject_Orig(line);
 
-    if (name[0]) {
-        const int wt = (int)CWeaponInfo::FindWeaponType(name);
-        if (wt > 0 && wt <= 255 && modelId > 0) {
-            if ((int)g_weaponDatModelId.size() <= wt) g_weaponDatModelId.resize(wt + 1, 0);
-            g_weaponDatModelId[wt] = modelId;
+    if (!line) return modelId;
+
+    const char* p = line;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    char* endNum = nullptr;
+    const long parsedId = strtol(p, &endNum, 10);
+    const int idFromLine = (endNum != p && parsedId > 0) ? (int)parsedId : 0;
+
+    char dff[96] = {};
+    p = endNum;
+    while (*p == ' ' || *p == '\t') ++p;
+    int di = 0;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && di < (int)sizeof(dff) - 1)
+        dff[di++] = *p++;
+    dff[di] = 0;
+
+    const int resolvedModel = (modelId > 0) ? modelId : idFromLine;
+    if (resolvedModel <= 0) return modelId;
+
+    int wt = WEAPONTYPE_UNARMED;
+    if (dff[0]) {
+        wt = (int)CWeaponInfo::FindWeaponType(dff);
+        if (wt <= 0) {
+            char up[96];
+            strncpy_s(up, dff, _TRUNCATE);
+            for (char* c = up; *c; ++c) {
+                if (*c >= 'a' && *c <= 'z') *c = (char)(*c - ('a' - 'A'));
+            }
+            wt = (int)CWeaponInfo::FindWeaponType(up);
         }
     }
+
+    if (wt <= 0) {
+        __try {
+            for (int t = 1; t <= 255; ++t) {
+                CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo((eWeaponType)t, 1);
+                if (!wi) continue;
+                if (wi->m_nModelId == resolvedModel || wi->m_nModelId2 == resolvedModel) {
+                    wt = t;
+                    break;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            const int cap = MAX_WEAPON_INFOS - 1;
+            __try {
+                for (int t = 1; t <= cap; ++t) {
+                    if (aWeaponInfo[t].m_nModelId == resolvedModel || aWeaponInfo[t].m_nModelId2 == resolvedModel) {
+                        wt = t;
+                        break;
+                    }
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+    }
+
+    if (wt > 0 && wt <= 255) {
+        if ((int)g_weaponDatModelId.size() <= wt) g_weaponDatModelId.resize(wt + 1, 0);
+        g_weaponDatModelId[wt] = resolvedModel;
+        if (dff[0]) {
+            if ((int)g_weaponDatIdeName.size() <= wt) g_weaponDatIdeName.resize(wt + 1);
+            g_weaponDatIdeName[wt] = dff;
+        }
+    }
+
     return modelId;
 }
 
 static int __cdecl LoadPedObject_Detour(const char* line) {
-    char name[64] = {};
-    if (line) {
-        int i = 0;
-        while (line[i] && i < (int)sizeof(name) - 1) {
-            const char c = line[i];
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
-            name[i] = c;
-            i++;
-        }
-        name[i] = 0;
-    }
-
     int modelId = 0;
     if (g_LoadPedObject_Orig) modelId = g_LoadPedObject_Orig(line);
 
-    if (name[0] && modelId > 0) {
-        if ((int)g_pedModelNameById.size() <= modelId) g_pedModelNameById.resize(modelId + 1);
-        if (g_pedModelNameById[modelId].empty()) g_pedModelNameById[modelId] = name;
+    // SA `LoadPedObject` line is processed as:
+    //   "<modelId> <dffName> <txdName> ..."  e.g. "235 SWMORI SWMORI CIVMALE ..."
+    if (!line) return modelId;
+    const char* p = line;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    char* endNum = nullptr;
+    const long parsedId = strtol(p, &endNum, 10);
+    const int idFromLine = (endNum != p && parsedId > 0) ? (int)parsedId : 0;
+    const int resolvedId = (modelId > 0) ? modelId : idFromLine;
+    if (resolvedId <= 0) return modelId;
+
+    char dff[64] = {};
+    char txd[64] = {};
+    p = endNum;
+    while (*p == ' ' || *p == '\t') ++p;
+    int di = 0;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && di < (int)sizeof(dff) - 1)
+        dff[di++] = *p++;
+    dff[di] = 0;
+    while (*p == ' ' || *p == '\t') ++p;
+    int ti = 0;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && ti < (int)sizeof(txd) - 1)
+        txd[ti++] = *p++;
+    txd[ti] = 0;
+
+    if ((dff[0] || txd[0]) && resolvedId > 0) {
+        if ((int)g_pedModelNameById.size() <= resolvedId) g_pedModelNameById.resize(resolvedId + 1);
+        if ((int)g_pedDatTxdById.size() <= resolvedId) g_pedDatTxdById.resize(resolvedId + 1);
+        if (dff[0] && g_pedModelNameById[resolvedId].empty()) g_pedModelNameById[resolvedId] = dff;
+        if (txd[0] && g_pedDatTxdById[resolvedId].empty()) g_pedDatTxdById[resolvedId] = txd;
     }
     return modelId;
 }
@@ -168,6 +216,7 @@ static void EnsureWeaponDatHookInstalled() {
     if (g_weaponDatHookInstalled) return;
     g_weaponDatHookInstalled = true;
     g_weaponDatModelId.assign(256 + 1, 0);
+    g_weaponDatIdeName.assign(256 + 1, {});
 
     if (MH_Initialize() != MH_OK) return;
     if (MH_CreateHook(reinterpret_cast<void*>(0x5B3FB0),
@@ -181,6 +230,8 @@ static void EnsurePedDatHookInstalled() {
     g_pedDatHookInstalled = true;
     g_pedModelNameById.clear();
     g_pedModelNameById.resize(1000); // grows on demand
+    g_pedDatTxdById.clear();
+    g_pedDatTxdById.resize(1000); // grows on demand
 
     // MinHook can be already initialized by other hooks.
     (void)MH_Initialize();
@@ -264,9 +315,7 @@ static void InitWeaponTypesAndStorage() {
     EnsureWeaponDatHookInstalled();
     EnsurePedDatHookInstalled();
 
-    Log("Weapon scan pre-try");
     __try {
-        Log("Weapon scan begin");
 
         // Primary source of truth: weapon.dat hook results (wt -> modelId).
         // Fallback: `aWeaponInfo[]` (SDK fixed array).
@@ -283,10 +332,6 @@ static void InitWeaponTypesAndStorage() {
                 if (wt > maxId) maxId = wt;
             }
         }
-        Log("Weapon scan base end: found=%lu maxId=%d", (unsigned long)g_availableWeaponTypes.size(), maxId);
-
-        Log("Weapon scan extra end: found=%lu maxId=%d", (unsigned long)g_availableWeaponTypes.size(), maxId);
-
         if (maxId <= 0) maxId = baseMax;
 
         std::sort(g_availableWeaponTypes.begin(), g_availableWeaponTypes.end());
@@ -301,10 +346,13 @@ static void InitWeaponTypesAndStorage() {
         for (int wt : g_availableWeaponTypes) {
             // Don't touch ms_aWeaponNames here: in some modpacks it can be invalid early
             // and trigger SEH; stable names are enough for UI.
-            g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+            if (wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[wt].empty())
+                g_weaponNameStore[wt] = g_weaponDatIdeName[wt];
+            else
+                g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
             g_cfg[wt].name = g_weaponNameStore[wt].c_str();
 
-            // Prefer weapon.dat hook model id, fallback to aWeaponInfo.
+            // Prefer LoadWeaponObject hook model id, fallback to aWeaponInfo / GetWeaponInfo.
             if (wt < (int)g_weaponDatModelId.size() && g_weaponDatModelId[wt] > 0)
                 g_weaponModelId[wt] = g_weaponDatModelId[wt];
             else if (wt <= baseMax)
@@ -312,12 +360,22 @@ static void InitWeaponTypesAndStorage() {
 
             if (wt <= baseMax)
                 g_weaponModelId2[wt] = aWeaponInfo[wt].m_nModelId2;
+
+            if (wt > baseMax || g_weaponModelId[wt] <= 0 || g_weaponModelId2[wt] <= 0) {
+                __try {
+                    CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo((eWeaponType)wt, 1);
+                    if (wi) {
+                        if (g_weaponModelId[wt] <= 0 && wi->m_nModelId > 0)
+                            g_weaponModelId[wt] = wi->m_nModelId;
+                        if (g_weaponModelId2[wt] <= 0 && wi->m_nModelId2 > 0)
+                            g_weaponModelId2[wt] = wi->m_nModelId2;
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }
         }
 
-        Log("Weapon scan end: cfgSize=%lu", (unsigned long)g_cfg.size());
         g_weaponTypesReady = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("Weapon scan exception -> fallback");
         // Если список уже частично заполнен (часто бывает из-за SEH в extra-скане),
         // не обнуляем его обратно в `1..68`. Оставляем то, что успело найтись,
         // и просто строим cfg под текущий maxId.
@@ -335,7 +393,10 @@ static void InitWeaponTypesAndStorage() {
             g_weaponModelId2.assign(maxId + 1, 0);
             g_weaponNameStore.assign(maxId + 1, {});
             for (int wt : g_availableWeaponTypes) {
-                g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+                if (wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[wt].empty())
+                    g_weaponNameStore[wt] = g_weaponDatIdeName[wt];
+                else
+                    g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
                 g_cfg[wt].name = g_weaponNameStore[wt].c_str();
                 const int baseMax2 = MAX_WEAPON_INFOS - 1;
                 if (wt <= baseMax2) {
@@ -344,7 +405,7 @@ static void InitWeaponTypesAndStorage() {
                 }
             }
         } else {
-            const int fallbackMax = 68;
+            const int fallbackMax = std::min(255, MAX_WEAPON_INFOS - 1);
             g_availableWeaponTypes.clear();
             for (int wt = 1; wt <= fallbackMax; wt++) g_availableWeaponTypes.push_back(wt);
 
@@ -424,7 +485,9 @@ static void SetupDefaults() {
     // Re-apply stable names for all ids (needed for full-range combo 0..256).
     for (int wt = 0; wt < (int)g_cfg.size(); wt++) {
         if (wt >= (int)g_weaponNameStore.size()) continue;
-        if (g_weaponNameStore[wt].empty())
+        if (wt > 0 && wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[wt].empty())
+            g_weaponNameStore[wt] = g_weaponDatIdeName[wt];
+        else if (g_weaponNameStore[wt].empty())
             g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
         g_cfg[wt].name = g_weaponNameStore[wt].c_str();
     }
@@ -511,6 +574,17 @@ static void ReadSection(WeaponCfg& c, const char* section) {
     ReadSectionFromIni(c, section, g_iniPath);
 }
 
+static bool HasWeaponSection(const char* section, const char* iniPath) {
+    if (!section || !section[0] || !iniPath || !iniPath[0]) return false;
+    char buf[64] = {};
+    GetPrivateProfileStringA(section, "Enabled", "", buf, sizeof(buf), iniPath);
+    if (buf[0]) return true;
+    GetPrivateProfileStringA(section, "Bone", "", buf, sizeof(buf), iniPath);
+    if (buf[0]) return true;
+    GetPrivateProfileStringA(section, "OffsetX", "", buf, sizeof(buf), iniPath);
+    return buf[0] != 0;
+}
+
 static int ParseActivationVk(const char* text) {
     if (!text || !text[0]) return VK_F7;
     if (!lstrcmpiA(text, "F1")) return VK_F1;
@@ -591,11 +665,11 @@ void LoadConfig() {
     for (int wt : g_availableWeaponTypes) {
         if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
         auto& c = g_cfg[wt];
-        if (c.name && c.name[0]) ReadSection(c, c.name);
+        if (c.name && c.name[0] && HasWeaponSection(c.name, g_iniPath)) ReadSection(c, c.name);
         // Fallback для кастомного оружия: секция [WeaponNN].
         char sec[32];
         _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
-        if (GetPrivateProfileIntA(sec, "Bone", 0, g_iniPath) != 0) {
+        if (HasWeaponSection(sec, g_iniPath)) {
             if (!c.name || !c.name[0]) { c.scale = 1.0f; c.enabled = true; }
             ReadSection(c, sec);
         }
@@ -607,14 +681,14 @@ void LoadConfig() {
         if (wt < (int)g_cfg.size() && g_cfg[wt].name && g_cfg[wt].name[0]) {
             char sec2[64];
             _snprintf_s(sec2, _TRUNCATE, "%s2", g_cfg[wt].name);
-            if (GetPrivateProfileIntA(sec2, "Bone", 0, g_iniPath) != 0) {
+            if (HasWeaponSection(sec2, g_iniPath)) {
                 c.enabled = true;
                 ReadSection(c, sec2);
             }
         }
         char sec[32];
         _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", wt);
-        if (GetPrivateProfileIntA(sec, "Bone", 0, g_iniPath) != 0) {
+        if (HasWeaponSection(sec, g_iniPath)) {
             c.enabled = true;
             ReadSection(c, sec);
         }
@@ -846,6 +920,7 @@ static void CreateDefaultObjectIniIfMissing(const std::string& iniPath, const st
         "OffsetX=0.000\nOffsetY=0.000\nOffsetZ=0.000\n"
         "RotationX=0.0\nRotationY=0.0\nRotationZ=0.0\n"
         "Scale=1.000\n"
+        "ScaleX=1.000\nScaleY=1.000\nScaleZ=1.000\n"
         "; Optional: render only when ped has weapon(s).\n"
         "; Weapons is a comma-separated list of weapon IDs (eWeaponType), e.g. 22,23.\n"
         "; If empty, object renders always.\n"
@@ -895,10 +970,7 @@ static void WeaponTypesToCsv(const std::vector<int>& types, char* out, size_t ou
 static void CreateDefaultSkinIniIfMissing(const std::string& iniPath, const std::string& baseName) {
     if (FileExistsA(iniPath.c_str())) return;
     FILE* f = fopen(iniPath.c_str(), "w");
-    if (!f) {
-        Log("CreateDefaultSkinIniIfMissing: cannot create %s", iniPath.c_str());
-        return;
-    }
+    if (!f) return;
     fprintf(f,
         "; OrcOutFit custom skin config for %s\n"
         "; Nicks: one per line and/or comma-separated (case-insensitive).\n\n"
@@ -925,6 +997,9 @@ static void LoadObjectCfgFromIni(CustomObjectCfg& o) {
     o.ry = F("RotationY", o.ry / D2R) * D2R;
     o.rz = F("RotationZ", o.rz / D2R) * D2R;
     o.scale = F("Scale", o.scale);
+    o.scaleX = F("ScaleX", o.scaleX);
+    o.scaleY = F("ScaleY", o.scaleY);
+    o.scaleZ = F("ScaleZ", o.scaleZ);
 
     char wcsv[256] = {};
     GetPrivateProfileStringA("Main", "Weapons", "", wcsv, sizeof(wcsv), o.iniPath.c_str());
@@ -980,10 +1055,7 @@ static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
     if (o.rwObject) return true;
     if (!FileExistsA(o.dffPath.c_str())) return false;
     if (o.txdPath.empty() || !FileExistsA(o.txdPath.c_str())) {
-        if (!o.txdMissingLogged) {
-            o.txdMissingLogged = true;
-            Log("custom txd missing for '%s' (dff=%s)", o.name.c_str(), o.dffPath.c_str());
-        }
+        if (!o.txdMissingLogged) o.txdMissingLogged = true;
         return false;
     }
 
@@ -997,10 +1069,7 @@ static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
         RwStreamClose(txdStream, nullptr);
     }
     if (!txdOk) {
-        if (!o.txdMissingLogged) {
-            o.txdMissingLogged = true;
-            Log("txd load failed for '%s': %s", o.name.c_str(), o.txdPath.c_str());
-        }
+        if (!o.txdMissingLogged) o.txdMissingLogged = true;
         return false;
     }
     o.txdSlot = txdSlot;
@@ -1028,10 +1097,7 @@ static bool EnsureCustomSkinLoaded(CustomSkinCfg& s) {
     if (s.rwObject) return true;
     if (!FileExistsA(s.dffPath.c_str())) return false;
     if (s.txdPath.empty() || !FileExistsA(s.txdPath.c_str())) {
-        if (!s.txdMissingLogged) {
-            s.txdMissingLogged = true;
-            Log("skin txd missing for '%s' (dff=%s)", s.name.c_str(), s.dffPath.c_str());
-        }
+        if (!s.txdMissingLogged) s.txdMissingLogged = true;
         return false;
     }
 
@@ -1080,15 +1146,9 @@ static void LoadSkinCfgFromIni(CustomSkinCfg& s) {
 }
 
 void SaveSkinCfgToIni(const CustomSkinCfg& s) {
-    if (s.iniPath.empty()) {
-        Log("SaveSkinCfgToIni: empty path (skin '%s')", s.name.c_str());
-        return;
-    }
+    if (s.iniPath.empty()) return;
     FILE* f = fopen(s.iniPath.c_str(), "w");
-    if (!f) {
-        Log("SaveSkinCfgToIni: fopen failed '%s'", s.iniPath.c_str());
-        return;
-    }
+    if (!f) return;
     fprintf(f,
         "; OrcOutFit custom skin config for %s\n"
         "; Nicks: one per line and/or comma-separated (case-insensitive).\n\n"
@@ -1106,19 +1166,13 @@ void DiscoverCustomObjectsAndEnsureIni() {
     g_customObjects.clear();
 
     DWORD attr = GetFileAttributesA(g_gameObjDir);
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        Log("custom objects dir missing: %s", g_gameObjDir);
-        return;
-    }
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) return;
 
     std::string dir = g_gameObjDir;
     std::string mask = JoinPath(dir, "*.*");
     WIN32_FIND_DATAA fd{};
     HANDLE h = FindFirstFileA(mask.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        Log("custom objects scan failed: %s", dir.c_str());
-        return;
-    }
+    if (h == INVALID_HANDLE_VALUE) return;
 
     int foundDff = 0;
     do {
@@ -1134,15 +1188,11 @@ void DiscoverCustomObjectsAndEnsureIni() {
         o.iniPath = JoinPath(dir, base + ".ini");
         CreateDefaultObjectIniIfMissing(o.iniPath, base);
         LoadObjectCfgFromIni(o);
-        if (o.txdPath.empty()) {
-            Log("warning: no matching txd for %s.dff in %s", base.c_str(), dir.c_str());
-        }
+        // if (o.txdPath.empty()) — тихий пропуск, без лога
         g_customObjects.push_back(o);
         foundDff++;
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-
-    Log("custom objects discovered: %d (dir=%s)", foundDff, dir.c_str());
 }
 
 static void DiscoverRandomSkinPools(const std::string& skinRootDir) {
@@ -1164,14 +1214,8 @@ static void DiscoverRandomSkinPools(const std::string& skinRootDir) {
         const std::string folderName = fd.cFileName;
         int modelId = -1;
         CBaseModelInfo* mi = ResolvePedModelInfoFromFolderName(folderName, &modelId);
-        if (!mi || modelId < 0) {
-            Log("random skin pool: unknown model name '%s' (skipped)", folderName.c_str());
-            continue;
-        }
-        if (mi->GetModelType() != MODEL_INFO_PED) {
-            Log("random skin pool: '%s' is not MODEL_INFO_PED (skipped)", folderName.c_str());
-            continue;
-        }
+        if (!mi || modelId < 0) continue;
+        if (mi->GetModelType() != MODEL_INFO_PED) continue;
         const std::string subDir = JoinPath(rndRoot, folderName);
         SkinRandomPool pool;
         pool.folderName = folderName;
@@ -1202,15 +1246,10 @@ static void DiscoverRandomSkinPools(const std::string& skinRootDir) {
         } while (FindNextFileA(dh, &dfd));
         FindClose(dh);
 
-        if (pool.variants.empty()) {
-            Log("random skin pool: '%s' (model %d) has no .dff", folderName.c_str(), modelId);
-            continue;
-        }
+        if (pool.variants.empty()) continue;
         g_skinRandomPoolVariants += (int)pool.variants.size();
         g_skinRandomPoolModels++;
         g_skinRandomPools.push_back(std::move(pool));
-        Log("random skin pool: %s -> model id %d, %d variant(s)", folderName.c_str(), modelId,
-            (int)g_skinRandomPools.back().variants.size());
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 }
@@ -1220,10 +1259,7 @@ void DiscoverCustomSkins() {
     g_customSkins.clear();
     DestroyAllRandomPoolSkins();
     DWORD attr = GetFileAttributesA(g_gameSkinDir);
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        Log("skins dir missing: %s", g_gameSkinDir);
-        return;
-    }
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) return;
     std::string dir = g_gameSkinDir;
     std::string mask = JoinPath(dir, "*.*");
     WIN32_FIND_DATAA fd{};
@@ -1245,8 +1281,6 @@ void DiscoverCustomSkins() {
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     DiscoverRandomSkinPools(dir);
-    Log("custom skins discovered: %d (dir=%s), random pools: %d model(s), %d variant(s)", (int)g_customSkins.size(),
-        g_gameSkinDir, g_skinRandomPoolModels, g_skinRandomPoolVariants);
     if (!g_skinSelectedName.empty()) {
         for (int i = 0; i < (int)g_customSkins.size(); i++) {
             if (ToLowerAscii(g_customSkins[i].name) == ToLowerAscii(g_skinSelectedName)) {
@@ -1273,6 +1307,9 @@ void SaveCustomObjectIni(const CustomObjectCfg& o) {
     _snprintf_s(buf, _TRUNCATE, "%.2f", o.ry / D2R);      W("RotationY", buf);
     _snprintf_s(buf, _TRUNCATE, "%.2f", o.rz / D2R);      W("RotationZ", buf);
     _snprintf_s(buf, _TRUNCATE, "%.3f", o.scale);         W("Scale", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", o.scaleX);        W("ScaleX", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", o.scaleY);        W("ScaleY", buf);
+    _snprintf_s(buf, _TRUNCATE, "%.3f", o.scaleZ);        W("ScaleZ", buf);
 
     char wcsv[256];
     WeaponTypesToCsv(o.weaponTypes, wcsv, sizeof(wcsv));
@@ -1284,24 +1321,19 @@ void SaveCustomObjectIni(const CustomObjectCfg& o) {
 void SaveSkinModeIni() {
     if (GetFileAttributesA(g_iniPath) == INVALID_FILE_ATTRIBUTES) {
         FILE* t = fopen(g_iniPath, "w");
-        if (!t) {
-            Log("SaveSkinModeIni: cannot create %s", g_iniPath);
-            return;
-        }
+        if (!t) return;
         fclose(t);
     }
     char buf[64];
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinModeEnabled ? 1 : 0);
-    if (!WritePrivateProfileStringA("SkinMode", "Enabled", buf, g_iniPath))
-        Log("SaveSkinModeIni: write Enabled failed (le=%lu)", GetLastError());
+    WritePrivateProfileStringA("SkinMode", "Enabled", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinHideBasePed ? 1 : 0);
     WritePrivateProfileStringA("SkinMode", "HideBasePed", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinNickMode ? 1 : 0);
     WritePrivateProfileStringA("SkinMode", "NickMode", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinLocalPreferSelected ? 1 : 0);
     WritePrivateProfileStringA("SkinMode", "LocalPreferSelected", buf, g_iniPath);
-    if (!WritePrivateProfileStringA("SkinMode", "Selected", g_skinSelectedName.c_str(), g_iniPath))
-        Log("SaveSkinModeIni: write Selected failed (le=%lu)", GetLastError());
+    WritePrivateProfileStringA("SkinMode", "Selected", g_skinSelectedName.c_str(), g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinRandomFromPools ? 1 : 0);
     WritePrivateProfileStringA("SkinMode", "RandomFromPools", buf, g_iniPath);
 }
@@ -1392,19 +1424,13 @@ void DiscoverOtherOverridesAndObjects() {
     g_otherByModelKey.clear();
 
     DWORD attr = GetFileAttributesA(g_gameObjOtherDir);
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        Log("object\\other dir missing: %s", g_gameObjOtherDir);
-        return;
-    }
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) return;
 
     std::string root = g_gameObjOtherDir;
     std::string mask = JoinPath(root, "*.*");
     WIN32_FIND_DATAA fd{};
     HANDLE h = FindFirstFileA(mask.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        Log("object\\other scan failed: %s", root.c_str());
-        return;
-    }
+    if (h == INVALID_HANDLE_VALUE) return;
 
     int modelFoldersFound = 0;
     int objFound = 0;
@@ -1437,9 +1463,7 @@ void DiscoverOtherOverridesAndObjects() {
                 o.iniPath = JoinPath(skinDir, base + ".ini");
                 CreateDefaultObjectIniIfMissing(o.iniPath, base);
                 LoadObjectCfgFromIni(o);
-                if (o.txdPath.empty()) {
-                    Log("warning: no matching txd for %s.dff in %s", base.c_str(), skinDir.c_str());
-                }
+                        // if (o.txdPath.empty()) — тихий пропуск, без лога
                 so.objects.push_back(std::move(o));
                 objFound++;
             } while (FindNextFileA(dh, &dfd));
@@ -1469,23 +1493,24 @@ void DiscoverOtherOverridesAndObjects() {
         modelFoldersFound++;
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-
-    Log("object\\other discovered: %d model folder(s), %d object(s), weapons.ini: %d (dir=%s)",
-        modelFoldersFound, objFound, weaponIniFound, g_gameObjOtherDir);
 }
 
 // ----------------------------------------------------------------------------
 // Save single weapon section
 // ----------------------------------------------------------------------------
 void SaveWeaponSection(int wt) {
+    if (wt <= 0 || wt >= (int)g_cfg.size()) return;
     auto& c = g_cfg[wt];
-    char sec[32];
+    char sec[96];
     if (c.name) _snprintf_s(sec, _TRUNCATE, "%s", c.name);
     else        _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
+    char secNum[32];
+    _snprintf_s(secNum, _TRUNCATE, "Weapon%d", wt);
 
     char buf[32];
     auto W = [&](const char* key, const char* v) {
         WritePrivateProfileStringA(sec, key, v, g_iniPath);
+        if (lstrcmpiA(sec, secNum) != 0) WritePrivateProfileStringA(secNum, key, v, g_iniPath);
     };
     _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);     W("Enabled", buf);
     _snprintf_s(buf, _TRUNCATE, "%d", c.boneId);              W("Bone", buf);
@@ -1499,14 +1524,18 @@ void SaveWeaponSection(int wt) {
 }
 
 void SaveWeaponSection2(int wt) {
+    if (wt <= 0 || wt >= (int)g_cfg2.size()) return;
     auto& c = g_cfg2[wt];
-    char sec[32];
+    char sec[96];
     if (g_cfg[wt].name) _snprintf_s(sec, _TRUNCATE, "%s2", g_cfg[wt].name);
     else               _snprintf_s(sec, _TRUNCATE, "Weapon%d_2", wt);
+    char secNum[32];
+    _snprintf_s(secNum, _TRUNCATE, "Weapon%d_2", wt);
 
     char buf[32];
     auto W = [&](const char* key, const char* v) {
         WritePrivateProfileStringA(sec, key, v, g_iniPath);
+        if (lstrcmpiA(sec, secNum) != 0) WritePrivateProfileStringA(secNum, key, v, g_iniPath);
     };
     _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);     W("Enabled", buf);
     _snprintf_s(buf, _TRUNCATE, "%d", c.boneId);              W("Bone", buf);
@@ -1818,7 +1847,6 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
 
     static std::unordered_set<int> logged;
     if (!secondary && logged.insert(wt).second) {
-        Log("created wt=%d mid=%d bone=%d rwo=%p type=%d", wt, mid, wc.boneId, inst, (int)inst->type);
     }
     (void)slot;
     return true;
@@ -1944,8 +1972,11 @@ static void RenderCustomObject(CPed* ped, CustomObjectCfg& o) {
     RotateMatrix(&mtx, o.rx, o.ry, o.rz);
     std::memcpy(RwFrameGetMatrix(frame), &mtx, sizeof(RwMatrix));
     RwMatrixUpdate(RwFrameGetMatrix(frame));
-    if (o.scale != 1.0f) {
-        RwV3d s = { o.scale, o.scale, o.scale };
+    const float sx = o.scale * o.scaleX;
+    const float sy = o.scale * o.scaleY;
+    const float sz = o.scale * o.scaleZ;
+    if (sx != 1.0f || sy != 1.0f || sz != 1.0f) {
+        RwV3d s = { sx, sy, sz };
         RwMatrixScale(RwFrameGetMatrix(frame), &s, rwCOMBINEPRECONCAT);
     }
     RwFrameUpdateObjects(frame);
@@ -2071,37 +2102,12 @@ static CustomSkinCfg* ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer, bool
 static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
     if (!ped || !ped->m_pRwClump || !sel) return;
     RpClump* pedClump = ped->m_pRwClump;
-    if (!EnsureCustomSkinLoaded(*sel)) {
-        static int logCooldown = 0;
-        if ((logCooldown++ % 180) == 0) Log("skin load pending/failed: %s", sel->name.c_str());
-        return;
-    }
-    if (!sel->rwObject || sel->rwObject->type != rpCLUMP) {
-        static bool onceBadType = false;
-        if (!onceBadType) { onceBadType = true; Log("skin bad rwObject/type for %s", sel->name.c_str()); }
-        return;
-    }
+    if (!EnsureCustomSkinLoaded(*sel)) return;
+    if (!sel->rwObject || sel->rwObject->type != rpCLUMP) return;
     RpClump* clump = reinterpret_cast<RpClump*>(sel->rwObject);
     RwFrame* srcFrame = RpClumpGetFrame(pedClump);
     RwFrame* dstFrame = RpClumpGetFrame(clump);
-    if (!srcFrame || !dstFrame) {
-        static bool onceNoFrame = false;
-        if (!onceNoFrame) { onceNoFrame = true; Log("skin frame missing src=%p dst=%p", srcFrame, dstFrame); }
-        return;
-    }
-    static bool loggedSkinInfo = false;
-    if (!loggedSkinInfo) {
-        loggedSkinInfo = true;
-        RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(pedClump);
-        RpHAnimHierarchy* dstH = GetAnimHierarchyFromSkinClump(clump);
-        int skinnedAtomics = 0;
-        RpClumpForAllAtomics(clump, +[](RpAtomic* a, void* d)->RpAtomic* {
-            if (RpSkinAtomicGetSkin(a)) (*reinterpret_cast<int*>(d))++;
-            return a;
-        }, &skinnedAtomics);
-        Log("skin selected=%s srcH=%p dstH=%p srcNodes=%d dstNodes=%d skinAtomics=%d",
-            sel->name.c_str(), srcH, dstH, srcH ? srcH->numNodes : -1, dstH ? dstH->numNodes : -1, skinnedAtomics);
-    }
+    if (!srcFrame || !dstFrame) return;
     std::memcpy(RwFrameGetMatrix(dstFrame), RwFrameGetMatrix(srcFrame), sizeof(RwMatrix));
     RwMatrixUpdate(RwFrameGetMatrix(dstFrame));
     RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(pedClump);
@@ -2112,12 +2118,6 @@ static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
     if (canAnimate) {
         if (ped->m_pRwClump != pedClump) return;
         CopySkinHierarchyPose(ped, clump);
-    } else {
-        static bool loggedNoSkinHierarchy = false;
-        if (!loggedNoSkinHierarchy) {
-            loggedNoSkinHierarchy = true;
-            Log("selected skin cannot bind anim hierarchy (srcH=%p bindCount=%d)", srcH, g_skinBindCount);
-        }
     }
     RwFrameUpdateObjects(dstFrame);
     // Explicit lighting for custom skin. Without this, when no weapon/object render
@@ -2345,7 +2345,7 @@ static CPed* g_hiddenPed = nullptr;
 static RpClump* g_hiddenClump = nullptr;
 static bool g_hideSnapshotValid = false;
 
-static void OnInitRw() { Log("initRw"); }
+static void OnInitRw() {}
 static void OnDrawingEvent();
 static void OnPedRenderBefore(CPed* ped);
 static void OnPedRenderAfter(CPed* ped);
@@ -2357,25 +2357,16 @@ static void OnDrawingEvent() {
     if (!inited) {
         inited = true;
         __try {
-            Log("Init begin");
             SetupDefaults();
-            Log("SetupDefaults done (cfgSize=%lu, avail=%lu)", (unsigned long)g_cfg.size(), (unsigned long)g_availableWeaponTypes.size());
             SaveDefaultConfig();
-            Log("SaveDefaultConfig done");
             LoadConfig();
-            Log("LoadConfig done");
             DiscoverCustomObjectsAndEnsureIni();
-            Log("CustomObjects done (%lu)", (unsigned long)g_customObjects.size());
             DiscoverCustomSkins();
-            Log("CustomSkins done (%lu)", (unsigned long)g_customSkins.size());
             DiscoverOtherOverridesAndObjects();
-            Log("OtherOverrides done (%lu)", (unsigned long)g_otherByModelKey.size());
             overlay::SetDrawCallback(&OrcUiDraw);
-            Log("Plugin init. Enabled=%d", (int)g_enabled);
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
             // Если падаем на самом старте, хотя бы не дать игре умереть “без причин”.
-            Log("EXCEPTION during plugin init (SEH). Disable plugin UI.");
             g_enabled = false;
             overlay::SetOpen(false);
         }
@@ -2384,10 +2375,7 @@ static void OnDrawingEvent() {
     RefreshActivationRouting();
     overlay::Init();  // no-op after first time
     __try { SyncAndRender(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        static bool once = false;
-        if (!once) { once = true; Log("EXCEPTION in SyncAndRender"); }
-    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
     overlay::DrawFrame();
 }
 
@@ -2419,13 +2407,8 @@ static void OnPedRenderAfter(CPed* ped) {
 
     __try {
         if (g_hiddenClump) CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 255);
-        if (ped->m_pRwClump && ped->m_pRwClump != g_hiddenClump) {
+        if (ped->m_pRwClump && ped->m_pRwClump != g_hiddenClump)
             CVisibilityPlugins::SetClumpAlpha(ped->m_pRwClump, 255);
-            static int mismatchLogTick = 0;
-            if ((mismatchLogTick++ % 120) == 0) {
-                Log("skin hide restore: clump switched old=%p new=%p", g_hiddenClump, ped->m_pRwClump);
-            }
-        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         // nothing
@@ -2488,6 +2471,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_module = module;
         DisableThreadLibraryCalls(module);
         LogInit();
+        // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon.dat load.
+        EnsureWeaponDatHookInstalled();
+        EnsurePedDatHookInstalled();
     }
     return TRUE;
 }

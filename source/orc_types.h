@@ -45,6 +45,7 @@ struct CustomObjectCfg {
     float x = 0.0f, y = 0.0f, z = 0.0f;
     float rx = 0.0f, ry = 0.0f, rz = 0.0f;
     float scale = 1.0f;
+    float scaleX = 1.0f, scaleY = 1.0f, scaleZ = 1.0f;
 
     // Weapon filter:
     // - if weaponTypes.empty() -> render always

@@ -282,6 +282,46 @@
 
 ## 2026-04-16
 
+- Реализован non-uniform scale для кастомных объектов:
+  - добавлены поля `ScaleX/ScaleY/ScaleZ` в `CustomObjectCfg` (при `Scale` как базовом).
+  - итоговый рендер-масштаб: `sx = Scale*ScaleX`, `sy = Scale*ScaleY`, `sz = Scale*ScaleZ`.
+  - сохранена обратная совместимость старых INI: при отсутствии `ScaleX/Y/Z` используются `1.0`.
+- `main.cpp`:
+  - `CreateDefaultObjectIniIfMissing`: теперь пишет `ScaleX=1.000`, `ScaleY=1.000`, `ScaleZ=1.000`.
+  - `LoadObjectCfgFromIni`: чтение `ScaleX/Y/Z`.
+  - `SaveCustomObjectIni`: запись `ScaleX/Y/Z`.
+  - `RenderCustomObject`: заменён uniform scale на поосевой (`RwMatrixScale` с `sx/sy/sz`).
+- `orc_ui.cpp`:
+  - Objects/Local и Objects/Other: добавлены контролы `Scale X/Y/Z` (`DragFloat3`) рядом с `Scale`.
+- Сборка: `MSBuild OrcOutFit.sln /p:Configuration=Release /p:Platform=x86` → `build\Release\OrcOutFit.asi`.
+
+- Полностью убрана внутренняя система debug-логов из `main.cpp`:
+  - удалены `g_logPath`, `Log(...)` и все вызовы `Log(...)` в weapon/ped/skin/object-путях и инициализации.
+  - `LogInit` теперь только рассчитывает `g_iniPath` и пути `OrcOutFit\\object/other/SKINS`, без создания `.log`.
+  - сохранены только критичные guards/SEH без записи в файл.
+  - проект успешно пересобран: `build\Release\OrcOutFit.asi`.
+
+- `main.cpp`: исправлен хук `CFileLoader::LoadPedObject` (`0x5B7420`) под реальный формат строки
+  `modelId dffName txdName ...` (пример: `235 SWMORI SWMORI ...`), а не прежний парсинг первого токена как имени модели.
+  Детур теперь парсит `id/dff/txd`, использует `modelId` из возврата/строки и заполняет кеши `modelId -> dff/txd`.
+- Хук `LoadPedObject` ставится в `DllMain` вместе с `LoadWeaponObject`, чтобы не пропускать однократную загрузку `ped.dat` до первого кадра.
+- Починен `Reload INI` для оружия: убрана привязка загрузки секции к условию `Bone != 0`;
+  добавлен `HasWeaponSection(...)`, поэтому секции читаются даже при `Bone=0` (например, если правятся только offsets/rot/scale).
+- `Save weapon`/`Save all weapons`: сохранение теперь дублируется в числовые секции
+  `[WeaponNN]` / `[WeaponNN_2]` помимо именованных (`[Name]` / `[Name2]`) для стабильного последующего `Reload INI`.
+  Также расширен буфер имени секции и добавлены проверки границ `wt` в `SaveWeaponSection*`.
+- Сборка: `MSBuild OrcOutFit.sln /p:Configuration=Release /p:Platform=x86` → `build\Release\OrcOutFit.asi`.
+
+- `main.cpp`: исправлен хук `CFileLoader::LoadWeaponObject` (`0x5B3FB0`): строка, которую получает игра, имеет вид
+  `modelId dffName txdName ...` (например `346 colt45 colt45 colt45 1 30 0`), а не «имя типа» в первом токене.
+  Детур вызывает оригинал первым, берёт `modelId` из возврата/строки, `wt` через `FindWeaponType(dff)` (с попыткой upper-case),
+  при неудаче — обратный поиск по `GetWeaponInfo` / `aWeaponInfo` по `m_nModelId` / `m_nModelId2`.
+  Кеш `g_weaponDatIdeName[wt]` хранит basename из второго токена для подписи в UI.
+- Хук `LoadWeaponObject` ставится уже в `DllMain` после `LogInit`, чтобы не пропустить однократную загрузку `weapon.dat` до первого `drawingEvent`.
+- Скан типов: подписи из IDE-имени при наличии; для `wt > MAX_WEAPON_INFOS-1` догрузка model/model2 через `GetWeaponInfo` в SEH;
+  fallback при пустом списке расширен с `68` до `min(255, MAX_WEAPON_INFOS-1)`.
+- Сборка: `MSBuild OrcOutFit.sln /p:Configuration=Release /p:Platform=x86` → `build\Release\OrcOutFit.asi`.
+
 - `context.md`: MSBuild — в `OrcOutFit.sln` платформа **`x86`** (не `Win32`); пример команды в контексте.
 - `overlay.cpp`: ImGui/input курсора только при открытом меню; `ImGuiConfigFlags_NoMouseCursorChange`.
 - `main.cpp`: один оверлей **OrcOutFit** с вкладками **Weapons / Objects / Skins**; полноширинные контролы, скролл окна, `TextWrapped` для путей; ники — `InputTextMultiline`.
