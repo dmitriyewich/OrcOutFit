@@ -9,6 +9,12 @@
 
 // constructors
 
+inline CVector::CVector() {
+    x = 0.0f;
+    y = 0.0f;
+    z = 0.0f;
+}
+
 inline CVector::CVector(float value) {
     Set(value);
 }
@@ -18,14 +24,12 @@ inline CVector::CVector(float x, float y, float z) {
 }
 
 inline CVector::CVector(const CVector& src) {
-    *this = src;
+    Set(src.x, src.y, src.z);
 }
 
-#ifdef RW
 inline CVector::CVector(const RwV3d& src) {
-    FromRwV3d(src);
+    Set(src.x, src.y, src.z);
 }
-#endif
 
 inline CVector::CVector(const CVector2D& xy, float z) {
     Set(xy.x, xy.y, z);
@@ -50,12 +54,6 @@ inline void CVector::Set(float x, float y, float z) {
 inline void CVector::operator =(const CVector& src) {
     Set(src.x, src.y, src.z);
 }
-
-#ifdef RW
-inline void CVector::FromRwV3d(const RwV3d& src) {
-    Set(src.x, src.y, src.z);
-}
-#endif
 
 inline void CVector::From2D(const CVector2D& xy, float z) {
     Set(xy.x, xy.y, z);
@@ -89,11 +87,21 @@ inline void CVector::FromCross(const CVector& left, const CVector& right) {
 
 // conversions
 
-#ifdef RW
-inline RwV3d CVector::ToRwV3d() const {
-    return RwV3d(x, y, z);
+inline CVector::operator RwV3d&() {
+    return *this;
 }
-#endif
+
+inline CVector::operator const RwV3d&() const {
+    return *this;
+}
+
+inline CVector::operator RwV3d*() {
+    return reinterpret_cast<RwV3d*>(this);
+}
+
+inline CVector::operator const RwV3d*() const {
+    return reinterpret_cast<const RwV3d*>(this);
+}
 
 inline CVector2D CVector::To2D() const {
     return CVector2D(x, y);
@@ -153,6 +161,12 @@ inline float CVector::MagnitudeSqr2D() const {
     return x * x + y * y;
 }
 
+inline CVector CVector::Normalized() const {
+    auto result = *this;
+    result.Normalize();
+    return result;
+}
+
 inline bool CVector::IsNormalized() const {
     return fabs(MagnitudeSqr() - 1.0f) < 0.001f;
 }
@@ -199,11 +213,11 @@ inline void CVector::operator /=(float divisor) {
     z /= divisor;
 }
 
-inline void CVector::Normalise() {
-    NormaliseAndMag();
+inline void CVector::Normalize() {
+    NormalizeAndMag();
 }
 
-inline float CVector::NormaliseAndMag() {
+inline float CVector::NormalizeAndMag() {
     auto length = Magnitude();
     if (length > 0.0f) *this /= length;
     return length;

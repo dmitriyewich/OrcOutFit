@@ -20,7 +20,7 @@ public:
 
     virtual ~CPlaceable() {};
     
-    CMatrixLink *GetMatrix();
+    CMatrixLink& GetMatrix();
     
     static void ShutdownMatrixArray();
     static void InitMatrixArray();
@@ -30,8 +30,12 @@ public:
     CVector GetAtDirection();
     
     void FreeStaticMatrix();
+
     void SetPosn(float x, float y, float z);
-    void SetPosn(CVector const& posn);
+    void SetPosn(CVector const& pos);
+    inline void SetPosition(float x, float y, float z) { SetPosn(x, y, z); }
+    inline void SetPosition(CVector const& pos) { SetPosn(pos); }
+
     void SetOrientation(float x, float y, float z);
     void GetOrientation(float& x, float& y, float& z);
     void SetHeading(float heading);
@@ -48,7 +52,6 @@ public:
     inline CVector& GetUp() const { return m_matrix->GetUp(); }
     inline const CVector& GetPosition() const { return m_matrix ? m_matrix->GetPosition() : m_placement.m_vPosn; }
     inline CVector& GetPosition() { return m_matrix ? m_matrix->GetPosition() : m_placement.m_vPosn; }
-    inline CVector2D GetPosition2D() { return { GetPosition() }; }
 };
 
 VALIDATE_SIZE(CPlaceable, 0x18);

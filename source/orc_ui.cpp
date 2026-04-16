@@ -224,13 +224,13 @@ void OrcUiDraw() {
             ImGui::TextUnformatted("Weapon");
             if (ImGui::BeginCombo("##weapon", preview)) {
                 for (int i = 1; i < 64; i++) {
-                    if (!g_cfg[i].name) continue;
+                    const char* baseName = g_cfg[i].name ? g_cfg[i].name : "Weapon";
                     char lbl[64];
-                    _snprintf_s(lbl, _TRUNCATE, "%s [%d]", g_cfg[i].name, i);
+                    _snprintf_s(lbl, _TRUNCATE, "%s [%d]", baseName, i);
                     if (ImGui::Selectable(lbl, (i == g_uiWeaponIdx) && !g_uiWeaponSecondary)) { g_uiWeaponIdx = i; g_uiWeaponSecondary = false; }
                     if (g_considerWeaponSkills && IsDualCapable(i)) {
                         char lbl2[64];
-                        _snprintf_s(lbl2, _TRUNCATE, "%s 2 [%d]", g_cfg[i].name, i);
+                        _snprintf_s(lbl2, _TRUNCATE, "%s 2 [%d]", baseName, i);
                         if (ImGui::Selectable(lbl2, (i == g_uiWeaponIdx) && g_uiWeaponSecondary)) { g_uiWeaponIdx = i; g_uiWeaponSecondary = true; }
                     }
                 }

@@ -23,6 +23,11 @@
   - синхронизация слотов `m_aWeapons`,
   - `CreateInstance(RwMatrix*)` для нужных моделей,
   - рендер на кости через `RpHAnim` + `RpClumpRender`/atomic callback.
+- Авто-скан оружия (modded weapon.dat friendly):
+  - при загрузке INI плагин дополняет список оружия по данным `CWeaponInfo` (`ms_aWeaponNames` + `GetWeaponInfo()`),
+    чтобы в UI появлялись типы оружия, которые есть в игре, даже если они не были захардкожены в дефолтах;
+  - если при рендере оружия его модель ещё не загружена, плагин автоматически запрашивает стриминг
+    (`CStreaming::RequestModel` + `LoadAllRequestedModels`) и начинает рендерить со следующего кадра.
 - Dual wield (weapon skills):
   - опция `Main.ConsiderWeaponSkills`,
   - если у оружия `CWeaponInfo::m_nFlags.bTwinPistol` и `ped->GetWeaponSkill(wt) == WEAPSKILL_PRO` —
@@ -110,6 +115,11 @@
   - Пример: `MSBuild.exe OrcOutFit.sln /p:Configuration=Release /p:Platform=x86`
 - Ожидаемый выходной файл:
   - `C:\Games\CODEX\WeaponsOutFit\build\Release\OrcOutFit.asi`
+
+- Важно: `Plugin.lib` (из `plugin-sdk`) должен существовать в:
+  - `source\external\plugin-sdk\output\lib\Plugin.lib`
+  - В репозитории он может отсутствовать (игнорируется как артефакт). Если линковка ругается на `Plugin.lib`,
+    его нужно собрать из vendored `plugin-sdk` через `premake5` (см. README).
 - **НЕЛЬЗЯ** автоматически копировать / перемещать `.asi` куда-либо.
   - Единственное допустимое расположение — `build\Release\OrcOutFit.asi`.
   - Деплой в папку игры (`C:\Games\SAMP\GTA San Andreas\`) делает пользователь вручную.

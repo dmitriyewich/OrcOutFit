@@ -13,21 +13,7 @@
 #include "RwObjectNameIdAssocation.h"
 #include "CRGBA.h"
 #include "CPool.h"
-
-enum eVehicleType {
-	VEHICLE_AUTOMOBILE,
-	VEHICLE_MTRUCK,
-	VEHICLE_QUAD,
-	VEHICLE_HELI,
-	VEHICLE_PLANE,
-	VEHICLE_BOAT,
-	VEHICLE_TRAIN,
-	VEHICLE_FHELI,
-	VEHICLE_FPLANE,
-	VEHICLE_BIKE,
-	VEHICLE_BMX,
-	VEHICLE_TRAILER
-};
+#include "eVehicleType.h"
 
 enum VehicleUpgradePosn {
 	UPGRADE_BONNET,
@@ -66,7 +52,7 @@ public:
 private:
 	char _pad3A[2];
 public:
-	unsigned int m_nVehicleType;
+	eVehicleType m_nVehicleType;
 	float m_fWheelSizeFront;
 	float m_fWheelSizeRear;
 	short m_nWheelModelIndex;
@@ -296,5 +282,7 @@ public:
     int GetNumDoors();
 };
 
-VALIDATE_SIZE(CVehicleModelInfo::CVehicleStructure, 0x314);
+VALIDATE_OFFSET(CVehicleModelInfo, field_51, 0x51);
 VALIDATE_SIZE(CVehicleModelInfo, 0x308);
+
+VALIDATE_SIZE(CVehicleModelInfo::CVehicleStructure, 0x314);

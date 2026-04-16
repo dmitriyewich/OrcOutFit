@@ -35,6 +35,16 @@ ipch/
 *.lastbuildstate
 *.unsuccessfulbuild
 
+# plugin-sdk: premake/MSBuild generated files (keep vendored sources clean)
+source/external/plugin-sdk/plugin.sln
+source/external/plugin-sdk/Plugin_*/
+source/external/plugin-sdk/examples/**/*.sln
+source/external/plugin-sdk/examples/**/*.vcxproj*
+source/external/plugin-sdk/examples/**/*.workspace
+source/external/plugin-sdk/examples/**/*.cbp
+source/external/plugin-sdk/examples/**/*.depend
+source/external/plugin-sdk/examples/**/*.layout
+
 # Reference (external, not part of our source)
 reference/
 

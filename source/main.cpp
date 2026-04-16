@@ -7,6 +7,7 @@
 #include "CPlayerPed.h"
 #include "CPlayerInfo.h"
 #include "CWeaponInfo.h"
+#include "CStreaming.h"
 #include "CModelInfo.h"
 #include "CBaseModelInfo.h"
 #include "CPools.h"
@@ -96,6 +97,28 @@ std::string g_toggleCommand = "/orcoutfit";
 bool g_considerWeaponSkills = true;
 WeaponCfg g_cfg[64] = {};
 WeaponCfg g_cfg2[64] = {}; // secondary dual-wield placement
+static std::array<std::string, 64> g_weaponNameStore;
+
+static void DiscoverAvailableWeaponsFromGame() {
+    // Make weapon list resilient to modded weapon.dat: if weapon info exists and has model id,
+    // ensure UI has a stable name string even when we didn't hardcode it in defaults.
+    for (int wt = 1; wt < 64; wt++) {
+        if (g_cfg[wt].name) continue;
+        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+        if (!wi || wi->m_nModelId <= 0) continue;
+
+        const char* nm = nullptr;
+        if (CWeaponInfo::ms_aWeaponNames)
+            nm = CWeaponInfo::ms_aWeaponNames[wt];
+
+        if (nm && nm[0]) {
+            g_weaponNameStore[wt] = nm;
+        } else {
+            g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+        }
+        g_cfg[wt].name = g_weaponNameStore[wt].c_str();
+    }
+}
 bool g_skinModeEnabled = false;
 bool g_skinHideBasePed = true;
 bool g_skinNickMode = true;
@@ -347,6 +370,8 @@ void LoadConfig() {
     GetPrivateProfileStringA("SkinMode", "Selected", "", skinName, sizeof(skinName), g_iniPath);
     g_skinSelectedName = skinName;
     RefreshActivationRouting();
+
+    DiscoverAvailableWeaponsFromGame();
 }
 
 static void SaveDefaultConfig() {
@@ -1482,7 +1507,17 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
     if (mid <= 0) return false;
 
     auto* mi = CModelInfo::GetModelInfo(mid);
-    if (!mi || !mi->m_pRwObject) return false;
+    if (!mi || !mi->m_pRwObject) {
+        // Auto-request weapon model streaming (supports modded weapon.dat setups).
+        if (mid > 0 && !CStreaming::HasModelLoaded(mid)) {
+            static std::unordered_set<int> requested;
+            if (requested.insert(mid).second) {
+                CStreaming::RequestModel(mid, 0);
+                CStreaming::LoadAllRequestedModels(false);
+            }
+        }
+        return false;
+    }
 
     RwMatrix* bone = GetBoneMatrix(ped, wc.boneId);
     if (!bone) return false;

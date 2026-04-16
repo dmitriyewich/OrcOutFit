@@ -16,4 +16,7 @@ public:
     static int& MessageNumberInString;
     static int& MessageNumberInString2;
 
+    static bool Load();
+    static bool Save();
+
 };

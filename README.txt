@@ -12,6 +12,8 @@
 - Оружие в активном слоте (в руках) на теле не дублируется.
 - Секции по имени оружия (например [code]M4[/code]) и резервные секции [code][WeaponNN][/code] для кастомных типов.
 - Dual wield (skills): при прокачке навыка (PRO) и поддержке типа оружия игра может выдавать второй ствол (например для [code]Pistol [22][/code]); плагин умеет рендерить и настраивать вторую копию.
+- Авто-скан оружия: список оружия в UI дополняется данными из игры (CWeaponInfo), поэтому модовые типы появляются в combo автоматически.
+- Авто-загрузка модели оружия: если модель ещё не загружена, плагин запрашивает стриминг и начинает рендерить со следующего кадра.
 
 [b]Все педы в радиусе (опционально)[/b]
 - Режим «оружие у всех педов» с ограничением по радиусу от локального игрока.
@@ -65,6 +67,21 @@ MSBuild (платформа решения: [b]x86[/b]):
 [code]"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OrcOutFit.sln /p:Configuration=Release /p:Platform=x86[/code]
 
 Артефакт: [code]build\Release\OrcOutFit.asi[/code
+
+[hr]
+
+[size=140][b]Plugin.lib (plugin-sdk)[/b][/size]
+
+OrcOutFit линкуется с [code]Plugin.lib[/code] из vendored plugin-sdk:
+- путь: [code]source\external\plugin-sdk\output\lib\Plugin.lib[/code
+- файл может отсутствовать после клона/обновления (это артефакт)
+
+Если сборка падает с ошибкой про [code]Plugin.lib[/code:
+1) Сгенерируйте проекты plugin-sdk:
+[code]cd source\external\plugin-sdk\tools\premake
+premake5.exe --pluginsdkdir="C:\Games\CODEX\WeaponsOutFit\source\external\plugin-sdk" vs2022[/code]
+2) Соберите [code]Plugin_SA[/code] (Release|Win32) и убедитесь, что появился [code]output\lib\Plugin.lib[/code.
+Если toolset отличается (например нужен v145), поправьте [code]<PlatformToolset>[/code] в [code]Plugin_SA\Plugin_SA.vcxproj[/code.
  
 [hr]
 
