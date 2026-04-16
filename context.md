@@ -30,14 +30,19 @@
 - Кастомные объекты:
   - скан `*.dff` в `OrcOutFit\object`,
   - отдельный `<name>.ini` на каждый объект.
+- Кастомные объекты по стандартной модели ped:
+  - папка `OrcOutFit\object\other\<skin>\` (где `<skin>` — имя стандартной модели, например `wmyclot`,
+    либо `id217` / `217` для проектов с добавленными ped-models по id),
+  - скан `*.dff` в каждой подпапке, `<name>.ini` на каждый объект.
 - Skin mode:
   - скан `*.dff` в `OrcOutFit\SKINS`,
   - рендер выбранного clump поверх локального ped,
   - скрытие базового ped (опция),
   - bind анимации через `RpSkinAtomicSetHAnimHierarchy`.
-- Per-model weapon overrides:
-  - папка `OrcOutFit\weaponsetting`,
-  - `lapd1.ini` применяется к модели `lapd1` (по `CKeyGen::GetUppercaseKey`).
+- Per-skin weapon overrides (по стандартной модели ped):
+  - `OrcOutFit\object\other\<skin>\weapons.ini`,
+  - применяются к локальному игроку по `CModelInfo->m_nKey`,
+  - если overrides отсутствуют — используются глобальные дефолты из `OrcOutFit.ini`.
 
 ## Важные файлы
 
@@ -106,8 +111,9 @@
 - Путь считается относительно расположения `OrcOutFit.asi` (modloader-friendly).
 - Ожидаемые подпапки:
   - `OrcOutFit\object`
+  - `OrcOutFit\object\other`
   - `OrcOutFit\SKINS`
-  - `OrcOutFit\weaponsetting`
+  - `OrcOutFit\SKINS\random`
 
 ## Правила `reference`
 

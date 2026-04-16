@@ -292,3 +292,16 @@
 - `ParseNickCsv`: ники по **запятой и/или новой строке**; подпись multiline и комментарии ini обновлены.
 - `orc_ui`: без `AlwaysVerticalScrollbar`, высота окна по умолчанию 560.
 - `overlay`: при открытом меню `PatchCursor` и в SA:MP (без центрирования мыши); `ShowCursor` D3D только вне SA:MP; `WM_SETCURSOR` в SA:MP не трогаем.
+
+- Кастомные объекты: добавлен `OrcOutFit\\object\\other\\<modelName>\\` для скино-зависимых пакетов (по стандартной ped model).
+  - `<modelName>` мапится на модель локального игрока через `CPed->m_nModelIndex` / `CModelInfo->m_nKey`.
+  - Внутри `<modelName>`: `*.dff` рендерятся как кастомные объекты для локального ped (и не зависят от `CustomSkinCfg.name`).
+  - Там же поддержан `weapons.ini` — оверрайды позиций оружия для локального игрока под эту стандартную модель (замена прежней папки `weaponsetting`).
+  - `Reload INI`/`Rescan objects` в UI теперь пересканируют и `object\\other`.
+
+- `orc_ui.cpp` (`Objects` вкладка): добавлены подвкладки `Local` и `Other`.
+  - `Local`: редактирование кастомных объектов из `OrcOutFit\\object\\`.
+  - `Other`: список папок `object\\other` и редактирование кастомных объектов выбранного скина; добавлен `Rescan this skin objects`.
+
+- `orc_ui.cpp` (`Weapons` вкладка): добавлен блок per-skin weapon offsets (`object\\other\\<skin>\\weapons.ini`) с подвкладками `Local skin` и `Other skin`.
+

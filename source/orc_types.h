@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <array>
 #include <vector>
 
 struct RwObject;
@@ -55,4 +56,16 @@ struct CustomSkinCfg {
     int txdSlot = -1;
     RwObject* rwObject = nullptr;
     bool txdMissingLogged = false;
+};
+
+// Overrides for standard ped skin under `OrcOutFit\object\other\<skinName>\`.
+// Keyed by standard ped model key (see `CModelInfo::m_nKey`).
+struct SkinOtherOverrides {
+    std::string skinName;       // folder name under object\other\
+    std::string dirPath;        // ...\OrcOutFit\object\other\<skinName>
+    std::string weaponsIniPath; // ...\OrcOutFit\object\other\<skinName>\weapons.ini
+
+    bool hasWeaponOverrides = false; // whether weapons.ini exists and was loaded
+    std::array<WeaponCfg, 64> weaponCfg = {};
+    std::vector<CustomObjectCfg> objects; // *.dff discovered in the skin folder
 };

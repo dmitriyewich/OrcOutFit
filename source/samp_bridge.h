@@ -18,5 +18,8 @@ bool GetPedNickname(const void* gtaPed, char* outName, int outNameLen, bool* isL
 // SA:MP CGame::SetCursorMode — как в MyAsiMod: UI → mode 3+true, иначе 0+false.
 void SyncSampOverlayCursor(bool wantUiCursor);
 
+// Disable hooks and release MinHook state (safe to call multiple times).
+void Shutdown();
+
 } // namespace samp_bridge
 

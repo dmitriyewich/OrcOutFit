@@ -5,6 +5,7 @@
 #include "common.h"
 #include "CPed.h"
 #include "CPlayerPed.h"
+#include "CPlayerInfo.h"
 #include "CWeaponInfo.h"
 #include "CModelInfo.h"
 #include "CBaseModelInfo.h"
@@ -45,8 +46,8 @@ static HMODULE g_module = nullptr;
 static char    g_logPath[MAX_PATH] = {};
 char    g_iniPath[MAX_PATH] = {};
 char    g_gameObjDir[MAX_PATH] = {};
+static char    g_gameObjOtherDir[MAX_PATH] = {};
 char    g_gameSkinDir[MAX_PATH] = {};
-static char    g_weaponSettingsDir[MAX_PATH] = {};
 
 static void LogInit() {
     char modPath[MAX_PATH] = {};
@@ -64,8 +65,8 @@ static void LogInit() {
     // Relative to plugin location (modloader-friendly):
     // <asi-dir>\OrcOutFit\object and <asi-dir>\OrcOutFit\SKINS
     _snprintf_s(g_gameObjDir, _TRUNCATE, "%s\\OrcOutFit\\object", moduleDir);
+    _snprintf_s(g_gameObjOtherDir, _TRUNCATE, "%s\\OrcOutFit\\object\\other", moduleDir);
     _snprintf_s(g_gameSkinDir, _TRUNCATE, "%s\\OrcOutFit\\SKINS", moduleDir);
-    _snprintf_s(g_weaponSettingsDir, _TRUNCATE, "%s\\OrcOutFit\\weaponsetting", moduleDir);
 
     FILE* f = fopen(g_logPath, "w");
     if (f) { fputs("OrcOutFit debug log\n", f); fclose(f); }
@@ -103,8 +104,12 @@ int g_skinRandomPoolVariants = 0;
 std::string g_skinSelectedName;
 static bool g_skinCanAnimate = false;
 static int  g_skinBindCount = 0;
-std::unordered_map<unsigned int, std::array<WeaponCfg, 64>> g_weaponCfgByModelKey;
-static void LoadWeaponSettingOverrides();
+
+std::unordered_map<unsigned int, SkinOtherOverrides> g_otherByModelKey;
+void DiscoverOtherOverridesAndObjects();
+
+static void DestroyCustomObjectInstance(CustomObjectCfg& o);
+static CustomSkinCfg* GetSelectedSkin();
 
 // Секция INI → индекс оружия. Дефолтные расположения в стиле тактической выкладки.
 // Оси кости (наблюдение): X = вдоль "right", Y = вдоль "up" (spine) / "at" (бедро), Z = "at/up".
@@ -302,7 +307,6 @@ void LoadConfig() {
     char skinName[128] = {};
     GetPrivateProfileStringA("SkinMode", "Selected", "", skinName, sizeof(skinName), g_iniPath);
     g_skinSelectedName = skinName;
-    LoadWeaponSettingOverrides();
     RefreshActivationRouting();
 }
 
@@ -550,6 +554,11 @@ static void LoadObjectCfgFromIni(CustomObjectCfg& o) {
     o.ry = F("RotationY", o.ry / D2R) * D2R;
     o.rz = F("RotationZ", o.rz / D2R) * D2R;
     o.scale = F("Scale", o.scale);
+}
+
+static void DestroySkinOtherOverrides(SkinOtherOverrides& so) {
+    for (auto& o : so.objects) DestroyCustomObjectInstance(o);
+    so.objects.clear();
 }
 
 static void DestroyCustomObjectInstance(CustomObjectCfg& o) {
@@ -912,50 +921,128 @@ void SaveSkinModeIni() {
     WritePrivateProfileStringA("SkinMode", "RandomFromPools", buf, g_iniPath);
 }
 
-static void LoadWeaponSettingOverrides() {
-    g_weaponCfgByModelKey.clear();
-    DWORD attr = GetFileAttributesA(g_weaponSettingsDir);
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) return;
-    std::string dir = g_weaponSettingsDir;
-    std::string mask = JoinPath(dir, "*.ini");
-    WIN32_FIND_DATAA fd{};
-    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    int count = 0;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        std::string iniFile = fd.cFileName;
-        if (LowerExt(iniFile) != ".ini") continue;
-        const std::string base = BaseNameNoExt(iniFile);
-        const std::string fullIni = JoinPath(dir, iniFile);
-        unsigned int modelKey = CKeyGen::GetUppercaseKey(base.c_str());
-        auto cfgArr = std::array<WeaponCfg, 64>{};
-        for (int i = 0; i < 64; i++) cfgArr[i] = g_cfg[i];
-        for (int i = 0; i < 64; i++) {
-            auto& c = cfgArr[i];
-            if (c.name) ReadSectionFromIni(c, c.name, fullIni.c_str());
-            char sec[16];
-            _snprintf_s(sec, _TRUNCATE, "Weapon%d", i);
-            if (GetPrivateProfileIntA(sec, "Bone", 0, fullIni.c_str()) != 0) {
-                if (!c.name) { c.scale = 1.0f; c.enabled = true; }
-                ReadSectionFromIni(c, sec, fullIni.c_str());
-            }
+static bool LoadWeaponOverridesFromIni(const char* fullIni, std::array<WeaponCfg, 64>* outCfg) {
+    if (!fullIni || !outCfg) return false;
+    if (!FileExistsA(fullIni)) return false;
+    for (int i = 0; i < 64; i++) (*outCfg)[i] = g_cfg[i];
+    bool any = false;
+    for (int i = 0; i < 64; i++) {
+        auto& c = (*outCfg)[i];
+        if (c.name) ReadSectionFromIni(c, c.name, fullIni);
+        char sec[16];
+        _snprintf_s(sec, _TRUNCATE, "Weapon%d", i);
+        if (GetPrivateProfileIntA(sec, "Bone", 0, fullIni) != 0) {
+            if (!c.name) { c.scale = 1.0f; c.enabled = true; }
+            ReadSectionFromIni(c, sec, fullIni);
+            any = true;
         }
-        g_weaponCfgByModelKey[modelKey] = cfgArr;
-        count++;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    Log("weaponsetting overrides loaded: %d (dir=%s)", count, g_weaponSettingsDir);
+    }
+    // Also treat named sections as "any" if they exist.
+    if (!any) {
+        for (int i = 0; i < 64; i++) if ((*outCfg)[i].boneId != g_cfg[i].boneId || (*outCfg)[i].enabled != g_cfg[i].enabled) { any = true; break; }
+    }
+    return any;
 }
 
 static const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
     if (!ped || wt < 0 || wt >= 64) return g_cfg[0];
-    auto* mi = CModelInfo::GetModelInfo(ped->m_nModelIndex);
-    if (mi) {
-        auto it = g_weaponCfgByModelKey.find(mi->m_nKey);
-        if (it != g_weaponCfgByModelKey.end()) return it->second[wt];
+    CPlayerPed* local = FindPlayerPed(0);
+    if (local && ped == local) {
+        auto* mi = CModelInfo::GetModelInfo(ped->m_nModelIndex);
+        if (mi) {
+            auto it = g_otherByModelKey.find(mi->m_nKey);
+            if (it != g_otherByModelKey.end() && it->second.hasWeaponOverrides)
+                return it->second.weaponCfg[wt];
+        }
     }
     return g_cfg[wt];
+}
+
+void DiscoverOtherOverridesAndObjects() {
+    for (auto& kv : g_otherByModelKey) DestroySkinOtherOverrides(kv.second);
+    g_otherByModelKey.clear();
+
+    DWORD attr = GetFileAttributesA(g_gameObjOtherDir);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        Log("object\\other dir missing: %s", g_gameObjOtherDir);
+        return;
+    }
+
+    std::string root = g_gameObjOtherDir;
+    std::string mask = JoinPath(root, "*.*");
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        Log("object\\other scan failed: %s", root.c_str());
+        return;
+    }
+
+    int modelFoldersFound = 0;
+    int objFound = 0;
+    int weaponIniFound = 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        const std::string folderName = fd.cFileName;
+        const std::string skinDir = JoinPath(root, folderName);
+        SkinOtherOverrides so;
+        so.skinName = folderName; // folder name = standard ped model name (or id###)
+        so.weaponsIniPath = JoinPath(skinDir, "weapons.ini");
+
+        so.hasWeaponOverrides = LoadWeaponOverridesFromIni(so.weaponsIniPath.c_str(), &so.weaponCfg);
+        if (so.hasWeaponOverrides) weaponIniFound++;
+
+        std::string dmask = JoinPath(skinDir, "*.*");
+        WIN32_FIND_DATAA dfd{};
+        HANDLE dh = FindFirstFileA(dmask.c_str(), &dfd);
+        if (dh != INVALID_HANDLE_VALUE) {
+            do {
+                if (dfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                std::string fname = dfd.cFileName;
+                if (LowerExt(fname) != ".dff") continue;
+                const std::string base = BaseNameNoExt(fname);
+                CustomObjectCfg o;
+                o.name = base;
+                o.dffPath = JoinPath(skinDir, base + ".dff");
+                o.txdPath = FindBestTxdPath(skinDir, base);
+                o.iniPath = JoinPath(skinDir, base + ".ini");
+                CreateDefaultObjectIniIfMissing(o.iniPath, base);
+                LoadObjectCfgFromIni(o);
+                if (o.txdPath.empty()) {
+                    Log("warning: no matching txd for %s.dff in %s", base.c_str(), skinDir.c_str());
+                }
+                so.objects.push_back(std::move(o));
+                objFound++;
+            } while (FindNextFileA(dh, &dfd));
+            FindClose(dh);
+        }
+
+        unsigned int modelKey = 0;
+        // Allow folder names like "217" or "id217" for servers/SP mods that add skins by id.
+        int parsedId = -1;
+        const char* s = folderName.c_str();
+        if ((s[0] == 'i' || s[0] == 'I') && (s[1] == 'd' || s[1] == 'D')) s += 2;
+        bool allDigits = (*s != 0);
+        for (const char* p = s; *p; ++p) if (*p < '0' || *p > '9') { allDigits = false; break; }
+        if (allDigits) parsedId = atoi(s);
+
+        if (parsedId >= 0) {
+            CBaseModelInfo* mi = CModelInfo::GetModelInfo(parsedId);
+            if (mi) modelKey = mi->m_nKey;
+        }
+        if (!modelKey) {
+            int modelId = -1;
+            CBaseModelInfo* mi = CModelInfo::GetModelInfo(folderName.c_str(), &modelId);
+            if (mi) modelKey = mi->m_nKey;
+        }
+        if (!modelKey) modelKey = CKeyGen::GetUppercaseKey(folderName.c_str());
+        g_otherByModelKey[modelKey] = std::move(so);
+        modelFoldersFound++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    Log("object\\other discovered: %d model folder(s), %d object(s), weapons.ini: %d (dir=%s)",
+        modelFoldersFound, objFound, weaponIniFound, g_gameObjOtherDir);
 }
 
 // ----------------------------------------------------------------------------
@@ -980,6 +1067,88 @@ void SaveWeaponSection(int wt) {
     _snprintf_s(buf, _TRUNCATE, "%.2f", c.ry / D2R);          W("RotationY", buf);
     _snprintf_s(buf, _TRUNCATE, "%.2f", c.rz / D2R);          W("RotationZ", buf);
     _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);             W("Scale", buf);
+}
+
+SkinOtherOverrides* EnsureOtherOverridesForLocalSkin() {
+    CPlayerPed* player = FindPlayerPed(0);
+    if (!player) return nullptr;
+
+    CBaseModelInfo* mi = CModelInfo::GetModelInfo(player->m_nModelIndex);
+    if (!mi) return nullptr;
+
+    const unsigned int modelKey = mi->m_nKey;
+    auto it = g_otherByModelKey.find(modelKey);
+    if (it != g_otherByModelKey.end()) return &it->second;
+
+    // Folder name should match standard ped skin name (e.g. wmyclot).
+    // If name is unavailable (common in SA:MP), fallback to "id<modelId>".
+    std::string skinName;
+    CPlayerInfo* pi = player->GetPlayerInfoForThisPlayerPed();
+    if (pi && pi->m_szSkinName[0]) skinName = pi->m_szSkinName;
+
+    if (skinName.empty()) {
+        char tmp[32];
+        _snprintf_s(tmp, _TRUNCATE, "id%d", (int)player->m_nModelIndex);
+        skinName = tmp;
+    }
+
+    SkinOtherOverrides so;
+    so.skinName = skinName;
+    const std::string dirPath = std::string(g_gameObjOtherDir) + "\\" + skinName;
+    so.weaponsIniPath = dirPath + "\\weapons.ini";
+
+    so.hasWeaponOverrides = true; // we want runtime to use per-skin overrides immediately
+    for (int i = 0; i < 64; i++) so.weaponCfg[i] = g_cfg[i];
+
+    auto [newIt, ok] = g_otherByModelKey.emplace(modelKey, std::move(so));
+    (void)ok;
+    return &newIt->second;
+}
+
+void SaveOtherSkinWeaponsIni(const SkinOtherOverrides& so) {
+    if (so.weaponsIniPath.empty()) return;
+
+    // Create directory on demand (last level: skin folder).
+    const size_t pos = so.weaponsIniPath.find_last_of("\\/");
+    if (pos != std::string::npos) {
+        const std::string dir = so.weaponsIniPath.substr(0, pos);
+        if (!dir.empty()) CreateDirectoryA(dir.c_str(), nullptr);
+    }
+
+    FILE* f = fopen(so.weaponsIniPath.c_str(), "w");
+    if (!f) return;
+
+    fprintf(f,
+        "; OrcOutFit weapon overrides for %s\n"
+        "; Generated/edited via UI.\n\n",
+        so.skinName.c_str());
+    fclose(f);
+
+    char sec[32];
+    char buf[64];
+    for (int wt = 1; wt < 64; wt++) {
+        const WeaponCfg& c = so.weaponCfg[wt];
+        _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
+
+        _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);
+        WritePrivateProfileStringA(sec, "Enabled", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%d", c.boneId);
+        WritePrivateProfileStringA(sec, "Bone", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.3f", c.x);
+        WritePrivateProfileStringA(sec, "OffsetX", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.3f", c.y);
+        WritePrivateProfileStringA(sec, "OffsetY", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.3f", c.z);
+        WritePrivateProfileStringA(sec, "OffsetZ", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.2f", c.rx / D2R);
+        WritePrivateProfileStringA(sec, "RotationX", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.2f", c.ry / D2R);
+        WritePrivateProfileStringA(sec, "RotationY", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.2f", c.rz / D2R);
+        WritePrivateProfileStringA(sec, "RotationZ", buf, so.weaponsIniPath.c_str());
+        _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);
+        WritePrivateProfileStringA(sec, "Scale", buf, so.weaponsIniPath.c_str());
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1488,6 +1657,7 @@ static void SyncAndRender() {
         ClearAllOtherPeds();
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+        for (auto& kv : g_otherByModelKey) DestroySkinOtherOverrides(kv.second);
         DestroyAllRandomPoolSkins();
         return;
     }
@@ -1497,6 +1667,7 @@ static void SyncAndRender() {
         ClearAllOtherPeds();
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+        for (auto& kv : g_otherByModelKey) DestroySkinOtherOverrides(kv.second);
         DestroyAllRandomPoolSkins();
         return;
     }
@@ -1505,6 +1676,20 @@ static void SyncAndRender() {
     int active = 0;
     for (int i = 0; i < kMax; i++) if (g_rendered[i].active) active++;
     for (auto& o : g_customObjects) if (EnsureCustomInstance(o, player)) active++;
+    // object\other overrides are also rendered (regardless of Skin mode),
+    // so they must be included into the early-out `active` check.
+    {
+        CBaseModelInfo* mi = CModelInfo::GetModelInfo(player->m_nModelIndex);
+        if (mi) {
+            auto it = g_otherByModelKey.find(mi->m_nKey);
+            if (it != g_otherByModelKey.end()) {
+                for (auto& o : it->second.objects) {
+                    if (!o.enabled || o.boneId == 0) continue;
+                    if (EnsureCustomInstance(o, player)) active++;
+                }
+            }
+        }
+    }
     if (g_skinModeEnabled) {
         bool needSkinPass = GetSelectedSkin() != nullptr;
         if (!needSkinPass && g_skinRandomFromPools) {
@@ -1541,6 +1726,19 @@ static void SyncAndRender() {
     for (auto& o : g_customObjects) {
         if (!o.enabled || o.boneId == 0) continue;
         RenderCustomObject(player, o);
+    }
+    {
+        auto* mi = CModelInfo::GetModelInfo(player->m_nModelIndex);
+        if (mi) {
+            auto it = g_otherByModelKey.find(mi->m_nKey);
+            if (it != g_otherByModelKey.end()) {
+                for (auto& o : it->second.objects) {
+                    if (!o.enabled || o.boneId == 0) continue;
+                    EnsureCustomInstance(o, player);
+                    RenderCustomObject(player, o);
+                }
+            }
+        }
     }
     RenderSkinsForPeds(player);
     if (g_renderAllPedsWeapons && CPools::ms_pPedPool) {
@@ -1582,6 +1780,108 @@ static CPed* g_hiddenPed = nullptr;
 static RpClump* g_hiddenClump = nullptr;
 static bool g_hideSnapshotValid = false;
 
+static void OnInitRw() { Log("initRw"); }
+static void OnDrawingEvent();
+static void OnPedRenderBefore(CPed* ped);
+static void OnPedRenderAfter(CPed* ped);
+static void OnD3dReset() { overlay::OnResetBefore(); overlay::OnResetAfter(); }
+static void OnShutdownRw();
+
+static void OnDrawingEvent() {
+    static bool inited = false;
+    if (!inited) {
+        inited = true;
+        SetupDefaults();
+        SaveDefaultConfig();
+        LoadConfig();
+        DiscoverCustomObjectsAndEnsureIni();
+        DiscoverCustomSkins();
+        DiscoverOtherOverridesAndObjects();
+        overlay::SetDrawCallback(&OrcUiDraw);
+        Log("Plugin init. Enabled=%d", (int)g_enabled);
+    }
+    samp_bridge::Poll(g_toggleCommand.c_str(), &ToggleOverlayFromSamp);
+    RefreshActivationRouting();
+    overlay::Init();  // no-op after first time
+    __try { SyncAndRender(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        static bool once = false;
+        if (!once) { once = true; Log("EXCEPTION in SyncAndRender"); }
+    }
+    overlay::DrawFrame();
+}
+
+static void OnPedRenderBefore(CPed* ped) {
+    if (!g_skinModeEnabled || !g_skinHideBasePed) return;
+    CPlayerPed* player = FindPlayerPed(0);
+    if (!ped || !ped->m_pRwClump) return;
+    bool isLocal = false;
+    CustomSkinCfg* skin = ResolveSkinForPed(ped, player, &isLocal);
+    if (!skin) return;
+    if (!EnsureCustomSkinLoaded(*skin)) return;
+    g_hiddenPed = ped;
+    g_hiddenClump = ped->m_pRwClump;
+    __try {
+        g_hideSnapshotValid = true;
+        CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 0);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_hideSnapshotValid = false;
+        g_hiddenPed = nullptr;
+        g_hiddenClump = nullptr;
+    }
+}
+
+static void OnPedRenderAfter(CPed* ped) {
+    // Always try to finish previously captured hide snapshot, even if toggles changed.
+    if (!g_hideSnapshotValid) return;
+    if (!ped || ped != g_hiddenPed) return;
+
+    __try {
+        if (g_hiddenClump) CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 255);
+        if (ped->m_pRwClump && ped->m_pRwClump != g_hiddenClump) {
+            CVisibilityPlugins::SetClumpAlpha(ped->m_pRwClump, 255);
+            static int mismatchLogTick = 0;
+            if ((mismatchLogTick++ % 120) == 0) {
+                Log("skin hide restore: clump switched old=%p new=%p", g_hiddenClump, ped->m_pRwClump);
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // nothing
+    }
+    g_hideSnapshotValid = false;
+    g_hiddenPed = nullptr;
+    g_hiddenClump = nullptr;
+}
+
+static void OnShutdownRw() {
+    overlay::Shutdown();
+    samp_bridge::Shutdown();
+    for (int i = 0; i < kMax; i++) g_rendered[i] = {};
+    ClearAllOtherPeds();
+    g_hideSnapshotValid = false;
+    g_hiddenPed = nullptr;
+    g_hiddenClump = nullptr;
+    for (auto& o : g_customObjects) {
+        DestroyCustomObjectInstance(o);
+        o.txdSlot = -1;
+    }
+    for (auto& s : g_customSkins) {
+        DestroyCustomSkinInstance(s);
+        s.txdSlot = -1;
+    }
+    for (auto& kv : g_otherByModelKey) DestroySkinOtherOverrides(kv.second);
+    DestroyAllRandomPoolSkins();
+    // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.
+    DWORD oldProt;
+    BYTE* p = reinterpret_cast<BYTE*>(0x5D95B0);
+    if (VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        *p = 0xC3;
+        DWORD tmp; VirtualProtect(p, 1, oldProt, &tmp);
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Plugin entry
 // ----------------------------------------------------------------------------
@@ -1590,102 +1890,16 @@ public:
     OrcOutFit() {
         // LoadConfig откладываем до первого кадра: к этому моменту DllMain уже
         // проставит g_iniPath через LogInit().
-        Events::initRwEvent.after += [] {
-            Log("initRw");
-        };
-        Events::drawingEvent += [] {
-            static bool inited = false;
-            if (!inited) {
-                inited = true;
-                SetupDefaults();
-                SaveDefaultConfig();
-                LoadConfig();
-                DiscoverCustomObjectsAndEnsureIni();
-                DiscoverCustomSkins();
-                overlay::SetDrawCallback(&OrcUiDraw);
-                Log("Plugin init. Enabled=%d", (int)g_enabled);
-            }
-            samp_bridge::Poll(g_toggleCommand.c_str(), &ToggleOverlayFromSamp);
-            RefreshActivationRouting();
-            overlay::Init();  // no-op после первого раза
-            __try { SyncAndRender(); }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                static bool once = false;
-                if (!once) { once = true; Log("EXCEPTION in SyncAndRender"); }
-            }
-            overlay::DrawFrame();
-        };
-        Events::pedRenderEvent.before += [](CPed* ped) {
-            if (!g_skinModeEnabled || !g_skinHideBasePed) return;
-            CPlayerPed* player = FindPlayerPed(0);
-            if (!ped || !ped->m_pRwClump) return;
-            bool isLocal = false;
-            CustomSkinCfg* skin = ResolveSkinForPed(ped, player, &isLocal);
-            if (!skin) return;
-            if (!EnsureCustomSkinLoaded(*skin)) return;
-            g_hiddenPed = ped;
-            g_hiddenClump = ped->m_pRwClump;
-            __try {
-                g_hideSnapshotValid = true;
-                CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 0);
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                g_hideSnapshotValid = false;
-                g_hiddenPed = nullptr;
-                g_hiddenClump = nullptr;
-            }
-        };
-        Events::pedRenderEvent.after += [](CPed* ped) {
-            // Always try to finish previously captured hide snapshot, even if toggles changed.
-            if (!g_hideSnapshotValid) return;
-            if (!ped || ped != g_hiddenPed) return;
-
-            __try {
-                if (g_hiddenClump) CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 255);
-                if (ped->m_pRwClump && ped->m_pRwClump != g_hiddenClump) {
-                    CVisibilityPlugins::SetClumpAlpha(ped->m_pRwClump, 255);
-                    static int mismatchLogTick = 0;
-                    if ((mismatchLogTick++ % 120) == 0) {
-                        Log("skin hide restore: clump switched old=%p new=%p", g_hiddenClump, ped->m_pRwClump);
-                    }
-                }
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                // nothing
-            }
-            g_hideSnapshotValid = false;
-            g_hiddenPed = nullptr;
-            g_hiddenClump = nullptr;
-        };
-        Events::d3dResetEvent += [] { overlay::OnResetBefore(); overlay::OnResetAfter(); };
+        Events::initRwEvent.after += &OnInitRw;
+        Events::drawingEvent += &OnDrawingEvent;
+        Events::pedRenderEvent.before += &OnPedRenderBefore;
+        Events::pedRenderEvent.after += &OnPedRenderAfter;
+        Events::d3dResetEvent += &OnD3dReset;
         // При shutdownRwEvent сцена уже частично разобрана, RpClumpDestroy на
         // клонированных материалах падает в CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB
         // (env map plugin data ссылается на уже освобождённую текстуру).
         // Патчим сам деструктор на RET — безвредно т.к. процесс всё равно завершается.
-        Events::shutdownRwEvent += [] {
-            overlay::Shutdown();
-            for (int i = 0; i < kMax; i++) g_rendered[i] = {};
-            ClearAllOtherPeds();
-            g_hideSnapshotValid = false;
-            g_hiddenPed = nullptr;
-            g_hiddenClump = nullptr;
-            for (auto& o : g_customObjects) {
-                DestroyCustomObjectInstance(o);
-                o.txdSlot = -1;
-            }
-            for (auto& s : g_customSkins) {
-                DestroyCustomSkinInstance(s);
-                s.txdSlot = -1;
-            }
-            DestroyAllRandomPoolSkins();
-            // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.
-            DWORD oldProt;
-            BYTE* p = reinterpret_cast<BYTE*>(0x5D95B0);
-            if (VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                *p = 0xC3;
-                DWORD tmp; VirtualProtect(p, 1, oldProt, &tmp);
-            }
-        };
+        Events::shutdownRwEvent += &OnShutdownRw;
     }
 } g_plugin;
 

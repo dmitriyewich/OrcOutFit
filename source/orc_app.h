@@ -35,15 +35,22 @@ extern int g_skinRandomPoolModels;
 extern int g_skinRandomPoolVariants;
 extern std::string g_skinSelectedName;
 
-extern std::unordered_map<unsigned int, std::array<WeaponCfg, 64>> g_weaponCfgByModelKey;
-
 // Shared with orc_ui.cpp (skin list selection)
 extern int g_uiSkinIdx;
 extern int g_uiSkinEditIdx;
 
+extern std::unordered_map<unsigned int, SkinOtherOverrides> g_otherByModelKey;
+
 void LoadConfig();
 void DiscoverCustomObjectsAndEnsureIni();
 void DiscoverCustomSkins();
+void DiscoverOtherOverridesAndObjects();
+
+// For UI: ensure per-skin overrides entry for currently local player model.
+SkinOtherOverrides* EnsureOtherOverridesForLocalSkin();
+
+// Persist `so.weaponCfg[]` into `so.weaponsIniPath`.
+void SaveOtherSkinWeaponsIni(const SkinOtherOverrides& so);
 
 void SaveWeaponSection(int weaponIndex);
 void SaveCustomObjectIni(const CustomObjectCfg& o);

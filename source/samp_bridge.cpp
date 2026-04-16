@@ -222,5 +222,33 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
     }
 }
 
+void Shutdown() {
+    if (!g_state.minHookInitialized)
+        return;
+
+    __try {
+        if (g_state.version && g_state.base) {
+            void* sendCommand = reinterpret_cast<void*>(g_state.base + g_state.version->sendCommandOffset);
+            if (g_state.commandHookInstalled) {
+                MH_DisableHook(sendCommand);
+                MH_RemoveHook(sendCommand);
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+
+    g_state.commandHookInstalled = false;
+    g_state.originalSendCommand = nullptr;
+    g_state.version = nullptr;
+    g_state.base = 0;
+    g_state.module = nullptr;
+    g_state.command = nullptr;
+    g_state.onToggle = nullptr;
+
+    MH_Uninitialize();
+    g_state.minHookInitialized = false;
+}
+
 } // namespace samp_bridge
 
