@@ -282,6 +282,43 @@
 
 ## 2026-04-16
 
+- `orc_ui.cpp`: `Paste` теперь работает и для второго оружия (dual wield):
+  - снято ограничение на совпадение режима primary/secondary в буфере.
+  - Paste применяет валидный трансформ (enabled/bone/offset/rot/scale) к текущему выбранному оружию, независимо от того, редактируется ли `Weapon` или `Weapon 2`.
+  - сборка `Release|x86` успешна: `build\\Release\\OrcOutFit.asi`.
+
+- `main.cpp`: dual-wield проверяется одинаково для локального и любых ped:
+  - в `SyncPedWeapons` флаг `bTwinPistol` теперь берётся из `GetWeaponInfo(wt, 2)` (PRO/Hitman) с fallback на skill=1,
+    а `ped->GetWeaponSkill(wt) == WEAPSKILL_PRO` проверяется для конкретного ped.
+  - это включает второе оружие и для `RenderAllPedsWeapons`, и для локального игрока при реальном PRO навыке.
+  - сборка `Release|x86` успешна: `build\\Release\\OrcOutFit.asi`.
+
+- `orc_ui.cpp`: добавлены кнопки `Copy`/`Paste` рядом с `Show on body` для оружия:
+  - работает для `Global`, `Local skin (weapons.ini)`, `Other skin (weapons.ini)` и для режима `Edit second weapon (dual wield)`.
+  - `Copy` копирует текущий `WeaponCfg` (без `name`-указателя).
+  - `Paste` доступен только если в буфере валидные значения и совпадает режим primary/secondary; перед применением делается валидация (finite, scale>0, разумные лимиты).
+  - сборка `Release|x86` успешна: `build\\Release\\OrcOutFit.asi`.
+
+- `orc_ui.cpp`: dual wield в weapon-combo снова виден:
+  - `IsDualCapable(wt)` теперь проверяет `CWeaponInfo::GetWeaponInfo(wt, 2)` (PRO/Hitman) на `bTwinPistol`,
+    с fallback на skill=1. Это возвращает пункт `"<name> 2 [wt][modelId2]"` в combo.
+  - пересборка `Release|x86` успешна: `build\\Release\\OrcOutFit.asi`.
+
+- `orc_ui.cpp`: фикс крэша при нажатии `Other skin (weapons.ini)`:
+  - убран невалидный `continue` (не цикл) и любые ранние выходы из середины вкладки.
+  - добавлен `EnsureSkinWeaponArrays`: гарантирует, что `weaponCfg/weaponCfg2` всегда синхронизированы по размеру с `g_cfg/g_cfg2`
+    (копия дефолтов при первом входе и при расхождении размеров).
+  - индекс `g_uiWeaponIdx` проверяется относительно активного массива (`editingCount`), а не `g_cfg.size()`.
+  - при невозможности редактирования выводится `TextDisabled`, без разыменований.
+  - пересборка `Release|x86` успешна: `build\\Release\\OrcOutFit.asi`.
+
+- `orc_ui.cpp`: фикс крэша при переключении `Other skin (weapons.ini)`:
+  - ранее `activeSkin->weaponCfg.data()` брался до инициализации, и при пустом векторе разыменовывался `nullptr`.
+  - теперь при выборе `Local skin`/`Other skin` сначала гарантированно инициализируем `weaponCfg/weaponCfg2` копией `g_cfg/g_cfg2`
+    и выставляем `hasWeaponOverrides=true`, затем берём `.data()`.
+  - добавлен guard на `editingArr == nullptr` / выход за пределы `g_cfg.size()` перед обращением `editingArr[g_uiWeaponIdx]`.
+  - пересборка `Release|x86` успешна: `build\Release\OrcOutFit.asi`.
+
 - Реализован non-uniform scale для кастомных объектов:
   - добавлены поля `ScaleX/ScaleY/ScaleZ` в `CustomObjectCfg` (при `Scale` как базовом).
   - итоговый рендер-масштаб: `sx = Scale*ScaleX`, `sy = Scale*ScaleY`, `sz = Scale*ScaleZ`.

@@ -12,6 +12,7 @@
 - Оружие в активном слоте (в руках) на теле не дублируется.
 - Секции по имени оружия (например [code]M4[/code]) и резервные секции [code][WeaponNN][/code] для кастомных типов.
 - Dual wield (skills): при прокачке навыка (PRO) и поддержке типа оружия игра может выдавать второй ствол (например для [code]Pistol [22][/code]); плагин умеет рендерить и настраивать вторую копию.
+  - Проверка [code]bTwinPistol[/code]: [code]GetWeaponInfo(wt,2)[/code] (fallback [code]1[/code]), а [code]WEAPSKILL_PRO[/code] проверяется у конкретного ped (локальный и all-peds).
 - Авто-скан оружия: основной источник — хук [code]CFileLoader::LoadWeaponObject (0x5B3FB0)[/code] через MinHook ([code]weapon.dat -> wt/modelId[/code]), плюс fallback на CWeaponInfo. Формат в UI: [code]Name [weaponTypeId][modelId][/code].
 - Авто-загрузка модели оружия: если модель ещё не загружена, плагин запрашивает стриминг и начинает рендерить со следующего кадра.
 
@@ -33,6 +34,10 @@
 [b]Переопределение оружия по стандартной модели[/b]
 - [code]OrcOutFit\object\other\<skin>\weapons.ini[/code — отдельные offsets/rot/scale под конкретный стандартный скин.
 - Если [code]weapons.ini[/code отсутствует — используются глобальные значения из [code]OrcOutFit.ini[/code].
+
+[b]UI оружия[/b]
+- Рядом с [code]Show on body[/code] есть [code]Copy[/code]/[code]Paste[/code] (Global/Local skin/Other skin).
+- Paste делает валидацию буфера; вставка разрешена и между primary/secondary (dual wield).
 
 [b]Скины[/b]
 - Сканирование [code]*.dff[/code] в [code]OrcOutFit\SKINS[/code.

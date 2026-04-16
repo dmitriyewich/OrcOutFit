@@ -41,13 +41,18 @@
     (`CStreaming::RequestModel` + `LoadAllRequestedModels`) и начинает рендерить со следующего кадра.
 - Dual wield (weapon skills):
   - опция `Main.ConsiderWeaponSkills`,
-  - если у оружия `CWeaponInfo::m_nFlags.bTwinPistol` и `ped->GetWeaponSkill(wt) == WEAPSKILL_PRO` —
+  - если у оружия `CWeaponInfo::m_nFlags.bTwinPistol` (проверка skill-info: `GetWeaponInfo(wt,2)` с fallback на `1`)
+    и `ped->GetWeaponSkill(wt) == WEAPSKILL_PRO` —
     рендерится второй инстанс оружия,
+  - проверка навыка делается для конкретного ped (локальный и все ped в режиме `RenderAllPedsWeapons`),
   - настройки второго ствола хранятся отдельно (`WeaponNN_2` / `[Pistol2]`, etc.).
 - Оружие всех ped (опция):
   - включается флагом `RenderAllPedsWeapons`,
   - фильтруется по радиусу `RenderAllPedsRadius`,
   - используется per-ped cache инстансов по `CPools::GetPedRef`.
+- UI оружия:
+  - рядом с `Show on body` есть `Copy`/`Paste` для текущего `WeaponCfg` (работает для Global/Local skin/Other skin),
+  - Paste валидирует буфер и может вставлять между primary/secondary (dual wield).
 - Кастомные объекты:
   - скан `*.dff` в `OrcOutFit\object`,
   - отдельный `<name>.ini` на каждый объект (кость, смещения, повороты, масштаб).

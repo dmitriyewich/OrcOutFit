@@ -2153,7 +2153,9 @@ static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<cha
         if (needsAmmo && w.m_nAmmoTotal == 0) continue;
         want[wt] = true;
 
-        if (g_considerWeaponSkills && wi && wi->m_nFlags.bTwinPistol) {
+        CWeaponInfo* twinInfo = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 2);
+        if (!twinInfo) twinInfo = wi;
+        if (g_considerWeaponSkills && twinInfo && twinInfo->m_nFlags.bTwinPistol) {
             const char skill = ped->GetWeaponSkill(static_cast<eWeaponType>(wt));
             if (skill == WEAPSKILL_PRO) {
                 const WeaponCfg& wc2 = GetWeaponCfg2ForPed(ped, wt);
