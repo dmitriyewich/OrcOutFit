@@ -11,6 +11,7 @@
 #include "CPlayerPed.h"
 
 #include "samp_bridge.h"
+#include "orc_log.h"
 #include "external/MinHook/include/MinHook.h"
 
 namespace samp_bridge {
@@ -128,24 +129,48 @@ void Poll(const char* command, ToggleCallback onToggle) {
     if (g_state.commandHookInstalled) return;
 
     HMODULE sampModule = GetModuleHandleA("samp.dll");
-    if (!sampModule) return;
+    if (!sampModule) {
+        static bool s_noSampLogged = false;
+        if (!s_noSampLogged) {
+            OrcLogInfo("samp_bridge: samp.dll not loaded (single-player)");
+            s_noSampLogged = true;
+        }
+        return;
+    }
 
     g_state.module = sampModule;
     g_state.base = reinterpret_cast<std::uintptr_t>(sampModule);
     g_state.version = DetectSampVersion(sampModule);
-    if (!g_state.version) return;
+    if (!g_state.version) {
+        static bool s_unknownLogged = false;
+        if (!s_unknownLogged) {
+            OrcLogError("samp_bridge: unknown SA:MP build (entry point not in version table)");
+            s_unknownLogged = true;
+        }
+        return;
+    }
     if (!g_state.minHookInitialized) {
         const MH_STATUS st = MH_Initialize();
-        if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) return;
+        if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
+            OrcLogError("samp_bridge: MH_Initialize -> %s", MH_StatusToString(st));
+            return;
+        }
         g_state.minHookInitialized = true;
         g_state.ownsMinHookInit = (st == MH_OK);
     }
 
     void* sendCommand = reinterpret_cast<void*>(g_state.base + g_state.version->sendCommandOffset);
     if (MH_CreateHook(sendCommand, reinterpret_cast<void*>(&SendCommandDetour),
-                      reinterpret_cast<void**>(&g_state.originalSendCommand)) != MH_OK) return;
-    if (MH_EnableHook(sendCommand) != MH_OK) return;
+                      reinterpret_cast<void**>(&g_state.originalSendCommand)) != MH_OK) {
+        OrcLogError("samp_bridge: MH_CreateHook SendCommand failed");
+        return;
+    }
+    if (MH_EnableHook(sendCommand) != MH_OK) {
+        OrcLogError("samp_bridge: MH_EnableHook SendCommand failed");
+        return;
+    }
     g_state.commandHookInstalled = true;
+    OrcLogInfo("samp_bridge: chat command hook OK (client %s)", g_state.version->name);
 }
 
 bool GetPedNickname(const void* gtaPed, char* outName, int outNameLen, bool* isLocal) {
@@ -246,12 +271,19 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
         g_sampOverlayCursorEnabled = enabled;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
+        static bool s_cursorExLogged = false;
+        if (!s_cursorExLogged) {
+            OrcLogError("samp_bridge: SyncSampOverlayCursor SEH ex=0x%08X", GetExceptionCode());
+            s_cursorExLogged = true;
+        }
     }
 }
 
 void Shutdown() {
     if (!g_state.minHookInitialized)
         return;
+
+    OrcLogInfo("samp_bridge: Shutdown (remove command hook%s)", g_state.ownsMinHookInit ? ", MH_Uninitialize" : "");
 
     __try {
         if (g_state.version && g_state.base) {

@@ -5,6 +5,7 @@
 
 #include "overlay.h"
 
+#include "orc_log.h"
 #include "samp_bridge.h"
 
 #include "imgui.h"
@@ -117,9 +118,23 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 void Init() {
     if (g_inited) return;
+    static bool s_loggedNoDev = false;
+    static bool s_loggedNoWnd = false;
     auto* dev = static_cast<IDirect3DDevice9*>(RwD3D9GetCurrentD3DDevice());
-    if (!dev) return;
-    if (!RsGlobal.ps || !RsGlobal.ps->window) return;
+    if (!dev) {
+        if (!s_loggedNoDev) {
+            OrcLogError("overlay: no D3D9 device (RwD3D9GetCurrentD3DDevice)");
+            s_loggedNoDev = true;
+        }
+        return;
+    }
+    if (!RsGlobal.ps || !RsGlobal.ps->window) {
+        if (!s_loggedNoWnd) {
+            OrcLogError("overlay: RsGlobal window handle missing");
+            s_loggedNoWnd = true;
+        }
+        return;
+    }
     g_hwnd = RsGlobal.ps->window;
 
     IMGUI_CHECKVERSION();
@@ -144,13 +159,20 @@ void Init() {
         SetWindowLongPtrA(g_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WndProc)));
 
     g_inited = true;
+    OrcLogInfo("overlay: ImGui Win32+DX9 hooked, hwnd=%p", g_hwnd);
 }
 
 void OnResetBefore() {
-    if (g_inited) ImGui_ImplDX9_InvalidateDeviceObjects();
+    if (g_inited) {
+        OrcLogInfo("overlay: D3D device lost, invalidate ImGui objects");
+        ImGui_ImplDX9_InvalidateDeviceObjects();
+    }
 }
 void OnResetAfter() {
-    if (g_inited) g_needCreateObj = true;
+    if (g_inited) {
+        g_needCreateObj = true;
+        OrcLogInfo("overlay: D3D reset complete, will recreate ImGui objects");
+    }
 }
 
 void DrawFrame() {
@@ -222,6 +244,7 @@ void DrawFrame() {
 }
 
 void Shutdown() {
+    OrcLogInfo("overlay: Shutdown");
     if (samp_bridge::IsSampBuildKnown())
         samp_bridge::SyncSampOverlayCursor(false);
     PatchCursor(false);

@@ -80,7 +80,8 @@
   - при **SA:MP** и включённом **`[Features] SkinNickMode`**: кастомный clump выбирается **по нику** (`[NickBinding]` в INI скина); при совпадении ника он **важнее** выбранного в UI скина,
   - **`[Features] SkinLocalPreferSelected`** (*always use selected*): на **локального игрока** вешается скин из вкладки Skins (`SkinMode`/`Selected`), если опция включена — **в том числе при выключенном `SkinNickMode`**; при включённом nick mode без совпадения ника поведение то же; при совпадении ника побеждает скин по `[NickBinding]`,
   - рендер выбранного clump поверх ped, скрытие базового ped (опция), bind через `RpSkinAtomicSetHAnimHierarchy`;
-  - перед `RpClumpRender` кастомного скина выставляется освещение как у педов/объектов: `CPointLights::GenerateLightsAffectingObject` + `SetLightColoursForPedsCarsAndObjects` (иначе clump может оказаться чёрным, если перед ним в кадре не рендерилось оружие/объекты),
+  - **кастомный скин:** загрузка как у прочих кастом-clump (`InitAtomicCB`); рендер: `CPed::SetupLighting` (SEH) → `ApplyAttachmentLightingForPed` с **colourScale=1.0** → `RpClumpRender` → при успешном `SetupLighting` — `RemoveLighting` (у оружия/объектов **colourScale=0.5**); без `PrepAtomicCB` для скина.
+  - **Лог `OrcOutFit.log` (рядом с INI):** `[Features] DebugLogLevel` — `0` выкл., `1` только ошибки (`[E]`), `2` полный trace (`[I]` + ошибки). Ключ **`DebugLog=1`** (legacy) по-прежнему включает уровень 2. Реализация: `source/orc_log.cpp`; в UI: Main → **Debug log** (combo).
   - случайные пулы `Skins\random` **не сканируются**; `ResolveSkinForPed` не использует random-fallback,
   - ключ `RandomFromPools` в `[SkinMode]` в INI остаётся для совместимости.
 - Per-skin weapon overrides (по имени DFF ped из ped.dat):
@@ -91,7 +92,7 @@
 
 - Основной код:
   - `C:\Games\CODEX\WeaponsOutFit\source\main.cpp`
-  - UI (ImGui): `source\orc_ui.cpp`, `source\orc_ui.h`; общие типы: `source\orc_types.h`; мост к состоянию: `source\orc_app.h`
+  - UI (ImGui): `source\orc_ui.cpp`, `source\orc_ui.h`; общие типы: `source\orc_types.h`; мост к состоянию: `source\orc_app.h`; лог: `source\orc_log.cpp`, `source\orc_log.h`
 - MinHook:
   - `C:\Games\CODEX\WeaponsOutFit\source\external\MinHook\`
 - Проект Visual Studio:
@@ -158,6 +159,7 @@
 ## Пути данных плагина (runtime)
 
 - Путь считается относительно расположения `OrcOutFit.asi` (modloader-friendly).
+- Конфиг: `OrcOutFit.ini` рядом с ASI (или в каталоге загрузки ASI); **лог** `OrcOutFit.log` — рядом с этим INI (имя: тот же базовый путь, расширение `.log`).
 - Ожидаемые подпапки:
   - `OrcOutFit\Objects`
   - `OrcOutFit\Weapons`

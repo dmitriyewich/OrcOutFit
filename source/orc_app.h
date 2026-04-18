@@ -1,6 +1,7 @@
 #pragma once
 
 #include "orc_types.h"
+#include "orc_log.h"
 
 #include <array>
 #include <string>

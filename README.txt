@@ -18,8 +18,10 @@
 
 [b]Объекты[/b] — [code]*.dff[/code] в [code]OrcOutFit\Objects[/code]; в [code]<имя>.ini[/code] секции [code][Skin.<dff>][/code] (без папок [code]object\other[/code]).
 
-[b]Скины[/b] — [code]*.dff[/code] в [code]OrcOutFit\Skins[/code]; рендер поверх ped; перед рендером — освещение как у педов ([code]GenerateLightsAffectingObject[/code] + [code]SetLightColoursForPedsCarsAndObjects[/code]), чтобы не было «чёрного» clump; опция скрытия базы.
+[b]Скины[/b] — [code]*.dff[/code] в [code]OrcOutFit\Skins[/code]; рендер поверх ped; цепочка: [code]SetupLighting[/code] (SEH) → [code]ApplyAttachmentLightingForPed[/code] ([code]colourScale=1.0[/code] для скина, [code]0.5[/code] для оружия/объектов) → [code]RpClumpRender[/code] → при успехе [code]RemoveLighting[/code]. Опция скрытия базы.
 SA:MP + [code]SkinNickMode[/code]: в основном [b]по нику[/b] ([code][NickBinding][/code]). [code]SkinLocalPreferSelected=1[/code] — выбранный в UI скин на себя [b]в т.ч. при выключенном nick binding[/b]; при включённом nick binding совпадение ника по-прежнему важнее.
+
+[b]Отладочный лог[/b] — [code]OrcOutFit.log[/code] рядом с [code]OrcOutFit.ini[/code]. [code][Features] DebugLogLevel[/code]: [code]0[/code] выкл., [code]1[/code] только [code][E][/code], [code]2[/code] [code][I][/code]+ошибки. Legacy [code]DebugLog=1[/code] = уровень 2. UI: Main → [b]Debug log[/b] (combo). Код: [code]source/orc_log.*[/code].
 
 [b]UI[/b] — вкладки [b]Main / Weapons / Objects / Skins[/b]. Список стандартных ped: [b]сортировка по model id[/b], формат [code]Имя [ID][/code]. Кнопка [b]Wear this skin[/b] — превью модели со стримингом и безопасной сменой в начале кадра.
 [b]Save to Weapons[/b] отключён только для [b]одиночки + дефолтный CJ[/b]; в SA:MP и после примерки — доступно.
@@ -29,7 +31,7 @@ SA:MP + [code]SkinNickMode[/code]: в основном [b]по нику[/b] ([co
 [size=140][b]Установка[/b][/size]
 
 1) [code]OrcOutFit.asi[/code] в папку игры или modloader (пути от каталога ASI).
-2) [code]OrcOutFit.ini[/code] создаётся рядом.
+2) [code]OrcOutFit.ini[/code] создаётся рядом (при логировании — [code]OrcOutFit.log[/code]).
 3) Папки: [code]OrcOutFit\Objects[/code], [code]OrcOutFit\Weapons[/code], [code]OrcOutFit\Skins[/code].
 
 [hr]
@@ -55,7 +57,7 @@ SA:MP: [code][Main] Command[/code] (по умолчанию [code]/orcoutfit[/co
 
 [b][Main][/b] — [code]Enabled[/code], [code]ActivationKey[/code], [code]Command[/code], [code]SampAllowActivationKey[/code].
 
-[b][Features][/b] — [code]RenderAllPedsWeapons[/code], [code]RenderAllPedsRadius[/code], [code]ConsiderWeaponSkills[/code], [code]CustomObjects[/code], [code]SkinMode[/code], [code]SkinHideBasePed[/code], [code]SkinNickMode[/code], [code]SkinLocalPreferSelected[/code].
+[b][Features][/b] — [code]RenderAllPedsWeapons[/code], [code]RenderAllPedsRadius[/code], [code]ConsiderWeaponSkills[/code], [code]CustomObjects[/code], [code]SkinMode[/code], [code]SkinHideBasePed[/code], [code]SkinNickMode[/code], [code]SkinLocalPreferSelected[/code], [code]DebugLogLevel[/code], legacy [code]DebugLog[/code].
 
 Секции оружия в корне — см. полный [url=https://github.com/dmitriyewich/OrcOutFit/blob/main/README.md]README.md[/url] в репозитории.
 

@@ -33,10 +33,16 @@
 ### Кастомные скины (DFF поверх педа)
 - Сканирование **`*.dff`** в **`OrcOutFit\Skins`**.
 - Рендер выбранного **clump** поверх ped, привязка анимации через **RpSkin** / иерархию базового ped.
-- Перед отрисовкой скина выставляется **освещение для педов/объектов** (`GenerateLightsAffectingObject` + `SetLightColoursForPedsCarsAndObjects`), чтобы модель не оставалась чёрной при отсутствии предшествующего рендера оружия/объектов в том же кадре.
+- Цепочка освещения скина: **`CPed::SetupLighting`** (обёртка с SEH) → **`ApplyAttachmentLightingForPed`** с **`colourScale=1.0`** → **`RpClumpRender`** → при успешном **`SetupLighting`** — **`RemoveLighting`**. У оружия и кастом-объектов в той же функции освещения используется **`colourScale=0.5`**, чтобы уменьшить пересвет. Без отдельного **`PrepAtomicCB`** для скина.
 - **Скрытие базового ped** (`CVisibilityPlugins::SetClumpAlpha`) — опция.
 - **SA:MP** при включённом **`SkinNickMode`**: скин в основном **по нику** (`[NickBinding]` в INI скина); совпадение ника важнее выбранного в списке скина.
 - **Локальный игрок:** **`SkinLocalPreferSelected`** (*Skin: always use selected skin for me*) включает выбранный в UI скин **в том числе при выключенном nick binding**; при включённом nick binding скин по совпадению ника по-прежнему **важнее**. Без этой опции и без ник-привязки оверлей на себя не ставится.
+
+### Отладочный лог
+- Файл **`OrcOutFit.log`** создаётся **рядом с `OrcOutFit.ini`** (не обязательно рядом с ASI при modloader — путь считается от INI).
+- Уровни в **`[Features] DebugLogLevel`**: **`0`** — выкл.; **`1`** — только ошибки (префикс **`[E]`** в логе); **`2`** — полный trace (**`[I]`** + ошибки).
+- Устаревший ключ **`DebugLog=1`** по-прежнему включает уровень **`2`** (если **`DebugLogLevel`** не задан).
+- Настройка в UI: **Main** → **Debug log** (выпадающий список). Реализация: **`source/orc_log.cpp`**, **`source/orc_log.h`**.
 
 ### Интерфейс
 - Вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**.
@@ -66,7 +72,7 @@
 
 1. Соберите проект (см. [Сборка](#сборка)) или возьмите готовый **`OrcOutFit.asi`**.
 2. Положите **`OrcOutFit.asi`** в каталог с игрой (или modloader — пути данных считаются **от каталога ASI**).
-3. Рядом с ASI появится **`OrcOutFit.ini`**.
+3. Рядом с ASI появится **`OrcOutFit.ini`** (и при включённом логировании — **`OrcOutFit.log`**).
 4. Каталоги (относительно ASI):
    - `OrcOutFit\Objects` — кастомные объекты + их INI
    - `OrcOutFit\Weapons` — опциональные пресеты оружия `<dff>.ini`
@@ -125,6 +131,8 @@
 | `SkinHideBasePed` | Скрыть базовый clump |
 | `SkinNickMode` | Привязка скинов по нику SA:MP |
 | `SkinLocalPreferSelected` | `1` — всегда использовать **выбранный в UI** скин на локальном игроке (если нет скина по нику); `0` — только ник |
+| `DebugLogLevel` | `0` / `1` (ошибки) / `2` (info+ошибки); см. раздел «Отладочный лог» |
+| `DebugLog` | Legacy: `1` = то же, что **`DebugLogLevel=2`**, если уровень не задан отдельно |
 
 ### Секции оружия (корень INI)
 Как раньше: именованные (`[M4]`) и `[WeaponNN]`, для второго ствола — `[WeaponNN_2]` / `[Name2]`.
@@ -160,6 +168,8 @@
 | Путь | Назначение |
 |------|------------|
 | `source/main.cpp` | Рендер, конфиг, хуки, streaming, скины |
+| `source/orc_log.cpp`, `source/orc_log.h` | Лог в файл, уровни Info/Error |
+| `source/orc_app.h`, `source/orc_types.h` | Состояние плагина, типы |
 | `source/orc_ui.cpp` | ImGui |
 | `source/overlay.cpp` | D3D9 + ввод |
 | `source/samp_bridge.cpp` | SA:MP |

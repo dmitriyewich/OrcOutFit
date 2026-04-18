@@ -61,6 +61,7 @@ static void LogInit() {
     char* dot = strrchr(modPath, '.');
     if (dot) *dot = 0;
     _snprintf_s(g_iniPath, _TRUNCATE, "%s.ini", modPath);
+    OrcLogReloadFromIni(g_iniPath);
     // Relative to plugin location (modloader-friendly):
     _snprintf_s(g_gameObjDir, _TRUNCATE, "%s\\OrcOutFit\\Objects", moduleDir);
     _snprintf_s(g_gameWeaponsDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons", moduleDir);
@@ -219,11 +220,22 @@ static void EnsureWeaponDatHookInstalled() {
     g_weaponDatModelId.assign(256 + 1, 0);
     g_weaponDatIdeName.assign(256 + 1, {});
 
-    if (MH_Initialize() != MH_OK) return;
+    MH_STATUS st = MH_Initialize();
+    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
+        OrcLogError("LoadWeaponObject hook: MH_Initialize -> %s", MH_StatusToString(st));
+        return;
+    }
     if (MH_CreateHook(reinterpret_cast<void*>(0x5B3FB0),
                       reinterpret_cast<void*>(&LoadWeaponObject_Detour),
-                      reinterpret_cast<void**>(&g_LoadWeaponObject_Orig)) != MH_OK) return;
-    (void)MH_EnableHook(reinterpret_cast<void*>(0x5B3FB0));
+                      reinterpret_cast<void**>(&g_LoadWeaponObject_Orig)) != MH_OK) {
+        OrcLogError("LoadWeaponObject hook: MH_CreateHook failed");
+        return;
+    }
+    st = MH_EnableHook(reinterpret_cast<void*>(0x5B3FB0));
+    if (st != MH_OK)
+        OrcLogError("LoadWeaponObject hook: MH_EnableHook -> %s", MH_StatusToString(st));
+    else
+        OrcLogInfo("LoadWeaponObject hook installed (0x5B3FB0)");
 }
 
 static void EnsurePedDatHookInstalled() {
@@ -234,12 +246,22 @@ static void EnsurePedDatHookInstalled() {
     g_pedDatTxdById.clear();
     g_pedDatTxdById.resize(1000); // grows on demand
 
-    // MinHook can be already initialized by other hooks.
-    (void)MH_Initialize();
+    MH_STATUS st = MH_Initialize();
+    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
+        OrcLogError("LoadPedObject hook: MH_Initialize -> %s", MH_StatusToString(st));
+        return;
+    }
     if (MH_CreateHook(reinterpret_cast<void*>(0x5B7420),
                       reinterpret_cast<void*>(&LoadPedObject_Detour),
-                      reinterpret_cast<void**>(&g_LoadPedObject_Orig)) != MH_OK) return;
-    (void)MH_EnableHook(reinterpret_cast<void*>(0x5B7420));
+                      reinterpret_cast<void**>(&g_LoadPedObject_Orig)) != MH_OK) {
+        OrcLogError("LoadPedObject hook: MH_CreateHook failed");
+        return;
+    }
+    st = MH_EnableHook(reinterpret_cast<void*>(0x5B7420));
+    if (st != MH_OK)
+        OrcLogError("LoadPedObject hook: MH_EnableHook -> %s", MH_StatusToString(st));
+    else
+        OrcLogInfo("LoadPedObject hook installed (0x5B7420)");
 }
 
 static const char* TryGetPedModelNameById(int modelId) {
@@ -319,7 +341,14 @@ static void InitWeaponTypesAndStorage() {
         }
 
         g_weaponTypesReady = true;
+        static bool s_weaponTypesLogged = false;
+        if (!s_weaponTypesLogged) {
+            s_weaponTypesLogged = true;
+            OrcLogInfo("weapon types ready: %zu entries", g_availableWeaponTypes.size());
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("InitWeaponTypesAndStorage: SEH ex=0x%08X, using fallback weapon list",
+            GetExceptionCode());
         // Если список уже частично заполнен (часто бывает из-за SEH в extra-скане),
         // не обнуляем его обратно в `1..68`. Оставляем то, что успело найтись,
         // и просто строим cfg под текущий maxId.
@@ -366,6 +395,7 @@ static void InitWeaponTypesAndStorage() {
             }
         }
         g_weaponTypesReady = true;
+        OrcLogInfo("weapon types fallback ready: %zu entries", g_availableWeaponTypes.size());
     }
 }
 bool g_skinModeEnabled = false;
@@ -646,13 +676,18 @@ void LoadConfig() {
     RefreshActivationRouting();
     InvalidatePerSkinWeaponCache();
     InvalidateObjectSkinParamCache();
+    OrcLogReloadFromIni(g_iniPath);
+    OrcLogInfo("LoadConfig: %s", g_iniPath);
     // Weapon types are discovered in SetupDefaults (InitWeaponTypesAndStorage).
 }
 
 static void SaveDefaultConfig() {
     if (GetFileAttributesA(g_iniPath) != INVALID_FILE_ATTRIBUTES) return;
     FILE* f = fopen(g_iniPath, "w");
-    if (!f) return;
+    if (!f) {
+        OrcLogError("SaveDefaultConfig: cannot create %s", g_iniPath);
+        return;
+    }
     fputs("; OrcOutFit configuration.\n"
           "; Bone IDs (RpHAnim NODE IDs):\n"
           ";   1=Root 2=Pelvis 3=Spine1 4=Spine 5=Neck 6=Head\n"
@@ -678,7 +713,10 @@ static void SaveDefaultConfig() {
           "SkinMode=0\n"
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
-          "SkinLocalPreferSelected=0\n\n", f);
+          "SkinLocalPreferSelected=0\n"
+          "; DebugLogLevel: 0=off, 1=errors only, 2=info (full). Legacy DebugLog=1 equals level 2.\n"
+          "DebugLogLevel=0\n"
+          "DebugLog=0\n\n", f);
     for (int wt : g_availableWeaponTypes) {
         if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
         const auto& c = g_cfg[wt];
@@ -699,7 +737,10 @@ static void SaveDefaultConfig() {
 void SaveMainIni() {
     if (GetFileAttributesA(g_iniPath) == INVALID_FILE_ATTRIBUTES) {
         FILE* t = fopen(g_iniPath, "w");
-        if (!t) return;
+        if (!t) {
+            OrcLogError("SaveMainIni: cannot create %s", g_iniPath);
+            return;
+        }
         fclose(t);
     }
     char buf[32];
@@ -726,6 +767,10 @@ void SaveMainIni() {
     WritePrivateProfileStringA("Features", "SkinNickMode", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinLocalPreferSelected ? 1 : 0);
     WritePrivateProfileStringA("Features", "SkinLocalPreferSelected", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", static_cast<int>(g_orcLogLevel));
+    WritePrivateProfileStringA("Features", "DebugLogLevel", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
+    WritePrivateProfileStringA("Features", "DebugLog", buf, g_iniPath);
 }
 
 // ----------------------------------------------------------------------------
@@ -1099,15 +1144,26 @@ static void DestroyAllRandomPoolSkins() {
 
 static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
     if (o.rwObject) return true;
-    if (!FileExistsA(o.dffPath.c_str())) return false;
+    if (!FileExistsA(o.dffPath.c_str())) {
+        static std::unordered_set<std::string> s_once;
+        if (s_once.insert(o.name).second)
+            OrcLogError("object \"%s\": DFF missing %s", o.name.c_str(), o.dffPath.c_str());
+        return false;
+    }
     if (o.txdPath.empty() || !FileExistsA(o.txdPath.c_str())) {
-        if (!o.txdMissingLogged) o.txdMissingLogged = true;
+        if (!o.txdMissingLogged) {
+            o.txdMissingLogged = true;
+            OrcLogError("object \"%s\": TXD missing or invalid path", o.name.c_str());
+        }
         return false;
     }
 
     int txdSlot = CTxdStore::FindTxdSlot(o.name.c_str());
     if (txdSlot == -1) txdSlot = CTxdStore::AddTxdSlot(o.name.c_str());
-    if (txdSlot == -1) return false;
+    if (txdSlot == -1) {
+        OrcLogError("object \"%s\": CTxdStore::AddTxdSlot failed", o.name.c_str());
+        return false;
+    }
     bool txdOk = false;
     RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)o.txdPath.c_str());
     if (txdStream) {
@@ -1115,7 +1171,10 @@ static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
         RwStreamClose(txdStream, nullptr);
     }
     if (!txdOk) {
-        if (!o.txdMissingLogged) o.txdMissingLogged = true;
+        if (!o.txdMissingLogged) {
+            o.txdMissingLogged = true;
+            OrcLogError("object \"%s\": LoadTxd failed", o.name.c_str());
+        }
         return false;
     }
     o.txdSlot = txdSlot;
@@ -1123,7 +1182,11 @@ static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
     CTxdStore::SetCurrentTxd(txdSlot);
 
     RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)o.dffPath.c_str());
-    if (!stream) { CTxdStore::PopCurrentTxd(); return false; }
+    if (!stream) {
+        CTxdStore::PopCurrentTxd();
+        OrcLogError("object \"%s\": RwStreamOpen DFF failed", o.name.c_str());
+        return false;
+    }
 
     bool ok = false;
     if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr)) {
@@ -1132,8 +1195,10 @@ static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
             o.rwObject = reinterpret_cast<RwObject*>(readClump);
             RpClumpForAllAtomics(readClump, InitAtomicCB, nullptr);
             ok = true;
+            OrcLogInfo("object \"%s\": clump loaded", o.name.c_str());
         }
-    }
+    } else
+        OrcLogError("object \"%s\": DFF has no CLUMP chunk", o.name.c_str());
     RwStreamClose(stream, nullptr);
     CTxdStore::PopCurrentTxd();
     return ok;
@@ -1141,28 +1206,46 @@ static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
 
 static bool EnsureCustomSkinLoaded(CustomSkinCfg& s) {
     if (s.rwObject) return true;
-    if (!FileExistsA(s.dffPath.c_str())) return false;
+    if (!FileExistsA(s.dffPath.c_str())) {
+        static std::unordered_set<std::string> s_once;
+        if (s_once.insert(s.name).second)
+            OrcLogError("skin \"%s\": DFF missing %s", s.name.c_str(), s.dffPath.c_str());
+        return false;
+    }
     if (s.txdPath.empty() || !FileExistsA(s.txdPath.c_str())) {
-        if (!s.txdMissingLogged) s.txdMissingLogged = true;
+        if (!s.txdMissingLogged) {
+            s.txdMissingLogged = true;
+            OrcLogError("skin \"%s\": TXD missing or invalid path", s.name.c_str());
+        }
         return false;
     }
 
     int txdSlot = CTxdStore::FindTxdSlot(s.name.c_str());
     if (txdSlot == -1) txdSlot = CTxdStore::AddTxdSlot(s.name.c_str());
-    if (txdSlot == -1) return false;
+    if (txdSlot == -1) {
+        OrcLogError("skin \"%s\": CTxdStore::AddTxdSlot failed", s.name.c_str());
+        return false;
+    }
     bool txdOk = false;
     RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)s.txdPath.c_str());
     if (txdStream) {
         txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
         RwStreamClose(txdStream, nullptr);
     }
-    if (!txdOk) return false;
+    if (!txdOk) {
+        OrcLogError("skin \"%s\": LoadTxd failed", s.name.c_str());
+        return false;
+    }
     s.txdSlot = txdSlot;
 
     CTxdStore::PushCurrentTxd();
     CTxdStore::SetCurrentTxd(txdSlot);
     RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)s.dffPath.c_str());
-    if (!stream) { CTxdStore::PopCurrentTxd(); return false; }
+    if (!stream) {
+        CTxdStore::PopCurrentTxd();
+        OrcLogError("skin \"%s\": RwStreamOpen DFF failed", s.name.c_str());
+        return false;
+    }
     bool ok = false;
     if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr)) {
         RpClump* c = RpClumpStreamRead(stream);
@@ -1170,8 +1253,10 @@ static bool EnsureCustomSkinLoaded(CustomSkinCfg& s) {
             s.rwObject = reinterpret_cast<RwObject*>(c);
             RpClumpForAllAtomics(c, InitAtomicCB, nullptr);
             ok = true;
+            OrcLogInfo("skin \"%s\": clump loaded", s.name.c_str());
         }
-    }
+    } else
+        OrcLogError("skin \"%s\": DFF has no CLUMP chunk", s.name.c_str());
     RwStreamClose(stream, nullptr);
     CTxdStore::PopCurrentTxd();
     return ok;
@@ -1194,7 +1279,10 @@ static void LoadSkinCfgFromIni(CustomSkinCfg& s) {
 void SaveSkinCfgToIni(const CustomSkinCfg& s) {
     if (s.iniPath.empty()) return;
     FILE* f = fopen(s.iniPath.c_str(), "w");
-    if (!f) return;
+    if (!f) {
+        OrcLogError("SaveSkinCfgToIni: cannot write %s", s.iniPath.c_str());
+        return;
+    }
     fprintf(f,
         "; OrcOutFit custom skin config for %s\n"
         "; Nicks: one per line and/or comma-separated (case-insensitive).\n\n"
@@ -1212,7 +1300,14 @@ void DiscoverCustomObjectsAndEnsureIni() {
     g_customObjects.clear();
 
     DWORD attr = GetFileAttributesA(g_gameObjDir);
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) return;
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            OrcLogInfo("Objects folder missing or not a directory: %s", g_gameObjDir);
+        }
+        return;
+    }
 
     std::string dir = g_gameObjDir;
     std::string mask = JoinPath(dir, "*.*");
@@ -1237,6 +1332,7 @@ void DiscoverCustomObjectsAndEnsureIni() {
         foundDff++;
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+    OrcLogInfo("DiscoverCustomObjects: %d DFF in %s", foundDff, g_gameObjDir);
 }
 
 void DiscoverCustomSkins() {
@@ -1244,7 +1340,14 @@ void DiscoverCustomSkins() {
     g_customSkins.clear();
     DestroyAllRandomPoolSkins();
     DWORD attr = GetFileAttributesA(g_gameSkinDir);
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) return;
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            OrcLogInfo("Skins folder missing or not a directory: %s", g_gameSkinDir);
+        }
+        return;
+    }
     std::string dir = g_gameSkinDir;
     std::string mask = JoinPath(dir, "*.*");
     WIN32_FIND_DATAA fd{};
@@ -1265,6 +1368,7 @@ void DiscoverCustomSkins() {
         g_customSkins.push_back(s);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+    OrcLogInfo("DiscoverCustomSkins: %zu skins in %s", g_customSkins.size(), g_gameSkinDir);
     if (!g_skinSelectedName.empty()) {
         for (int i = 0; i < (int)g_customSkins.size(); i++) {
             if (ToLowerAscii(g_customSkins[i].name) == ToLowerAscii(g_skinSelectedName)) {
@@ -1280,7 +1384,10 @@ void DiscoverCustomSkins() {
 void SaveSkinModeIni() {
     if (GetFileAttributesA(g_iniPath) == INVALID_FILE_ATTRIBUTES) {
         FILE* t = fopen(g_iniPath, "w");
-        if (!t) return;
+        if (!t) {
+            OrcLogError("SaveSkinModeIni: cannot create %s", g_iniPath);
+            return;
+        }
         fclose(t);
     }
     char buf[64];
@@ -1351,6 +1458,7 @@ void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, s
     w2 = g_cfg2;
     if (!fullPath || !fullPath[0] || !FileExistsA(fullPath)) return;
     LoadWeaponOverridesFromIni2(fullPath, &w1, &w2);
+    OrcLogInfo("weapon preset loaded: %s", fullPath);
 }
 
 static std::unordered_map<std::string, std::vector<WeaponCfg>> g_weaponSkinOv1;
@@ -1465,7 +1573,8 @@ void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& 
     if (t) {
         fputs("; OrcOutFit weapon preset (same section layout as OrcOutFit.ini).\n\n", t);
         fclose(t);
-    }
+    } else
+        OrcLogError("SaveAllWeaponsToIniFile: cannot create %s", iniPath);
     for (int wt = 1; wt < (int)w1.size() && wt < (int)w2.size(); wt++) {
         const WeaponCfg& c = w1[wt];
         char sec[96];
@@ -1612,23 +1721,33 @@ static void ApplyPendingLocalPlayerModel() {
     g_pendingLocalPedModelId = -1;
 
     CPlayerPed* p = FindPlayerPed(0);
-    if (!p) return;
+    if (!p) {
+        OrcLogError("ApplyPendingLocalPlayerModel: no local player ped");
+        return;
+    }
 
     CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
-    if (!mi || mi->GetModelType() != MODEL_INFO_PED) return;
+    if (!mi || mi->GetModelType() != MODEL_INFO_PED) {
+        OrcLogError("ApplyPendingLocalPlayerModel: model %d is not MODEL_INFO_PED", modelId);
+        return;
+    }
 
     ClearAll();
 
     CStreaming::RequestModel(modelId, 0);
     for (int i = 0; i < 64 && !CStreaming::HasModelLoaded(modelId); i++)
         CStreaming::LoadAllRequestedModels(false);
-    if (!CStreaming::HasModelLoaded(modelId)) return;
+    if (!CStreaming::HasModelLoaded(modelId)) {
+        OrcLogError("ApplyPendingLocalPlayerModel: model %d did not load in time", modelId);
+        return;
+    }
 
     using Fn = void(__thiscall*)(CPed*, int);
     Fn f = reinterpret_cast<Fn>(0x5E4880);
     f(p, modelId);
     InvalidatePerSkinWeaponCache();
     InvalidateObjectSkinParamCache();
+    OrcLogInfo("ApplyPendingLocalPlayerModel: set local ped model id=%d", modelId);
 }
 
 static void ClearAllOtherPeds() {
@@ -1649,6 +1768,51 @@ static RwMatrix* GetBoneMatrix(CPed* ped, int boneNodeId) {
     RwInt32 id = RpHAnimIDGetIndex(h, boneNodeId);
     if (id < 0) return nullptr;
     return &h->pMatrixArray[id];
+}
+
+// Освещение как у педа/прикреплённых объектов: ambient по времени суток + directional,
+// затем вклад точечных источников. Третий аргумент GenerateLightsAffectingObject — CEntity*
+// (см. plugin_sa/game_sa/CPointLights.h), иначе движок не привязывает свет к педу.
+// colourScale: оружие/объекты — 0.5 (меньше пересвет); кастомный скин — 1.0 (ближе к штатному педу).
+static void ApplyAttachmentLightingForPed(CPed* ped, const CVector& sampleWorldPos, float colourScale = 0.5f) {
+    if (!ped) return;
+    ActivateDirectional();
+    SetAmbientColours();
+    float totalLighting = 0.0f;
+    const float mult = CPointLights::GenerateLightsAffectingObject(&sampleWorldPos, &totalLighting, ped);
+    (void)totalLighting;
+    float v = mult * colourScale;
+    if (v > 1.0f) v = 1.0f;
+    if (v < 0.0f) v = 0.0f;
+    SetLightColoursForPedsCarsAndObjects(v);
+}
+
+static bool OrcTryPedSetupLighting(CPed* ped) {
+    if (!ped) return false;
+    __try {
+        return ped->SetupLighting();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("SEH CPed::SetupLighting ex=0x%08X ped=%p", GetExceptionCode(), ped);
+        return false;
+    }
+}
+
+static void OrcTryPedRemoveLighting(CPed* ped) {
+    if (!ped) return;
+    __try {
+        ped->RemoveLighting();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("SEH CPed::RemoveLighting ex=0x%08X ped=%p", GetExceptionCode(), ped);
+    }
+}
+
+static void OrcTryRpClumpRender(RpClump* clump) {
+    if (!clump) return;
+    __try {
+        RpClumpRender(clump);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("SEH RpClumpRender ex=0x%08X clump=%p", GetExceptionCode(), clump);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1770,6 +1934,7 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
 
     int fi = FindFree(arr);
     if (fi < 0) {
+        OrcLogError("CreateWeaponInstance: no free slot (weapon type %d)", wt);
         if (inst->type == rpCLUMP) RpClumpDestroy(reinterpret_cast<RpClump*>(inst));
         return false;
     }
@@ -1813,9 +1978,7 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
     RwFrameUpdateObjects(frame);
 
     CVector lightPos = { bone->pos.x, bone->pos.y, bone->pos.z };
-    float lightOut = 0.0f;
-    float light = CPointLights::GenerateLightsAffectingObject(&lightPos, &lightOut, nullptr) * 0.5f;
-    SetLightColoursForPedsCarsAndObjects(light);
+    ApplyAttachmentLightingForPed(ped, lightPos);
 
     if (r.rwObject->type == rpCLUMP) {
         auto* clump = reinterpret_cast<RpClump*>(r.rwObject);
@@ -1912,9 +2075,7 @@ static void RenderCustomObject(CPed* ped, CustomObjectCfg& o, const CustomObject
     RwFrameUpdateObjects(frame);
 
     CVector lightPos = { bone->pos.x, bone->pos.y, bone->pos.z };
-    float lightOut = 0.0f;
-    float light = CPointLights::GenerateLightsAffectingObject(&lightPos, &lightOut, nullptr) * 0.5f;
-    SetLightColoursForPedsCarsAndObjects(light);
+    ApplyAttachmentLightingForPed(ped, lightPos);
 
     if (o.rwObject->type == rpCLUMP) {
         auto* clump = reinterpret_cast<RpClump*>(o.rwObject);
@@ -2046,17 +2207,24 @@ static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
         CopySkinHierarchyPose(ped, clump);
     }
     RwFrameUpdateObjects(dstFrame);
-    // Explicit lighting for custom skin. Without this, when no weapon/object render
-    // runs before, lighting state may stay dark and skin appears black.
-    const CVector& p = ped->GetPosition();
-    CVector lightPos = { p.x, p.y, p.z };
-    float lightOut = 0.0f;
-    float light = CPointLights::GenerateLightsAffectingObject(&lightPos, &lightOut, nullptr) * 0.5f;
-    SetLightColoursForPedsCarsAndObjects(light);
-    if (clump) {
-        RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
-        RpClumpRender(clump);
+    // Штатная цепочка освещения педа (SEH) + ApplyAttachment colourScale=1.0, без PrepAtomicCB.
+    const bool lit = OrcTryPedSetupLighting(ped);
+    static int s_setupLogLeft = 8;
+    if (g_orcLogLevel >= OrcLogLevel::Info && s_setupLogLeft > 0) {
+        OrcLogInfo("SetupLighting skin=%s -> %d ped=%p", sel->name.c_str(), lit ? 1 : 0, ped);
+        s_setupLogLeft--;
     }
+    CVector boundCentre{};
+    ped->GetBoundCentre(boundCentre);
+    static int s_fallbackLogLeft = 8;
+    if (g_orcLogLevel >= OrcLogLevel::Info && !lit && s_fallbackLogLeft > 0) {
+        OrcLogInfo("skin: SetupLighting false, ApplyAttachment only name=%s", sel->name.c_str());
+        s_fallbackLogLeft--;
+    }
+    ApplyAttachmentLightingForPed(ped, boundCentre, 1.0f);
+    OrcTryRpClumpRender(clump);
+    if (lit)
+        OrcTryPedRemoveLighting(ped);
 }
 
 static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* suppress = nullptr) {
@@ -2264,12 +2432,15 @@ static void OnDrawingEvent() {
             SetupDefaults();
             SaveDefaultConfig();
             LoadConfig();
+            OrcLogInfo("session start: skin path SetupLighting+ApplyAttachment+RemoveLighting");
+            OrcLogInfo("paths logfile=%s inifile=%s", OrcLogGetPath(), g_iniPath);
             DiscoverCustomObjectsAndEnsureIni();
             DiscoverCustomSkins();
             overlay::SetDrawCallback(&OrcUiDraw);
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
-            // Если падаем на самом старте, хотя бы не дать игре умереть “без причин”.
+            OrcLogError("OnDrawingEvent first-frame init: SEH ex=0x%08X, plugin disabled",
+                GetExceptionCode());
             g_enabled = false;
             overlay::SetOpen(false);
         }
@@ -2279,7 +2450,9 @@ static void OnDrawingEvent() {
     overlay::Init();  // no-op after first time
     ApplyPendingLocalPlayerModel();
     __try { SyncAndRender(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("SyncAndRender: SEH ex=0x%08X", GetExceptionCode());
+    }
     overlay::DrawFrame();
 }
 
@@ -2298,6 +2471,7 @@ static void OnPedRenderBefore(CPed* ped) {
         CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 0);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OnPedRenderBefore: SetClumpAlpha SEH ex=0x%08X", GetExceptionCode());
         g_hideSnapshotValid = false;
         g_hiddenPed = nullptr;
         g_hiddenClump = nullptr;
@@ -2323,6 +2497,7 @@ static void OnPedRenderAfter(CPed* ped) {
 }
 
 static void OnShutdownRw() {
+    OrcLogInfo("shutdownRw: releasing hooks and instances");
     overlay::Shutdown();
     samp_bridge::Shutdown();
     for (int i = 0; i < kMax; i++) g_rendered[i] = {};
@@ -2374,6 +2549,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_module = module;
         DisableThreadLibraryCalls(module);
         LogInit();
+        OrcLogInfo("DllMain PROCESS_ATTACH ini=%s", g_iniPath);
         // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon.dat load.
         EnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();

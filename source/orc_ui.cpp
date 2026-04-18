@@ -230,6 +230,14 @@ void OrcUiDraw() {
                 "If on: your ped uses the skin chosen in the Skins tab (after Save skin mode selection). "
                 "Nick-bound skin still wins when nick binding is on and your name matches. "
                 "Works even when nick binding is off.");
+            int logCombo = static_cast<int>(g_orcLogLevel);
+            if (ImGui::Combo("Debug log (OrcOutFit.log)", &logCombo,
+                    "Off\0Errors only\0Info (full)\0\0")) {
+                if (logCombo < 0) logCombo = 0;
+                if (logCombo > 2) logCombo = 2;
+                g_orcLogLevel = static_cast<OrcLogLevel>(logCombo);
+            }
+            ImGui::TextDisabled("%s", OrcLogGetPath());
             ImGui::PopItemWidth();
 
             ImGui::Separator();
@@ -237,6 +245,7 @@ void OrcUiDraw() {
                 SaveMainIni();
                 SaveSkinModeIni();
                 RefreshActivationRouting();
+                OrcLogInfo("UI: saved main INI + skin mode flags");
             }
             ImGui::TextWrapped("%s", g_iniPath);
             ImGui::TextWrapped("Data: %s", g_gameObjDir);
