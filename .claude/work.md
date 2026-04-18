@@ -400,3 +400,23 @@
     - синхронизировать документацию с кодом по запросу;
     - после существенных правок делать проверочную `Release|Win32` сборку.
 
+## 2026-04-18
+
+- Рефакторинг путей данных: `OrcOutFit\object` → `Objects`, `SKINS` → `Skins`, добавлена `OrcOutFit\Weapons` для пресетов оружия по DFF-имени ped из хука `LoadPedObject`; удалены `object\other` и вся логика `SkinOtherOverrides` / `g_otherByModelKey`.
+- Оружие: глобально только `OrcOutFit.ini`; оверрайд — полный INI в `Weapons\<skin>.ini` (поиск файла без учёта регистра). Рендер для всех ped использует `GetPedStdSkinDffName` + кеш загрузки пресетов. UI: вкладка `Main` (настройки плагина и `[Features]`), `Weapons` с выбором скина из кеша ped, кнопки сохранения Global / Weapons, примерка скина через `CPed::SetModelIndex` @ `0x5E4880`; скрыта вторая кнопка для `PED_TYPE_PLAYER1` (CJ SP).
+- Объекты: только `[Skin.<dff>]` в `<obj>.ini`; рендер и подавление оружия через `CustomObjectSkinParams` и кеш секций. Опция `Features.CustomObjects` отключает рендер объектов.
+- `SaveMainIni` / `LoadConfig`: основные тумблеры перенесены в секцию `[Features]`; `SkinMode` в INI оставлен для `Selected` и `RandomFromPools`. Случайные пулы `Skins\random` больше не сканируются (UI random отключён).
+- Добавлены экспортируемые API: `OrcCollectPedSkins`, `OrcLoadWeaponPresetFile`, `SaveAllWeaponsToIniFile`, `LoadObjectSkinParamsFromIni` / `SaveObjectSkinParamsToIni`, `RefreshActivationRouting`, `ParseActivationVk`.
+- Сборка: `MSBuild OrcOutFit.sln /p:Configuration=Release /p:Platform=x86` — успех, `build\Release\OrcOutFit.asi`.
+- Обновлён `context.md` под новые пути и форматы.
+
+- `orc_ui.cpp` (Weapons): исправлена блокировка `Save to skin (OrcOutFit\Weapons)` после **Wear this skin** / в SA:MP.
+  Раньше условие было `m_nPedType == PED_TYPE_PLAYER1`, а тип локального педа не меняется при `SetModelIndex`, поэтому кнопка скрывалась всегда.
+  Теперь блокируется только **single-player CJ** (`MODEL_PLAYER` + `PLAYER1` + нет `samp.dll`).
+- Сборка `Release|x86` успешна: `build\Release\OrcOutFit.asi`.
+
+- `OrcCollectPedSkins`: сортировка списка ped из кеша `LoadPedObject` **по model id по возрастанию** (вместо алфавита по имени DFF).
+- `orc_ui.cpp`: в комбо **Weapons** и **Objects** пункты списка и превью комбо в формате **`Имя [ID]`** (`PedSkinListLabel`); пересборка `Release|x86` — `build\Release\OrcOutFit.asi`.
+
+- Синхронизация документации с текущей архитектурой (`Objects` / `Weapons` / `Skins`, `[Features]`, без `object\other`, UI/стриминг/`Wear this skin`): обновлены `context.md`, `README.md`, `README.txt`. Репозиторий: `https://github.com/dmitriyewich/OrcOutFit`.
+

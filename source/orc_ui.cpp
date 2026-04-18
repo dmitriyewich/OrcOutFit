@@ -7,6 +7,8 @@
 
 #include "imgui.h"
 #include "eWeaponType.h"
+#include "ePedType.h"
+#include "eModelID.h"
 #include "CWeaponInfo.h"
 #include "common.h"
 #include "CPed.h"
@@ -16,6 +18,12 @@
 #include <cstdio>
 #include <cstdint>
 #include <cmath>
+#include <utility>
+#include <vector>
+
+static void PedSkinListLabel(char* buf, size_t bufChars, const char* dffName, int modelId) {
+    _snprintf_s(buf, bufChars, _TRUNCATE, "%s [%d]", dffName && dffName[0] ? dffName : "?", modelId);
+}
 
 struct BoneOption {
     int id;
@@ -57,13 +65,22 @@ int g_uiSkinIdx = 0;
 int g_uiSkinEditIdx = -1;
 static char g_uiSkinNickBuf[512] = {};
 
+static std::vector<WeaponCfg> g_uiWeapon1;
+static std::vector<WeaponCfg> g_uiWeapon2;
+static int g_uiWeaponSkinListIdx = 0;
+static bool g_uiWeaponBuffersReady = false;
+
+static int g_uiObjSkinListIdx = 0;
+static CustomObjectSkinParams g_uiObjParams{};
+static bool g_uiObjParamsLoaded = false;
+
 static int BoneComboIndex(int boneId) {
     for (int i = 0; i < IM_ARRAYSIZE(kBones); i++)
         if (kBones[i].id == boneId) return i;
     return 0;
 }
 
-static void WeaponFilterEditor(CustomObjectCfg& obj) {
+static void WeaponFilterEditorParams(CustomObjectSkinParams& obj) {
     ImGui::Separator();
     ImGui::TextUnformatted("Weapon condition");
     ImGui::TextWrapped("Select weapon(s) that enable this object. If none selected, object renders always.");
@@ -99,6 +116,46 @@ static void WeaponFilterEditor(CustomObjectCfg& obj) {
     }
 }
 
+static void SyncWeaponUiBuffersFromSkinPick() {
+    std::vector<std::pair<std::string, int>> skins;
+    OrcCollectPedSkins(skins);
+    if (skins.empty()) {
+        g_uiWeapon1 = g_cfg;
+        g_uiWeapon2 = g_cfg2;
+        g_uiWeaponBuffersReady = true;
+        return;
+    }
+    if (g_uiWeaponSkinListIdx < 0 || g_uiWeaponSkinListIdx >= (int)skins.size())
+        g_uiWeaponSkinListIdx = 0;
+
+    const std::string& dff = skins[(size_t)g_uiWeaponSkinListIdx].first;
+    char wpath[MAX_PATH];
+    if (ResolveWeaponsIniForSkinDff(dff.c_str(), wpath, sizeof(wpath)))
+        OrcLoadWeaponPresetFile(wpath, g_uiWeapon1, g_uiWeapon2);
+    else {
+        g_uiWeapon1 = g_cfg;
+        g_uiWeapon2 = g_cfg2;
+    }
+    for (size_t i = 0; i < g_uiWeapon1.size() && i < g_cfg.size(); i++)
+        g_uiWeapon1[i].name = g_cfg[i].name;
+    g_uiWeaponBuffersReady = true;
+}
+
+static void TryInitWeaponSkinListToLocalPed() {
+    std::vector<std::pair<std::string, int>> skins;
+    OrcCollectPedSkins(skins);
+    if (skins.empty()) return;
+    CPlayerPed* ped = FindPlayerPed(0);
+    const std::string want = ped ? GetPedStdSkinDffName(ped) : std::string{};
+    if (want.empty()) return;
+    for (int i = 0; i < (int)skins.size(); i++) {
+        if (LowerAsciiUi(skins[(size_t)i].first) == LowerAsciiUi(want)) {
+            g_uiWeaponSkinListIdx = i;
+            return;
+        }
+    }
+}
+
 void OrcUiDraw() {
     ImGuiIO& io = ImGui::GetIO();
     const float winW = 440.0f;
@@ -125,23 +182,73 @@ void OrcUiDraw() {
         if (ImGui::Button(b, ImVec2(w, 0))) *bClicked = true;
     };
 
-    // Shared selection state (Objects->Other and Weapons->per-skin overrides).
-    static int g_uiOtherObjIdx = 0;
-    static unsigned int g_uiOtherModelKey = 0;
-
     if (ImGui::BeginTabBar("OrcOutFitTabs", ImGuiTabBarFlags_None)) {
 
-        if (ImGui::BeginTabItem("Weapons")) {
+        // ------------------------------------------------------------------
+        // Main
+        // ------------------------------------------------------------------
+        if (ImGui::BeginTabItem("Main")) {
             ImGui::Checkbox("Plugin enabled", &g_enabled);
+            ImGui::TextUnformatted("Toggle key (SP / optional in SA:MP)");
+            ImGui::PushItemWidth(-FLT_MIN);
+            static char actKeyBuf[32] = "F7";
+            static bool actKeyBufInited = false;
+            if (!actKeyBufInited) {
+                _snprintf_s(actKeyBuf, _TRUNCATE, "%s", VkToString(g_activationVk));
+                actKeyBufInited = true;
+            }
+            if (ImGui::InputText("##actkey", actKeyBuf, sizeof(actKeyBuf), ImGuiInputTextFlags_CharsNoBlank))
+                g_activationVk = ParseActivationVk(actKeyBuf);
+
+            ImGui::TextUnformatted("Chat command (SA:MP)");
+            static char cmdBuf[96] = {};
+            if (cmdBuf[0] == 0) _snprintf_s(cmdBuf, _TRUNCATE, "%s", g_toggleCommand.c_str());
+            if (ImGui::InputText("##cmd", cmdBuf, sizeof(cmdBuf))) {
+                g_toggleCommand = cmdBuf;
+                if (!g_toggleCommand.empty() && g_toggleCommand[0] != '/') g_toggleCommand.insert(g_toggleCommand.begin(), '/');
+            }
+            ImGui::Checkbox("SA:MP: also allow toggle key", &g_sampAllowActivationKey);
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Features");
             ImGui::Checkbox("Render weapons for all peds", &g_renderAllPedsWeapons);
             if (g_renderAllPedsWeapons) {
-                ImGui::TextUnformatted("All peds radius (m)");
-                ImGui::PushItemWidth(-FLT_MIN);
-                ImGui::SliderFloat("##allpedsrad", &g_renderAllPedsRadius, 5.0f, 500.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
-                ImGui::PopItemWidth();
+                ImGui::SliderFloat("All peds radius (m)", &g_renderAllPedsRadius, 5.0f, 500.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
             }
-            if (ImGui::Checkbox("Consider weapon skills (dual wield)", &g_considerWeaponSkills)) {
+            ImGui::Checkbox("Consider weapon skills (dual wield)", &g_considerWeaponSkills);
+            ImGui::Checkbox("Render custom objects (Objects folder)", &g_renderCustomObjects);
+            ImGui::Checkbox("Skin mode (custom Skins)", &g_skinModeEnabled);
+            ImGui::Checkbox("Skin: hide base ped", &g_skinHideBasePed);
+            const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
+            if (sampNickUiOff)
+                ImGui::TextWrapped("Unsupported SA:MP build — nick binding inactive (SP mode).");
+            ImGui::BeginDisabled(sampNickUiOff);
+            ImGui::Checkbox("Skin: nick binding (SA:MP)", &g_skinNickMode);
+            ImGui::Checkbox("Skin: my nick uses selected skin", &g_skinLocalPreferSelected);
+            ImGui::EndDisabled();
+            ImGui::PopItemWidth();
+
+            ImGui::Separator();
+            if (ImGui::Button("Save main / features", ImVec2(-FLT_MIN, 0))) {
                 SaveMainIni();
+                SaveSkinModeIni();
+                RefreshActivationRouting();
+            }
+            ImGui::TextWrapped("%s", g_iniPath);
+            ImGui::TextWrapped("Data: %s", g_gameObjDir);
+            ImGui::TextWrapped("Weapons: %s", g_gameWeaponsDir);
+            ImGui::TextWrapped("Skins: %s", g_gameSkinDir);
+
+            ImGui::EndTabItem();
+        }
+
+        // ------------------------------------------------------------------
+        // Weapons
+        // ------------------------------------------------------------------
+        if (ImGui::BeginTabItem("Weapons")) {
+            if (!g_uiWeaponBuffersReady) {
+                TryInitWeaponSkinListToLocalPed();
+                SyncWeaponUiBuffersFromSkinPick();
             }
 
             bool reload = false, rescanObj = false;
@@ -150,96 +257,56 @@ void OrcUiDraw() {
                 LoadConfig();
                 DiscoverCustomObjectsAndEnsureIni();
                 DiscoverCustomSkins();
-                DiscoverOtherOverridesAndObjects();
+                SyncWeaponUiBuffersFromSkinPick();
             }
             if (rescanObj) {
                 DiscoverCustomObjectsAndEnsureIni();
-                DiscoverOtherOverridesAndObjects();
                 if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
             }
 
             ImGui::Separator();
-            // What are we editing right now?
-            enum EditTarget { GlobalIni = 0, LocalSkinIni = 1, OtherSkinIni = 2 };
-            static int editTarget = GlobalIni;
-            ImGui::TextUnformatted("Edit target");
-            ImGui::RadioButton("Global (OrcOutFit.ini)", &editTarget, GlobalIni);
-            ImGui::RadioButton("Local skin (weapons.ini)", &editTarget, LocalSkinIni);
-            ImGui::RadioButton("Other skin (weapons.ini)", &editTarget, OtherSkinIni);
-
-            WeaponCfg* activeArr = g_cfg.empty() ? nullptr : g_cfg.data();
-            WeaponCfg* activeArr2 = g_cfg2.empty() ? nullptr : g_cfg2.data();
-            SkinOtherOverrides* activeSkin = nullptr;
-            int activeCount = (int)g_cfg.size();
-            int activeCount2 = (int)g_cfg2.size();
-
-            auto EnsureSkinWeaponArrays = [&](SkinOtherOverrides* so) {
-                if (!so) return;
-                // Ensure arrays always match current discovered weapon range.
-                if (!so->hasWeaponOverrides) {
-                    so->weaponCfg = g_cfg;
-                    so->weaponCfg2 = g_cfg2;
-                    so->hasWeaponOverrides = true;
-                } else {
-                    if (so->weaponCfg.size() != g_cfg.size()) so->weaponCfg = g_cfg;
-                    if (so->weaponCfg2.size() != g_cfg2.size()) so->weaponCfg2 = g_cfg2;
-                }
-            };
-
-            if (editTarget == LocalSkinIni) {
-                activeSkin = EnsureOtherOverridesForLocalSkin();
-                if (activeSkin) {
-                    EnsureSkinWeaponArrays(activeSkin);
-                    activeArr = activeSkin->weaponCfg.empty() ? nullptr : activeSkin->weaponCfg.data();
-                    activeArr2 = activeSkin->weaponCfg2.empty() ? nullptr : activeSkin->weaponCfg2.data();
-                    activeCount = (int)activeSkin->weaponCfg.size();
-                    activeCount2 = (int)activeSkin->weaponCfg2.size();
-                }
-            } else if (editTarget == OtherSkinIni) {
-                if (g_otherByModelKey.empty()) {
-                    ImGui::TextDisabled("No folders in object\\other.");
-                } else {
-                    std::vector<unsigned int> keys;
-                    keys.reserve(g_otherByModelKey.size());
-                    for (const auto& kv : g_otherByModelKey) keys.push_back(kv.first);
-                    std::sort(keys.begin(), keys.end(), [](unsigned int a, unsigned int b) {
-                        auto ita = g_otherByModelKey.find(a);
-                        auto itb = g_otherByModelKey.find(b);
-                        if (ita == g_otherByModelKey.end() || itb == g_otherByModelKey.end()) return a < b;
-                        return LowerAsciiUi(ita->second.skinName) < LowerAsciiUi(itb->second.skinName);
-                    });
-                    if (g_uiOtherModelKey == 0 || g_otherByModelKey.find(g_uiOtherModelKey) == g_otherByModelKey.end())
-                        g_uiOtherModelKey = keys.front();
-                    activeSkin = &g_otherByModelKey[g_uiOtherModelKey];
-                    EnsureSkinWeaponArrays(activeSkin);
-                    if (activeSkin) {
-                        activeArr  = activeSkin->weaponCfg.empty()  ? nullptr : activeSkin->weaponCfg.data();
-                        activeArr2 = activeSkin->weaponCfg2.empty() ? nullptr : activeSkin->weaponCfg2.data();
-                        activeCount = (int)activeSkin->weaponCfg.size();
-                        activeCount2 = (int)activeSkin->weaponCfg2.size();
-                    }
-
-                    char prevSkin[128];
-                    _snprintf_s(prevSkin, _TRUNCATE, "%s", activeSkin->skinName.c_str());
-                    ImGui::TextUnformatted("Skin folder");
-                    if (ImGui::BeginCombo("##weapon_other_skin_pick", prevSkin)) {
-                        for (auto k : keys) {
-                            auto& so = g_otherByModelKey[k];
-                            const bool isSel = (k == g_uiOtherModelKey);
-                            if (ImGui::Selectable(so.skinName.c_str(), isSel)) g_uiOtherModelKey = k;
+            std::vector<std::pair<std::string, int>> pedSkins;
+            OrcCollectPedSkins(pedSkins);
+            ImGui::TextWrapped("Ped skin (editing target) — from ped.dat / LoadPedObject cache");
+            if (pedSkins.empty()) {
+                ImGui::TextDisabled("No ped models in cache yet (load game world / reconnect).");
+            } else {
+                if (g_uiWeaponSkinListIdx < 0 || g_uiWeaponSkinListIdx >= (int)pedSkins.size())
+                    g_uiWeaponSkinListIdx = 0;
+                const auto& cur = pedSkins[(size_t)g_uiWeaponSkinListIdx];
+                char comboLbl[192];
+                PedSkinListLabel(comboLbl, sizeof(comboLbl), cur.first.c_str(), cur.second);
+                if (ImGui::BeginCombo("##wskinpick", comboLbl)) {
+                    CPlayerPed* pl = FindPlayerPed(0);
+                    const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
+                    for (int i = 0; i < (int)pedSkins.size(); i++) {
+                        const bool sel = (i == g_uiWeaponSkinListIdx);
+                        const bool onPlayer = !onMe.empty() && LowerAsciiUi(pedSkins[(size_t)i].first) == LowerAsciiUi(onMe);
+                        char rowLbl[192];
+                        PedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
+                        if (ImGui::Selectable(rowLbl, sel)) {
+                            g_uiWeaponSkinListIdx = i;
+                            SyncWeaponUiBuffersFromSkinPick();
                         }
-                        ImGui::EndCombo();
+                        if (onPlayer) {
+                            ImDrawList* dl = ImGui::GetWindowDrawList();
+                            const ImVec2 mn = ImGui::GetItemRectMin();
+                            const ImVec2 mx = ImGui::GetItemRectMax();
+                            dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
+                        }
                     }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::Button("Wear this skin (local player)", ImVec2(-FLT_MIN, 0))) {
+                    OrcApplyLocalPlayerModelById(cur.second);
+                    SyncWeaponUiBuffersFromSkinPick();
                 }
             }
 
-            if ((editTarget == LocalSkinIni || editTarget == OtherSkinIni) && !activeSkin) {
-                ImGui::TextWrapped("Skin overrides are not available (rescan object\\other / ensure local player).");
-            }
-
-            if (activeSkin && (editTarget == LocalSkinIni || editTarget == OtherSkinIni)) {
-                ImGui::TextWrapped("Editing: %s", activeSkin->weaponsIniPath.c_str());
-            }
+            WeaponCfg* activeArr = g_uiWeapon1.empty() ? nullptr : g_uiWeapon1.data();
+            WeaponCfg* activeArr2 = g_uiWeapon2.empty() ? nullptr : g_uiWeapon2.data();
+            const int activeCount = (int)g_uiWeapon1.size();
+            const int activeCount2 = (int)g_uiWeapon2.size();
 
             ImGui::Separator();
             ImGui::PushItemWidth(-FLT_MIN);
@@ -256,14 +323,12 @@ void OrcUiDraw() {
                 if (!Fin(c.x) || !Fin(c.y) || !Fin(c.z) || !Fin(c.rx) || !Fin(c.ry) || !Fin(c.rz) || !Fin(c.scale)) return false;
                 if (c.scale <= 0.0f || c.scale > 1000.0f) return false;
                 if (c.boneId < 0 || c.boneId > 1000) return false;
-                // Guard against absurd values that could break matrices.
                 if (std::fabs(c.x) > 100.0f || std::fabs(c.y) > 100.0f || std::fabs(c.z) > 100.0f) return false;
                 if (std::fabs(c.rx) > 1000.0f || std::fabs(c.ry) > 1000.0f || std::fabs(c.rz) > 1000.0f) return false;
                 return true;
             };
             auto IsDualCapable = [](int wt) -> bool {
                 if (wt <= 0 || g_cfg.empty() || wt >= (int)g_cfg.size()) return false;
-                // bTwinPistol is typically set for the PRO/Hitman info.
                 CWeaponInfo* wi2 = CWeaponInfo::GetWeaponInfo((eWeaponType)wt, 2);
                 if (wi2 && wi2->m_nFlags.bTwinPistol) return true;
                 CWeaponInfo* wi1 = CWeaponInfo::GetWeaponInfo((eWeaponType)wt, 1);
@@ -294,7 +359,6 @@ void OrcUiDraw() {
                         localHas[wt] = 1;
                     }
                 }
-                // Full range list (for inspection): 0..256
                 const int maxWtUi = std::min(256, (int)g_cfg.size() - 1);
                 for (int wt = 0; wt <= maxWtUi; wt++) {
                     const char* baseName = (wt >= 0 && wt < (int)g_cfg.size() && g_cfg[wt].name) ? g_cfg[wt].name : "Weapon";
@@ -342,9 +406,8 @@ void OrcUiDraw() {
             const int editingCount = g_uiWeaponSecondary ? activeCount2 : activeCount;
             const bool canEdit = (editingArr != nullptr && g_uiWeaponIdx >= 0 && g_uiWeaponIdx < editingCount);
             if (!canEdit) {
-                ImGui::TextDisabled("Weapon editor is not available for this target.");
+                ImGui::TextDisabled("Weapon editor is not available.");
                 ImGui::PopItemWidth();
-                ImGui::EndTabItem();
             } else {
                 auto& c = editingArr[g_uiWeaponIdx];
                 ImGui::Checkbox("Show on body", &c.enabled);
@@ -354,14 +417,12 @@ void OrcUiDraw() {
                     g_weaponBuf.secondary = g_uiWeaponSecondary;
                     g_weaponBuf.wt = g_uiWeaponIdx;
                     g_weaponBuf.cfg = c;
-                    g_weaponBuf.cfg.name = nullptr; // never keep raw pointers
+                    g_weaponBuf.cfg.name = nullptr;
                 }
                 ImGui::SameLine();
-                // Allow pasting between primary/secondary placements: user often wants to copy transform.
                 const bool canPaste = g_weaponBuf.valid && ValidateWeaponCfg(g_weaponBuf.cfg);
                 if (!canPaste) ImGui::BeginDisabled();
                 if (ImGui::SmallButton("Paste")) {
-                    // Apply only data fields; never touch name pointer.
                     const char* keepName = c.name;
                     c = g_weaponBuf.cfg;
                     c.name = keepName;
@@ -399,295 +460,203 @@ void OrcUiDraw() {
                 ImGui::PopItemWidth();
 
                 ImGui::Separator();
-                if (editTarget == GlobalIni) {
-                    bool saveOne = false, saveAll = false;
-                    BtnHalfRow("Save weapon", "Save all weapons", &saveOne, &saveAll);
-                    if (saveOne) {
-                        if (g_uiWeaponSecondary) SaveWeaponSection2(g_uiWeaponIdx);
-                        else SaveWeaponSection(g_uiWeaponIdx);
-                        char mainBuf[32];
-                        _snprintf_s(mainBuf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
-                        WritePrivateProfileStringA("Main", "Enabled", mainBuf, g_iniPath);
-                        _snprintf_s(mainBuf, _TRUNCATE, "%d", g_renderAllPedsWeapons ? 1 : 0);
-                        WritePrivateProfileStringA("Main", "RenderAllPedsWeapons", mainBuf, g_iniPath);
-                        _snprintf_s(mainBuf, _TRUNCATE, "%.0f", g_renderAllPedsRadius);
-                        WritePrivateProfileStringA("Main", "RenderAllPedsRadius", mainBuf, g_iniPath);
-                        _snprintf_s(mainBuf, _TRUNCATE, "%d", g_considerWeaponSkills ? 1 : 0);
-                        WritePrivateProfileStringA("Main", "ConsiderWeaponSkills", mainBuf, g_iniPath);
-                    }
-                    if (saveAll) {
-                        for (int wt : g_availableWeaponTypes) if (g_cfg[wt].name || g_cfg[wt].boneId) SaveWeaponSection(wt);
-                        for (int wt : g_availableWeaponTypes) if (g_cfg2[wt].enabled || g_cfg2[wt].boneId) SaveWeaponSection2(wt);
-                        char mainBuf[32];
-                        _snprintf_s(mainBuf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
-                        WritePrivateProfileStringA("Main", "Enabled", mainBuf, g_iniPath);
-                        _snprintf_s(mainBuf, _TRUNCATE, "%d", g_renderAllPedsWeapons ? 1 : 0);
-                        WritePrivateProfileStringA("Main", "RenderAllPedsWeapons", mainBuf, g_iniPath);
-                        _snprintf_s(mainBuf, _TRUNCATE, "%.0f", g_renderAllPedsRadius);
-                        WritePrivateProfileStringA("Main", "RenderAllPedsRadius", mainBuf, g_iniPath);
-                        _snprintf_s(mainBuf, _TRUNCATE, "%d", g_considerWeaponSkills ? 1 : 0);
-                        WritePrivateProfileStringA("Main", "ConsiderWeaponSkills", mainBuf, g_iniPath);
-                    }
-                } else {
-                    if (activeSkin) {
-                        if (ImGui::Button("Save weapons.ini", ImVec2(-FLT_MIN, 0))) {
-                            SaveOtherSkinWeaponsIni(*activeSkin);
-                        }
+                if (ImGui::Button("Save to Global (OrcOutFit.ini)", ImVec2(-FLT_MIN, 0))) {
+                    g_cfg = g_uiWeapon1;
+                    g_cfg2 = g_uiWeapon2;
+                    SaveAllWeaponsToIniFile(g_iniPath, g_cfg, g_cfg2);
+                    InvalidatePerSkinWeaponCache();
+                    SyncWeaponUiBuffersFromSkinPick();
+                }
+                CPlayerPed* pl = FindPlayerPed(0);
+                // PLAYER1 stays set for the local ped even after SetModelIndex (Wear this skin);
+                // only block true story CJ in single-player (per-skin Weapons\<dff>.ini does not apply to default CJ).
+                const bool blockSkinSave = pl && pl->m_nPedType == PED_TYPE_PLAYER1 &&
+                    (int)pl->m_nModelIndex == MODEL_PLAYER && !samp_bridge::IsSampPresent();
+                if (blockSkinSave) {
+                    ImGui::TextDisabled("Per-skin preset: disabled for single-player CJ only. Use SA:MP or Wear this skin to change model.");
+                } else if (!pedSkins.empty()) {
+                    if (ImGui::Button("Save to skin (OrcOutFit\\Weapons)", ImVec2(-FLT_MIN, 0))) {
+                        const std::string& dff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
+                        char outPath[MAX_PATH];
+                        _snprintf_s(outPath, _TRUNCATE, "%s\\%s.ini", g_gameWeaponsDir, dff.c_str());
+                        SaveAllWeaponsToIniFile(outPath, g_uiWeapon1, g_uiWeapon2);
+                        InvalidatePerSkinWeaponCache();
                     }
                 }
 
-                if (samp_bridge::IsSampBuildKnown()) {
-                    if (g_sampAllowActivationKey)
-                        ImGui::TextDisabled("Toggle: %s  |  %s", g_toggleCommand.c_str(), VkToString(g_activationVk));
-                    else
-                        ImGui::TextWrapped("Toggle (chat): %s", g_toggleCommand.c_str());
-                } else {
-                    ImGui::TextDisabled("Toggle key: %s", VkToString(g_activationVk));
-                    if (samp_bridge::IsSampPresent())
-                        ImGui::TextDisabled("SA:MP build unsupported — SP mode.");
+                bool saveOne = false, saveAll = false;
+                BtnHalfRow("Save one weapon to Global", "Save all to Global", &saveOne, &saveAll);
+                if (saveOne) {
+                    g_cfg = g_uiWeapon1;
+                    g_cfg2 = g_uiWeapon2;
+                    if (g_uiWeaponSecondary) SaveWeaponSection2(g_uiWeaponIdx);
+                    else SaveWeaponSection(g_uiWeaponIdx);
+                    g_uiWeapon1 = g_cfg;
+                    g_uiWeapon2 = g_cfg2;
                 }
-                ImGui::EndTabItem();
+                if (saveAll) {
+                    g_cfg = g_uiWeapon1;
+                    g_cfg2 = g_uiWeapon2;
+                    for (int wt : g_availableWeaponTypes) if (g_cfg[wt].name || g_cfg[wt].boneId) SaveWeaponSection(wt);
+                    for (int wt : g_availableWeaponTypes) if (g_cfg2[wt].enabled || g_cfg2[wt].boneId) SaveWeaponSection2(wt);
+                    SaveMainIni();
+                    g_uiWeapon1 = g_cfg;
+                    g_uiWeapon2 = g_cfg2;
+                }
             }
-        }
 
-        if (ImGui::BeginTabItem("Objects")) {
-            if (ImGui::BeginTabBar("ObjectsLocalOtherTabs", ImGuiTabBarFlags_None)) {
-                // ------------------------------------------------------------
-                // Local
-                // ------------------------------------------------------------
-                if (ImGui::BeginTabItem("Local")) {
-                    ImGui::TextWrapped("%s", g_gameObjDir);
-                    ImGui::Separator();
-
-                    if (g_customObjects.empty()) {
-                        ImGui::TextDisabled("No *.dff in object folder.");
-                        if (ImGui::Button("Rescan", ImVec2(-FLT_MIN, 0)))
-                            DiscoverCustomObjectsAndEnsureIni();
-                    } else {
-                        if (g_uiCustomIdx < 0 || g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
-                        auto& obj = g_customObjects[g_uiCustomIdx];
-
-                        ImGui::PushItemWidth(-FLT_MIN);
-                        char oprev[160];
-                        _snprintf_s(oprev, _TRUNCATE, "%s [%d/%d]", obj.name.c_str(), g_uiCustomIdx + 1, (int)g_customObjects.size());
-                        ImGui::TextUnformatted("Object");
-                        if (ImGui::BeginCombo("##objpick_local", oprev)) {
-                            for (int i = 0; i < (int)g_customObjects.size(); i++) {
-                                if (ImGui::Selectable(g_customObjects[i].name.c_str(), i == g_uiCustomIdx)) g_uiCustomIdx = i;
-                            }
-                            ImGui::EndCombo();
-                        }
-
-                        ImGui::Checkbox("Show", &obj.enabled);
-
-                        int bi = BoneComboIndex(obj.boneId);
-                        const char* bonePreview = kBones[bi].label;
-                        ImGui::TextUnformatted("Bone");
-                        if (ImGui::BeginCombo("##objbone_local", bonePreview)) {
-                            for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
-                                if (ImGui::Selectable(kBones[i].label, i == bi))
-                                    obj.boneId = kBones[i].id;
-                            }
-                            ImGui::EndCombo();
-                        }
-
-                        ImGui::TextUnformatted("Offset X");
-                        ImGui::DragFloat("##ox_local", &obj.x, 0.005f, -2.0f, 2.0f, "%.3f");
-                        ImGui::TextUnformatted("Offset Y");
-                        ImGui::DragFloat("##oy_local", &obj.y, 0.005f, -2.0f, 2.0f, "%.3f");
-                        ImGui::TextUnformatted("Offset Z");
-                        ImGui::DragFloat("##oz_local", &obj.z, 0.005f, -2.0f, 2.0f, "%.3f");
-
-                        float rxd = obj.rx / D2R, ryd = obj.ry / D2R, rzd = obj.rz / D2R;
-                        ImGui::TextUnformatted("Rotation X (deg)");
-                        if (ImGui::DragFloat("##orx_local", &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.rx = rxd * D2R;
-                        ImGui::TextUnformatted("Rotation Y (deg)");
-                        if (ImGui::DragFloat("##ory_local", &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.ry = ryd * D2R;
-                        ImGui::TextUnformatted("Rotation Z (deg)");
-                        if (ImGui::DragFloat("##orz_local", &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.rz = rzd * D2R;
-
-                        ImGui::TextUnformatted("Scale");
-                        ImGui::DragFloat("##osc_local", &obj.scale, 0.01f, 0.05f, 10.0f, "%.3f");
-                        ImGui::TextUnformatted("Scale X/Y/Z");
-                        ImGui::DragFloat3("##oscxyz_local", &obj.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
-                        ImGui::PopItemWidth();
-
-                        WeaponFilterEditor(obj);
-
-                        ImGui::Separator();
-                        bool so = false, sao = false;
-                        BtnHalfRow("Save object", "Save all objects", &so, &sao);
-                        if (so) SaveCustomObjectIni(obj);
-                        if (sao) {
-                            for (const auto& it : g_customObjects) SaveCustomObjectIni(it);
-                        }
-                        if (ImGui::Button("Rescan folder", ImVec2(-FLT_MIN, 0))) {
-                            DiscoverCustomObjectsAndEnsureIni();
-                            if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
-                        }
-                    }
-
-                    ImGui::EndTabItem();
-                }
-
-                // ------------------------------------------------------------
-                // Other (per standard skin)
-                // ------------------------------------------------------------
-                if (ImGui::BeginTabItem("Other")) {
-                    ImGui::TextWrapped("object\\other skins");
-                    ImGui::Separator();
-
-                    if (g_otherByModelKey.empty()) {
-                        ImGui::TextDisabled("No folders in object\\other (nothing to edit).");
-                        if (ImGui::Button("Rescan object\\other", ImVec2(-FLT_MIN, 0)))
-                            DiscoverOtherOverridesAndObjects();
-                    } else {
-                        // Build stable selection list
-                        std::vector<unsigned int> keys;
-                        keys.reserve(g_otherByModelKey.size());
-                        for (const auto& kv : g_otherByModelKey) keys.push_back(kv.first);
-                        std::sort(keys.begin(), keys.end(), [](unsigned int a, unsigned int b) {
-                            // fallback order by pointer-less lookup: empty name means move to the end
-                            auto ita = g_otherByModelKey.find(a);
-                            auto itb = g_otherByModelKey.find(b);
-                            if (ita == g_otherByModelKey.end() || itb == g_otherByModelKey.end()) return a < b;
-                            return LowerAsciiUi(ita->second.skinName) < LowerAsciiUi(itb->second.skinName);
-                        });
-
-                        if (g_uiOtherModelKey == 0 || g_otherByModelKey.find(g_uiOtherModelKey) == g_otherByModelKey.end())
-                            g_uiOtherModelKey = keys.front();
-
-                        SkinOtherOverrides* selSo = nullptr;
-                        for (auto k : keys) {
-                            if (k == g_uiOtherModelKey) {
-                                selSo = &g_otherByModelKey[k];
-                                break;
-                            }
-                        }
-
-                        if (!selSo) {
-                            ImGui::TextDisabled("Internal: selected skin not found.");
-                        } else {
-                            char prevSkin[128];
-                            _snprintf_s(prevSkin, _TRUNCATE, "%s", selSo->skinName.c_str());
-                            if (ImGui::BeginCombo("##skin_other_pick", prevSkin)) {
-                                for (auto k : keys) {
-                                    auto& so = g_otherByModelKey[k];
-                                    const bool isSel = (k == g_uiOtherModelKey);
-                                    if (ImGui::Selectable(so.skinName.c_str(), isSel)) g_uiOtherModelKey = k;
-                                }
-                                ImGui::EndCombo();
-                            }
-
-                            // ------------------------
-                            // Objects editor for skin
-                            // ------------------------
-                            ImGui::Separator();
-                            if (ImGui::Button("Rescan this skin objects", ImVec2(-FLT_MIN, 0))) {
-                                const std::string keepName = selSo->skinName;
-                                DiscoverOtherOverridesAndObjects();
-                                g_uiOtherObjIdx = 0;
-                                // Restore selection by name if still present
-                                for (const auto& kv : g_otherByModelKey) {
-                                    if (LowerAsciiUi(kv.second.skinName) == LowerAsciiUi(keepName)) {
-                                        g_uiOtherModelKey = kv.first;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (selSo->objects.empty()) {
-                                ImGui::TextDisabled("No *.dff found in this skin folder.");
-                            } else {
-                                if (g_uiOtherObjIdx < 0 || g_uiOtherObjIdx >= (int)selSo->objects.size()) g_uiOtherObjIdx = 0;
-                                auto& obj = selSo->objects[g_uiOtherObjIdx];
-
-                                ImGui::PushItemWidth(-FLT_MIN);
-                                char oprev[160];
-                                _snprintf_s(oprev, _TRUNCATE, "%s [%d/%d]", obj.name.c_str(), g_uiOtherObjIdx + 1, (int)selSo->objects.size());
-                                ImGui::TextUnformatted("Object (Other)");
-                                if (ImGui::BeginCombo("##objpick_other", oprev)) {
-                                    for (int i = 0; i < (int)selSo->objects.size(); i++) {
-                                        if (ImGui::Selectable(selSo->objects[i].name.c_str(), i == g_uiOtherObjIdx))
-                                            g_uiOtherObjIdx = i;
-                                    }
-                                    ImGui::EndCombo();
-                                }
-
-                                ImGui::Checkbox("Show##other", &obj.enabled);
-
-                                int bi = BoneComboIndex(obj.boneId);
-                                const char* bonePreview = kBones[bi].label;
-                                ImGui::TextUnformatted("Bone");
-                                if (ImGui::BeginCombo("##objbone_other", bonePreview)) {
-                                    for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
-                                        if (ImGui::Selectable(kBones[i].label, i == bi))
-                                            obj.boneId = kBones[i].id;
-                                    }
-                                    ImGui::EndCombo();
-                                }
-
-                                ImGui::TextUnformatted("Offset X");
-                                ImGui::DragFloat("##ox_other", &obj.x, 0.005f, -2.0f, 2.0f, "%.3f");
-                                ImGui::TextUnformatted("Offset Y");
-                                ImGui::DragFloat("##oy_other", &obj.y, 0.005f, -2.0f, 2.0f, "%.3f");
-                                ImGui::TextUnformatted("Offset Z");
-                                ImGui::DragFloat("##oz_other", &obj.z, 0.005f, -2.0f, 2.0f, "%.3f");
-
-                                float rxd = obj.rx / D2R, ryd = obj.ry / D2R, rzd = obj.rz / D2R;
-                                ImGui::TextUnformatted("Rotation X (deg)");
-                                if (ImGui::DragFloat("##orx_other", &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.rx = rxd * D2R;
-                                ImGui::TextUnformatted("Rotation Y (deg)");
-                                if (ImGui::DragFloat("##ory_other", &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.ry = ryd * D2R;
-                                ImGui::TextUnformatted("Rotation Z (deg)");
-                                if (ImGui::DragFloat("##orz_other", &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) obj.rz = rzd * D2R;
-
-                                ImGui::TextUnformatted("Scale");
-                                ImGui::DragFloat("##osc_other", &obj.scale, 0.01f, 0.05f, 10.0f, "%.3f");
-                                ImGui::TextUnformatted("Scale X/Y/Z");
-                                ImGui::DragFloat3("##oscxyz_other", &obj.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
-                                ImGui::PopItemWidth();
-
-                                WeaponFilterEditor(obj);
-
-                                ImGui::Separator();
-                                bool so = false, sao = false;
-                                BtnHalfRow("Save object##other", "Save all objects##other", &so, &sao);
-                                if (so) SaveCustomObjectIni(obj);
-                                if (sao) {
-                                    for (const auto& it : selSo->objects) SaveCustomObjectIni(it);
-                                }
-                            }
-                        }
-                    }
-
-                    ImGui::EndTabItem();
-                }
-
-                ImGui::EndTabBar();
+            if (samp_bridge::IsSampBuildKnown()) {
+                if (g_sampAllowActivationKey)
+                    ImGui::TextDisabled("Toggle: %s  |  %s", g_toggleCommand.c_str(), VkToString(g_activationVk));
+                else
+                    ImGui::TextWrapped("Toggle (chat): %s", g_toggleCommand.c_str());
+            } else {
+                ImGui::TextDisabled("Toggle key: %s", VkToString(g_activationVk));
+                if (samp_bridge::IsSampPresent())
+                    ImGui::TextDisabled("SA:MP build unsupported — SP mode.");
             }
             ImGui::EndTabItem();
         }
 
+        // ------------------------------------------------------------------
+        // Objects
+        // ------------------------------------------------------------------
+        if (ImGui::BeginTabItem("Objects")) {
+            ImGui::TextWrapped("%s", g_gameObjDir);
+            ImGui::Separator();
+
+            if (g_customObjects.empty()) {
+                ImGui::TextDisabled("No *.dff in Objects folder.");
+                if (ImGui::Button("Rescan", ImVec2(-FLT_MIN, 0)))
+                    DiscoverCustomObjectsAndEnsureIni();
+            } else {
+                if (g_uiCustomIdx < 0 || g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
+                auto& obj = g_customObjects[g_uiCustomIdx];
+
+                ImGui::PushItemWidth(-FLT_MIN);
+                char oprev[160];
+                _snprintf_s(oprev, _TRUNCATE, "%s [%d/%d]", obj.name.c_str(), g_uiCustomIdx + 1, (int)g_customObjects.size());
+                ImGui::TextUnformatted("Object");
+                if (ImGui::BeginCombo("##objpick", oprev)) {
+                    for (int i = 0; i < (int)g_customObjects.size(); i++) {
+                        if (ImGui::Selectable(g_customObjects[i].name.c_str(), i == g_uiCustomIdx)) {
+                            g_uiCustomIdx = i;
+                            g_uiObjParamsLoaded = false;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+
+                std::vector<std::pair<std::string, int>> pedSkins;
+                OrcCollectPedSkins(pedSkins);
+                ImGui::TextUnformatted("Ped skin (DFF name)");
+                if (pedSkins.empty()) {
+                    ImGui::TextDisabled("No ped models in cache yet.");
+                } else {
+                    if (g_uiObjSkinListIdx < 0 || g_uiObjSkinListIdx >= (int)pedSkins.size())
+                        g_uiObjSkinListIdx = 0;
+                    if (!g_uiObjParamsLoaded) {
+                        const std::string& sdff = pedSkins[(size_t)g_uiObjSkinListIdx].first;
+                        if (!LoadObjectSkinParamsFromIni(obj.iniPath.c_str(), sdff.c_str(), g_uiObjParams)) {
+                            g_uiObjParams = CustomObjectSkinParams{};
+                            g_uiObjParams.enabled = true;
+                            g_uiObjParams.boneId = BONE_R_THIGH;
+                        }
+                        g_uiObjParamsLoaded = true;
+                    }
+                    const auto& curS = pedSkins[(size_t)g_uiObjSkinListIdx];
+                    char objSkinCombo[192];
+                    PedSkinListLabel(objSkinCombo, sizeof(objSkinCombo), curS.first.c_str(), curS.second);
+                    if (ImGui::BeginCombo("##objskin", objSkinCombo)) {
+                        CPlayerPed* pl = FindPlayerPed(0);
+                        const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
+                        for (int i = 0; i < (int)pedSkins.size(); i++) {
+                            const bool sel = (i == g_uiObjSkinListIdx);
+                            const bool onPlayer = !onMe.empty() && LowerAsciiUi(pedSkins[(size_t)i].first) == LowerAsciiUi(onMe);
+                            char rowLbl[192];
+                            PedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
+                            if (ImGui::Selectable(rowLbl, sel)) {
+                                g_uiObjSkinListIdx = i;
+                                const std::string& sdff = pedSkins[(size_t)i].first;
+                                if (!LoadObjectSkinParamsFromIni(obj.iniPath.c_str(), sdff.c_str(), g_uiObjParams)) {
+                                    g_uiObjParams = CustomObjectSkinParams{};
+                                    g_uiObjParams.enabled = true;
+                                    g_uiObjParams.boneId = BONE_R_THIGH;
+                                }
+                            }
+                            if (onPlayer) {
+                                ImDrawList* dl = ImGui::GetWindowDrawList();
+                                const ImVec2 mn = ImGui::GetItemRectMin();
+                                const ImVec2 mx = ImGui::GetItemRectMax();
+                                dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+
+                ImGui::Checkbox("Show", &g_uiObjParams.enabled);
+
+                int bi = BoneComboIndex(g_uiObjParams.boneId);
+                const char* bonePreview = kBones[bi].label;
+                ImGui::TextUnformatted("Bone");
+                if (ImGui::BeginCombo("##objbone", bonePreview)) {
+                    for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
+                        if (ImGui::Selectable(kBones[i].label, i == bi))
+                            g_uiObjParams.boneId = kBones[i].id;
+                    }
+                    ImGui::EndCombo();
+                }
+
+                ImGui::TextUnformatted("Offset X");
+                ImGui::DragFloat("##ox", &g_uiObjParams.x, 0.005f, -2.0f, 2.0f, "%.3f");
+                ImGui::TextUnformatted("Offset Y");
+                ImGui::DragFloat("##oy", &g_uiObjParams.y, 0.005f, -2.0f, 2.0f, "%.3f");
+                ImGui::TextUnformatted("Offset Z");
+                ImGui::DragFloat("##oz", &g_uiObjParams.z, 0.005f, -2.0f, 2.0f, "%.3f");
+
+                float rxd = g_uiObjParams.rx / D2R, ryd = g_uiObjParams.ry / D2R, rzd = g_uiObjParams.rz / D2R;
+                ImGui::TextUnformatted("Rotation X (deg)");
+                if (ImGui::DragFloat("##orx", &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.rx = rxd * D2R;
+                ImGui::TextUnformatted("Rotation Y (deg)");
+                if (ImGui::DragFloat("##ory", &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.ry = ryd * D2R;
+                ImGui::TextUnformatted("Rotation Z (deg)");
+                if (ImGui::DragFloat("##orz", &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.rz = rzd * D2R;
+
+                ImGui::TextUnformatted("Scale");
+                ImGui::DragFloat("##osc", &g_uiObjParams.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+                ImGui::TextUnformatted("Scale X/Y/Z");
+                ImGui::DragFloat3("##oscxyz", &g_uiObjParams.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
+                ImGui::PopItemWidth();
+
+                WeaponFilterEditorParams(g_uiObjParams);
+
+                ImGui::Separator();
+                if (!pedSkins.empty()) {
+                    if (ImGui::Button("Save [Skin.*] to object .ini", ImVec2(-FLT_MIN, 0))) {
+                        SaveObjectSkinParamsToIni(obj.iniPath.c_str(), pedSkins[(size_t)g_uiObjSkinListIdx].first.c_str(), g_uiObjParams);
+                    }
+                }
+                if (ImGui::Button("Rescan Objects folder", ImVec2(-FLT_MIN, 0))) {
+                    DiscoverCustomObjectsAndEnsureIni();
+                    if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
+                    g_uiObjParamsLoaded = false;
+                }
+            }
+
+            ImGui::EndTabItem();
+        }
+
+        // ------------------------------------------------------------------
+        // Skins (custom DFF only)
+        // ------------------------------------------------------------------
         if (ImGui::BeginTabItem("Skins")) {
             ImGui::TextWrapped("%s", g_gameSkinDir);
             ImGui::Separator();
-
-            ImGui::Checkbox("Skin mode enabled", &g_skinModeEnabled);
-            ImGui::Checkbox("Hide base ped", &g_skinHideBasePed);
-            ImGui::Checkbox("Random skin pools (per ped)", &g_skinRandomFromPools);
-            ImGui::TextWrapped("SKINS\\random\\<model_name>\\*.dff — folder name = ped model (e.g. wmyclot).");
-            if (g_skinRandomPoolModels > 0)
-                ImGui::TextDisabled("Loaded: %d model folder(s), %d variant(s).", g_skinRandomPoolModels, g_skinRandomPoolVariants);
-            const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
-            if (sampNickUiOff)
-                ImGui::TextWrapped("Unsupported SA:MP build — nick binding inactive (SP mode).");
-            ImGui::BeginDisabled(sampNickUiOff);
-            ImGui::Checkbox("Nick binding (SA:MP)", &g_skinNickMode);
-            ImGui::Checkbox("My nick uses selected skin", &g_skinLocalPreferSelected);
-            ImGui::EndDisabled();
+            ImGui::TextWrapped("Custom skins — DFF/TXD in Skins folder. Random pools UI is disabled until implemented.");
 
             if (g_customSkins.empty()) {
-                ImGui::TextDisabled("No *.dff in SKINS folder.");
+                ImGui::TextDisabled("No *.dff in Skins folder.");
             } else {
                 if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
                 ImGui::PushItemWidth(-FLT_MIN);
@@ -705,6 +674,9 @@ void OrcUiDraw() {
                 }
 
                 auto& skin = g_customSkins[g_uiSkinIdx];
+                const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
+                if (sampNickUiOff)
+                    ImGui::TextWrapped("Unsupported SA:MP build — nick binding inactive (SP mode).");
                 ImGui::BeginDisabled(sampNickUiOff);
                 ImGui::Checkbox("Bind this skin to nick(s)", &skin.bindToNick);
                 if (g_uiSkinEditIdx != g_uiSkinIdx) {
@@ -712,7 +684,7 @@ void OrcUiDraw() {
                     _snprintf_s(g_uiSkinNickBuf, _TRUNCATE, "%s", skin.nickListCsv.c_str());
                 }
                 ImGui::TextWrapped("Nicks (comma-separated).");
-                if (ImGui::InputTextWithHint("##skinnicks", "Testovik,Walcher_Flett,OtherNick", g_uiSkinNickBuf, IM_ARRAYSIZE(g_uiSkinNickBuf))) {
+                if (ImGui::InputTextWithHint("##skinnicks", "Nick1,Nick2", g_uiSkinNickBuf, IM_ARRAYSIZE(g_uiSkinNickBuf))) {
                     skin.nickListCsv = g_uiSkinNickBuf;
                     skin.nicknames = ParseNickCsv(skin.nickListCsv);
                 }
@@ -727,7 +699,7 @@ void OrcUiDraw() {
 
             ImGui::Separator();
             bool sm = false, rs = false;
-            BtnHalfRow("Save skin mode", "Rescan skins", &sm, &rs);
+            BtnHalfRow("Save skin mode selection", "Rescan skins", &sm, &rs);
             if (sm) SaveSkinModeIni();
             if (rs) {
                 DiscoverCustomSkins();

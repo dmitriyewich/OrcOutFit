@@ -4,13 +4,15 @@
 
 #include <array>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <windows.h>
 
+class CPed;
+
 extern char g_iniPath[MAX_PATH];
 extern char g_gameObjDir[MAX_PATH];
+extern char g_gameWeaponsDir[MAX_PATH];
 extern char g_gameSkinDir[MAX_PATH];
 
 extern bool g_enabled;
@@ -20,6 +22,7 @@ extern int g_activationVk;
 extern bool g_sampAllowActivationKey;
 extern std::string g_toggleCommand;
 extern bool g_considerWeaponSkills;
+extern bool g_renderCustomObjects;
 
 extern std::vector<WeaponCfg> g_cfg;
 extern std::vector<WeaponCfg> g_cfg2;
@@ -46,25 +49,34 @@ extern std::string g_skinSelectedName;
 extern int g_uiSkinIdx;
 extern int g_uiSkinEditIdx;
 
-extern std::unordered_map<unsigned int, SkinOtherOverrides> g_otherByModelKey;
-
 void LoadConfig();
+void RefreshActivationRouting();
 void DiscoverCustomObjectsAndEnsureIni();
 void DiscoverCustomSkins();
-void DiscoverOtherOverridesAndObjects();
-
-// For UI: ensure per-skin overrides entry for currently local player model.
-SkinOtherOverrides* EnsureOtherOverridesForLocalSkin();
-
-// Persist `so.weaponCfg[]` into `so.weaponsIniPath`.
-void SaveOtherSkinWeaponsIni(const SkinOtherOverrides& so);
 
 void SaveWeaponSection(int weaponIndex);
 void SaveWeaponSection2(int weaponIndex);
-void SaveCustomObjectIni(const CustomObjectCfg& o);
+void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& w1, const std::vector<WeaponCfg>& w2);
 void SaveSkinCfgToIni(const CustomSkinCfg& s);
 void SaveSkinModeIni();
 void SaveMainIni();
 
+void InvalidatePerSkinWeaponCache();
+void InvalidateObjectSkinParamCache();
+
+void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2);
+
+// ped.dat DFF basename for ped (LoadPedObject hook); empty if unknown.
+std::string GetPedStdSkinDffName(CPed* ped);
+bool ResolveWeaponsIniForSkinDff(const char* skinDffName, char* outPath, size_t outPathChars);
+bool OrcApplyLocalPlayerModelById(int modelId);
+
+// Ped.dat DFF names with model ids (for UI lists).
+void OrcCollectPedSkins(std::vector<std::pair<std::string, int>>& out);
+
+bool LoadObjectSkinParamsFromIni(const char* iniPath, const char* skinDffName, CustomObjectSkinParams& out);
+void SaveObjectSkinParamsToIni(const char* iniPath, const char* skinDffName, const CustomObjectSkinParams& p);
+
 std::vector<std::string> ParseNickCsv(const std::string& csv);
 const char* VkToString(int vk);
+int ParseActivationVk(const char* text);

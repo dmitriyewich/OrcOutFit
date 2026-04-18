@@ -68,15 +68,15 @@ struct CustomSkinCfg {
     bool txdMissingLogged = false;
 };
 
-// Overrides for standard ped skin under `OrcOutFit/object/other/<skinName>/`.
-// Keyed by standard ped model key (see `CModelInfo::m_nKey`).
-struct SkinOtherOverrides {
-    std::string skinName;       // folder name under object\\other\\<skinName>
-    std::string dirPath;        // .../OrcOutFit/object/other/<skinName>
-    std::string weaponsIniPath; // .../OrcOutFit/object/other/<skinName>/weapons.ini
-
-    bool hasWeaponOverrides = false; // whether weapons.ini exists and was loaded
-    std::vector<WeaponCfg> weaponCfg;  // resized at runtime to available weapon range
-    std::vector<WeaponCfg> weaponCfg2; // secondary (dual-wield) weapon placement
-    std::vector<CustomObjectCfg> objects; // *.dff discovered in the skin folder
+// Per standard ped skin (ped.dat DFF name): stored under [Skin.<name>] in `Objects\\<obj>.ini`.
+struct CustomObjectSkinParams {
+    bool enabled = true;
+    int boneId = BONE_R_THIGH;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    float rx = 0.0f, ry = 0.0f, rz = 0.0f;
+    float scale = 1.0f;
+    float scaleX = 1.0f, scaleY = 1.0f, scaleZ = 1.0f;
+    std::vector<int> weaponTypes;
+    bool weaponRequireAll = false;
+    bool hideSelectedWeapons = false;
 };

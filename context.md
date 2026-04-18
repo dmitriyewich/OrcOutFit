@@ -4,7 +4,7 @@
 
 - После каждого заметного изменения кода/логики/сборки обязательно обновлять `.claude/work.md` до ответа пользователю.
 - Без явной команды пользователя не делать `git push` (исключение: пользователь прямо просит запушить).
-- Приоритет идентификации моделей/скинов: имя модели -> серверный/хук-кеш имени -> `id###/###` fallback.
+- Идентификация стандартного ped для INI/пресетов: **имя DFF из хука `LoadPedObject`** (`modelId → имя` из `ped.dat`). Отдельные пользовательские пути вида `id###` для папок пресетов **не используются** (см. `OrcOutFit\Weapons\<dff>.ini` и `[Skin.<dff>]`).
 - Для оружия использовать `weapon.dat`-first подход (хук `LoadWeaponObject`) с безопасным fallback.
 - После существенных правок обязательно делать проверочную сборку `Release|Win32`.
 - Документацию (`context.md`, `README.md`, `README.txt`) синхронизировать с текущей реализацией перед финальным коммитом по запросу пользователя.
@@ -12,10 +12,11 @@
 ## Назначение проекта
 
 - `OrcOutFit` это нативный `ASI`-плагин для `GTA San Andreas / SA:MP`.
+- Публичный репозиторий: `https://github.com/dmitriyewich/OrcOutFit`
 - Плагин рендерит:
   - оружие на теле ped (локальный игрок + опционально все ped),
-  - кастомные объекты из папки `object`,
-  - кастомный skin-режим для локального игрока из папки `SKINS`.
+  - кастомные объекты из папки `Objects`,
+  - кастомный skin-режим для локального игрока из папки `Skins`.
 - Оружие, которое сейчас в руках у ped, на теле не рисуется.
 - Выходной артефакт проекта:
   - `OrcOutFit.asi`
@@ -50,33 +51,34 @@
   - включается флагом `RenderAllPedsWeapons`,
   - фильтруется по радиусу `RenderAllPedsRadius`,
   - используется per-ped cache инстансов по `CPools::GetPedRef`.
+- UI:
+  - вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**;
+  - список стандартных ped из кеша `LoadPedObject`: **сортировка по `model id` по возрастанию**, подписи **`Имя [ID]`** (Weapons и Objects);
+  - **Wear this skin**: очередь смены модели локального педа — в начале `drawingEvent` выполняются `CStreaming::RequestModel` / `LoadAllRequestedModels`, проверка `MODEL_INFO_PED`, `ClearAll()` по прикреплённому оружию, затем `CPed::SetModelIndex` @ `0x5E4880`;
+  - **Save to `OrcOutFit\Weapons`**: блокируется только в **single-player** для **дефолтного CJ** (`MODEL_PLAYER` + `PED_TYPE_PLAYER1` + нет `samp.dll`); иначе доступно (в т.ч. SA:MP и после примерки скина).
 - UI оружия:
-  - рядом с `Show on body` есть `Copy`/`Paste` для текущего `WeaponCfg` (работает для Global/Local skin/Other skin),
+  - рядом с `Show on body` есть `Copy`/`Paste` для текущего `WeaponCfg`,
   - Paste валидирует буфер и может вставлять между primary/secondary (dual wield).
 - Кастомные объекты:
-  - скан `*.dff` в `OrcOutFit\object`,
-  - отдельный `<name>.ini` на каждый объект (кость, смещения, повороты, масштаб).
+  - скан `*.dff` в `OrcOutFit\Objects`,
+  - отдельный `<name>.ini` на каждый объект; для каждого стандартного скина ped — секция `[Skin.<dff_name>]` (имя из `LoadPedObject`, без `object\other`).
   - масштаб: общий `Scale` и дополнительные множители `ScaleX/ScaleY/ScaleZ` (по осям).
-  - объект может быть условным по оружию:
+  - объект может быть условным по оружию (внутри секции `[Skin.*]`):
     - `Weapons=` (csv weapon ids),
     - `WeaponsMode=any|all`,
     - `HideWeapons=1` — при срабатывании условия скрывать выбранное оружие на теле.
-- Кастомные объекты по стандартной модели ped:
-  - папка `OrcOutFit\object\other\<skin>\` (где `<skin>` — имя стандартной модели, например `wmyclot`,
-    либо `id217` / `217` для проектов с добавленными ped-models по id),
-  - скан `*.dff` в каждой подпапке, `<name>.ini` на каждый объект.
-- Разрешение имени модели ped (для `object\other` и `SKINS\random`):
-  - хук `CFileLoader::LoadPedObject` (`0x5B7420`, MinHook) кеширует `modelId -> modelName`;
-  - приоритет резолва папок: имя модели (`CModelInfo`) -> имя из кеша `LoadPedObject` -> `id###/###` fallback.
+- Разрешение имени модели ped:
+  - хук `CFileLoader::LoadPedObject` (`0x5B7420`, MinHook) кеширует `modelId -> modelName` (dff из ped.dat);
+  - для пользовательских путей/INI используется это имя; числовой fallback папок `id###` не используется.
 - Skin mode:
-  - скан `*.dff` в `OrcOutFit\SKINS`,
+  - скан `*.dff` в `OrcOutFit\Skins` (папка `Skins`, не `SKINS`),
   - рендер выбранного clump поверх локального ped,
   - скрытие базового ped (опция),
-  - bind анимации через `RpSkinAtomicSetHAnimHierarchy`.
-- Per-skin weapon overrides (по стандартной модели ped):
-  - `OrcOutFit\object\other\<skin>\weapons.ini`,
-  - применяются к локальному игроку по `CModelInfo->m_nKey`,
-  - если overrides отсутствуют — используются глобальные дефолты из `OrcOutFit.ini`.
+  - bind анимации через `RpSkinAtomicSetHAnimHierarchy`;
+  - случайные пулы `Skins\random` в текущей версии **не сканируются** (ключ `RandomFromPools` в INI остаётся для совместимости).
+- Per-skin weapon overrides (по имени DFF ped из ped.dat):
+  - `OrcOutFit\Weapons\<skin>.ini` (регистр имени файла не важен),
+  - полный набор секций оружия как в `OrcOutFit.ini`; приоритет выше глобального `OrcOutFit.ini`.
 
 ## Важные файлы
 
@@ -95,6 +97,8 @@
   - `C:\Games\CODEX\WeaponsOutFit\context.md`
 - Рабочий журнал:
   - `C:\Games\CODEX\WeaponsOutFit\.claude\work.md`
+- README для пользователей / форума:
+  - `README.md`, `README.txt` (BB-code)
 
 ## Ключевые offsets и адреса (GTA SA 1.0 US)
 
@@ -149,10 +153,9 @@
 
 - Путь считается относительно расположения `OrcOutFit.asi` (modloader-friendly).
 - Ожидаемые подпапки:
-  - `OrcOutFit\object`
-  - `OrcOutFit\object\other`
-  - `OrcOutFit\SKINS`
-  - `OrcOutFit\SKINS\random`
+  - `OrcOutFit\Objects`
+  - `OrcOutFit\Weapons`
+  - `OrcOutFit\Skins`
 
 ## Правила `reference`
 
