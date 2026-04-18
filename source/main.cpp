@@ -2008,20 +2008,12 @@ static CustomSkinCfg* ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer, bool
             if (nickSkin) return nickSkin;
             if (isLocal) {
                 if (g_skinLocalPreferSelected && selected) return selected;
-                if (selected) return selected;
+                return nullptr;
             }
         }
     }
 
-    if (g_skinRandomFromPools) {
-        if (CustomSkinCfg* rnd = ResolveRandomSkinForPed(ped))
-            return rnd;
-    }
-
-    if (isLocalByPtr) {
-        if (isLocalPedOut) *isLocalPedOut = true;
-        return selected;
-    }
+    if (isLocalByPtr && isLocalPedOut) *isLocalPedOut = true;
     return nullptr;
 }
 

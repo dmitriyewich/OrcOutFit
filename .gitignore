@@ -57,5 +57,9 @@ reference/
 Thumbs.db
 Desktop.ini
 
-# Cursor / agent export dumps (not for publication)
-.claude/cursor_*.md
+# Local / agent-only — do not commit or push (see .cursor/rules/orcoutfit-workflow.mdc)
+.claude/
+.cursor/rules/
+context.md
+README.md
+README.txt
