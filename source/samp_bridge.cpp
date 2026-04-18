@@ -7,6 +7,9 @@
 #include <limits>
 #include <vector>
 
+#include "plugin.h"
+#include "CPlayerPed.h"
+
 #include "samp_bridge.h"
 #include "external/MinHook/include/MinHook.h"
 
@@ -69,6 +72,15 @@ struct RuntimeState {
 
 int g_sampOverlayCursorMode = -1;
 bool g_sampOverlayCursorEnabled = false;
+
+static void TrimSampNameInPlace(char* s) {
+    if (!s || !s[0]) return;
+    char* p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p != s) std::memmove(s, p, std::strlen(p) + 1);
+    size_t n = std::strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) s[--n] = '\0';
+}
 
 bool StrEqualNoCase(const char* a, const char* b) {
     if (!a || !b) return false;
@@ -163,6 +175,14 @@ bool GetPedNickname(const void* gtaPed, char* outName, int outNameLen, bool* isL
 
         auto idFind = reinterpret_cast<IdFindFn>(g_state.base + g_state.version->idFindOffset);
         unsigned short id = idFind(playerPool, gtaPed);
+        // IdFind often fails for the GTA local player ped pointer on some clients; use pool local id.
+        if (id == 0xFFFF && g_state.version->localPlayerIdOffset != 0) {
+            CPlayerPed* local = FindPlayerPed(0);
+            if (local && gtaPed == local) {
+                id = *reinterpret_cast<unsigned short*>(
+                    reinterpret_cast<std::uint8_t*>(playerPool) + g_state.version->localPlayerIdOffset);
+            }
+        }
         if (id == 0xFFFF) return false;
 
         auto getNameById = reinterpret_cast<GetNameByIdFn>(g_state.base + g_state.version->getNameByIdOffset);
@@ -170,12 +190,16 @@ bool GetPedNickname(const void* gtaPed, char* outName, int outNameLen, bool* isL
         if (!name || !name[0]) return false;
 
         if (isLocal) {
-            unsigned short localId = *reinterpret_cast<unsigned short*>(
-                reinterpret_cast<std::uint8_t*>(playerPool) + g_state.version->localPlayerIdOffset);
-            *isLocal = (localId == id);
+            unsigned short localId = 0xFFFF;
+            if (g_state.version->localPlayerIdOffset != 0) {
+                localId = *reinterpret_cast<unsigned short*>(
+                    reinterpret_cast<std::uint8_t*>(playerPool) + g_state.version->localPlayerIdOffset);
+            }
+            *isLocal = (localId != 0xFFFF && localId == id);
         }
         if (outName && outNameLen > 1) {
             lstrcpynA(outName, name, outNameLen);
+            TrimSampNameInPlace(outName);
         }
         return true;
     }

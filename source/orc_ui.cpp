@@ -224,8 +224,12 @@ void OrcUiDraw() {
                 ImGui::TextWrapped("Unsupported SA:MP build — nick binding inactive (SP mode).");
             ImGui::BeginDisabled(sampNickUiOff);
             ImGui::Checkbox("Skin: nick binding (SA:MP)", &g_skinNickMode);
-            ImGui::Checkbox("Skin: always use selected skin for me", &g_skinLocalPreferSelected);
             ImGui::EndDisabled();
+            ImGui::Checkbox("Skin: always use selected skin for me", &g_skinLocalPreferSelected);
+            ImGui::TextWrapped(
+                "If on: your ped uses the skin chosen in the Skins tab (after Save skin mode selection). "
+                "Nick-bound skin still wins when nick binding is on and your name matches. "
+                "Works even when nick binding is off.");
             ImGui::PopItemWidth();
 
             ImGui::Separator();

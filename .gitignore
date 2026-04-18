@@ -57,9 +57,6 @@ reference/
 Thumbs.db
 Desktop.ini
 
-# Local / agent-only — do not commit or push (see .cursor/rules/orcoutfit-workflow.mdc)
+# Local / agent-only (see .cursor/rules/orcoutfit-workflow.mdc)
 .claude/
 .cursor/rules/
-context.md
-README.md
-README.txt

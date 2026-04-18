@@ -2013,6 +2013,13 @@ static CustomSkinCfg* ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer, bool
         }
     }
 
+    // «Always use selected» для локального игрока должно работать и при выключенном nick binding,
+    // иначе весь блок выше пропускается и выбранный в Skins скин никогда не применяется.
+    if (isLocalByPtr && g_skinLocalPreferSelected && selected) {
+        if (isLocalPedOut) *isLocalPedOut = true;
+        return selected;
+    }
+
     if (isLocalByPtr && isLocalPedOut) *isLocalPedOut = true;
     return nullptr;
 }
