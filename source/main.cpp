@@ -76,6 +76,7 @@ static void LogInit() {
 static RpAtomic* InitAtomicCB(RpAtomic* a, void*);
 bool g_enabled = true;
 bool g_renderAllPedsWeapons = false;
+bool g_renderAllPedsObjects = false;
 float g_renderAllPedsRadius = 80.0f;
 int  g_activationVk = VK_F7;
 bool g_sampAllowActivationKey = false;
@@ -626,6 +627,7 @@ void LoadConfig() {
     SetupDefaults();
     g_enabled = GetPrivateProfileIntA("Main", "Enabled", 1, g_iniPath) != 0;
     g_renderAllPedsWeapons = GetPrivateProfileIntA("Features", "RenderAllPedsWeapons", 0, g_iniPath) != 0;
+    g_renderAllPedsObjects = GetPrivateProfileIntA("Features", "RenderAllPedsObjects", 0, g_iniPath) != 0;
     g_renderAllPedsRadius = (float)GetPrivateProfileIntA("Features", "RenderAllPedsRadius", 80, g_iniPath);
     g_considerWeaponSkills = GetPrivateProfileIntA("Features", "ConsiderWeaponSkills", 1, g_iniPath) != 0;
     g_renderCustomObjects = GetPrivateProfileIntA("Features", "CustomObjects", 1, g_iniPath) != 0;
@@ -711,6 +713,7 @@ static void SaveDefaultConfig() {
           "Command=/orcoutfit\n\n"
           "[Features]\n"
           "RenderAllPedsWeapons=0\n"
+          "RenderAllPedsObjects=0\n"
           "RenderAllPedsRadius=80\n"
           "ConsiderWeaponSkills=1\n"
           "CustomObjects=1\n"
@@ -757,6 +760,8 @@ void SaveMainIni() {
 
     _snprintf_s(buf, _TRUNCATE, "%d", g_renderAllPedsWeapons ? 1 : 0);
     WritePrivateProfileStringA("Features", "RenderAllPedsWeapons", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", g_renderAllPedsObjects ? 1 : 0);
+    WritePrivateProfileStringA("Features", "RenderAllPedsObjects", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%.0f", g_renderAllPedsRadius);
     WritePrivateProfileStringA("Features", "RenderAllPedsRadius", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_considerWeaponSkills ? 1 : 0);
@@ -2351,24 +2356,32 @@ static void SyncAndRender() {
     suppress.assign(g_cfg.size(), 0);
     ApplyObjectWeaponSuppression(player, &suppress);
     SyncPedWeapons(player, g_rendered, &suppress);
+    std::vector<char> suppressPed;
+    suppressPed.assign(g_cfg.size(), 0);
+    std::vector<char> objectUsed;
+    objectUsed.assign(g_customObjects.size(), 0);
     int active = 0;
     for (int i = 0; i < kMax; i++) if (g_rendered[i].active) active++;
     const std::string plSkin = GetPedStdSkinDffName(player);
-    for (auto& o : g_customObjects) {
+    for (size_t oi = 0; oi < g_customObjects.size(); ++oi) {
+        auto& o = g_customObjects[oi];
         if (!g_renderCustomObjects) {
             DestroyCustomObjectInstance(o);
             continue;
         }
         CustomObjectSkinParams op;
         if (plSkin.empty() || !ResolveObjectSkinParamsCached(o.iniPath, plSkin, op)) continue;
-        if (ShouldRenderObjectForPedWithParams(player, op) && EnsureCustomInstance(o)) active++;
+        if (ShouldRenderObjectForPedWithParams(player, op) && EnsureCustomInstance(o)) {
+            active++;
+            objectUsed[oi] = 1;
+        }
     }
     if (g_skinModeEnabled) {
         if (GetSelectedSkin() != nullptr) active++;
     }
     if (g_skinNickMode && samp_bridge::IsSampBuildKnown() && !g_customSkins.empty())
         active++;
-    if (g_renderAllPedsWeapons && CPools::ms_pPedPool) active++;
+    if ((g_renderAllPedsWeapons || g_renderAllPedsObjects) && CPools::ms_pPedPool) active++;
     if (!active) return;
 
     int oldCull, oldZT, oldZW, oldShade, oldFog;
@@ -2387,24 +2400,25 @@ static void SyncAndRender() {
 
     RenderPedWeapons(player, g_rendered);
     if (g_renderCustomObjects) {
-        for (auto& o : g_customObjects) {
+        for (size_t oi = 0; oi < g_customObjects.size(); ++oi) {
+            auto& o = g_customObjects[oi];
             CustomObjectSkinParams op;
             if (plSkin.empty() || !ResolveObjectSkinParamsCached(o.iniPath, plSkin, op)) {
-                DestroyCustomObjectInstance(o);
                 continue;
             }
             if (!ShouldRenderObjectForPedWithParams(player, op)) {
-                DestroyCustomObjectInstance(o);
                 continue;
             }
             if (!EnsureCustomInstance(o)) continue;
             RenderCustomObject(player, o, op);
+            objectUsed[oi] = 1;
         }
-    } else {
-        for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
     }
     RenderSkinsForPeds(player);
-    if (g_renderAllPedsWeapons && CPools::ms_pPedPool) {
+    if ((g_renderAllPedsWeapons || g_renderAllPedsObjects) && CPools::ms_pPedPool) {
+        if (!g_renderAllPedsWeapons) {
+            ClearAllOtherPeds();
+        }
         std::unordered_set<int> seen;
         const CVector& pp = player->GetPosition();
         const float r2 = g_renderAllPedsRadius * g_renderAllPedsRadius;
@@ -2415,21 +2429,51 @@ static void SyncAndRender() {
             float dx = p.x - pp.x, dy = p.y - pp.y, dz = p.z - pp.z;
             if ((dx * dx + dy * dy + dz * dz) > r2) continue;
             int h = CPools::GetPedRef(ped);
-            seen.insert(h);
-            auto& cache = g_otherPedsRendered[h];
-            SyncPedWeapons(ped, cache.data());
-            RenderPedWeapons(ped, cache.data());
+            if (g_renderAllPedsWeapons) {
+                seen.insert(h);
+                auto& cache = g_otherPedsRendered[h];
+                std::fill(suppressPed.begin(), suppressPed.end(), 0);
+                ApplyObjectWeaponSuppression(ped, &suppressPed);
+                SyncPedWeapons(ped, cache.data(), &suppressPed);
+                RenderPedWeapons(ped, cache.data());
+            }
+            if (g_renderAllPedsObjects && g_renderCustomObjects) {
+                const std::string pedSkin = GetPedStdSkinDffName(ped);
+                if (!pedSkin.empty()) {
+                    for (size_t oi = 0; oi < g_customObjects.size(); ++oi) {
+                        auto& o = g_customObjects[oi];
+                        CustomObjectSkinParams op;
+                        if (!ResolveObjectSkinParamsCached(o.iniPath, pedSkin, op))
+                            continue;
+                        if (!ShouldRenderObjectForPedWithParams(ped, op))
+                            continue;
+                        if (!EnsureCustomInstance(o))
+                            continue;
+                        RenderCustomObject(ped, o, op);
+                        objectUsed[oi] = 1;
+                    }
+                }
+            }
         }
-        for (auto it = g_otherPedsRendered.begin(); it != g_otherPedsRendered.end();) {
-            if (seen.find(it->first) == seen.end()) {
-                for (int i = 0; i < kMax; i++) DestroyRendered(it->second[i]);
-                it = g_otherPedsRendered.erase(it);
-            } else {
-                ++it;
+        if (g_renderAllPedsWeapons) {
+            for (auto it = g_otherPedsRendered.begin(); it != g_otherPedsRendered.end();) {
+                if (seen.find(it->first) == seen.end()) {
+                    for (int i = 0; i < kMax; i++) DestroyRendered(it->second[i]);
+                    it = g_otherPedsRendered.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
     } else {
         ClearAllOtherPeds();
+    }
+    if (g_renderCustomObjects) {
+        for (size_t oi = 0; oi < g_customObjects.size(); ++oi) {
+            if (!objectUsed[oi]) DestroyCustomObjectInstance(g_customObjects[oi]);
+        }
+    } else {
+        for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
     }
 
     RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(oldCull));

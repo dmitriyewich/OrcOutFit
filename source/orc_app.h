@@ -18,6 +18,7 @@ extern char g_gameSkinDir[MAX_PATH];
 
 extern bool g_enabled;
 extern bool g_renderAllPedsWeapons;
+extern bool g_renderAllPedsObjects;
 extern float g_renderAllPedsRadius;
 extern int g_activationVk;
 extern bool g_sampAllowActivationKey;

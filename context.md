@@ -56,8 +56,14 @@
   - включается флагом `RenderAllPedsWeapons`,
   - фильтруется по радиусу `RenderAllPedsRadius`,
   - используется per-ped cache инстансов по `CPools::GetPedRef`.
+- Кастомные объекты всех ped (опция):
+  - включается отдельным флагом `RenderAllPedsObjects`,
+  - использует тот же радиус `RenderAllPedsRadius`,
+  - для каждого ped берётся его `dff` и секция `[Skin.<dff>]` из каждого object ini.
 - UI:
   - вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**;
+  - в Main добавлены отдельные флаги **Render weapons for all peds** и **Render objects for all peds**;
+  - слайдер `All peds radius` общий для обоих флагов;
   - список стандартных ped из кеша `LoadPedObject`: **сортировка по `model id` по возрастанию**, подписи **`Имя [ID]`** (Weapons и Objects);
   - **Wear this skin**: очередь смены модели локального педа — в начале `drawingEvent` выполняются `CStreaming::RequestModel` / `LoadAllRequestedModels`, проверка `MODEL_INFO_PED`, `ClearAll()` по прикреплённому оружию, затем `CPed::SetModelIndex` @ `0x5E4880`;
   - **Save to `OrcOutFit\Weapons`**: блокируется только в **single-player** для **дефолтного CJ** (`MODEL_PLAYER` + `PED_TYPE_PLAYER1` + нет `samp.dll`); иначе доступно (в т.ч. SA:MP и после примерки скина).

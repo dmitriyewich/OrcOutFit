@@ -216,7 +216,8 @@ void OrcUiDraw() {
             ImGui::Separator();
             ImGui::TextUnformatted("Features");
             ImGui::Checkbox("Render weapons for all peds", &g_renderAllPedsWeapons);
-            if (g_renderAllPedsWeapons) {
+            ImGui::Checkbox("Render objects for all peds", &g_renderAllPedsObjects);
+            if (g_renderAllPedsWeapons || g_renderAllPedsObjects) {
                 ImGui::SliderFloat("All peds radius (m)", &g_renderAllPedsRadius, 5.0f, 500.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
             }
             ImGui::Checkbox("Consider weapon skills (dual wield)", &g_considerWeaponSkills);
