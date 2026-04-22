@@ -1,80 +1,46 @@
-[size=180][b]OrcOutFit[/b][/size]
+[CENTER][SIZE=7][B]OrcOutFit[/B][/SIZE] :good:
 
-Нативный [b]ASI-плагин[/b] для [b]GTA San Andreas 1.0 US[/b] (x86), в том числе для [b]SA:MP[/b].
-Рисует оружие на теле педа, кастомные объекты и кастомные скины; настройка через ImGui и INI.
+Коротко: ASI-плагин для GTA San Andreas / SA:MP, который рендерит оружие на теле и добавляет кастомные объекты/скины.
+Работает на GTA SA [B]1.0 US[/B], SA:MP: [B]R1, R2, R3, R3-1, R4, R4-2, R5-1, DL-R1[/B][/CENTER]
 
-[b]Репозиторий:[/b] [url=https://github.com/dmitriyewich/OrcOutFit]github.com/dmitriyewich/OrcOutFit[/url] — исходники, [b].sln/.vcxproj[/b], [code]README.md[/code], [code]README.txt[/code], [code]context.md[/code].
+[B]Что это?[/B]
+OrcOutFit — нативный ASI-плагин для визуальной кастомизации персонажа:
+[LIST]
+[*]Показывает оружие на теле ped (текущее оружие в руках не дублируется).
+[*]Поддерживает кастомные объекты из папки `OrcOutFit\Objects`.
+[*]Поддерживает кастомные скины из `OrcOutFit\Skins`.
+[*]Есть гибкая настройка через in-game меню (Weapons / Objects / Skins / Main).
+[/LIST]
 
-[hr]
+[B]Основные возможности[/B]
+[LIST]
+[*]Пресеты оружия: глобальные и отдельные для конкретных скинов (`OrcOutFit\Weapons\<skin>.ini`).
+[*]Рендер оружия не только для локального игрока, но и для других ped (по радиусу).
+[*]Dual wield с отдельной настройкой второго оружия, если скилл выдаёт его.
+[*]Условный рендер объектов по оружию (Weapons any/all + HideWeapons).
+[*]Во вкладке Weapons две кнопки сохранения: `Save to Global (OrcOutFit.ini)` и `Save to skin (OrcOutFit\Weapons)`.
+[*]Live preview в Weapons/Objects: позиция, поворот и масштаб применяются сразу, без обязательного Save.
+[*]Русская/английская локализация интерфейса.
+[*]Debug-лог с уровнями детализации (`OrcOutFit.log`).
+[/LIST]
 
-[size=140][b]Возможности (кратко)[/b][/size]
+[B]Основные проблемы[/B]
+[LIST]
+[*]Рендер скинов кривой, так как используется система рендера, а не добавление новой модели. Новый скин накладывается на старые кости, что приводит к искажению. Слева - обычная замена, справа - мой скин, посередине - результат рендеринга)[ATTACH width="85px" alt="1776874959292.png"]291825[/ATTACH]
+[*]Какие-то другие проблемы 100% есть
+[/LIST]
+Видео c настройкой будет когда я решу что версия стабильная, а пока:
+[SPOILER="Скриншоты"][ATTACH alt="1776875215447.png"]291826[/ATTACH][ATTACH width="218px" alt="1776875248877.png"]291827[/ATTACH][ATTACH width="171px" alt="1776875283846.png"]291828[/ATTACH][ATTACH alt="1776875313953.png"]291829[/ATTACH][/SPOILER]
 
-[b]Оружие на теле[/b] — кость RpHAnim, offset/rot/scale; активный слот не дублируется; [code][WeaponNN][/code]; dual wield (второй ствол: [code][WeaponNN_2][/code] / [code][Name2][/code]).
-Хук [code]LoadWeaponObject[/code] (MinHook) + fallback; авто-стриминг модели оружия.
+[B]Установка[/B]
+[LIST=1]
+[*]Поместите `OrcOutFit.asi` рядом с `gta_sa.exe` [B]или[/B] в `scripts` [B]или[/B] в папку `modloader`.
+[*]Рядом с ASI создайте/оставьте `OrcOutFit.ini`.
+[*]При необходимости добавьте папки `OrcOutFit\Objects`, `OrcOutFit\Weapons`, `OrcOutFit\Skins`.
+[*]Запустите игру и откройте меню плагина (клавиша/команда настраиваются в INI).
+[/LIST]
 
-[b]Пресеты оружия по ped[/b] — полный INI в [code]OrcOutFit\Weapons\<dff>.ini[/code] (имя DFF из хука [code]LoadPedObject[/code]), приоритет над [code]OrcOutFit.ini[/code].
+[B]Исходники[/B]
+[URL='https://github.com/dmitriyewich/OrcOutFit']github.com/dmitriyewich/OrcOutFit[/URL]
 
-[b]Все ped в радиусе[/b] — опция + радиус; кэш на ped; пресеты по DFF имени.
-
-[b]Объекты[/b] — [code]*.dff[/code] в [code]OrcOutFit\Objects[/code]; в [code]<имя>.ini[/code] секции [code][Skin.<dff>][/code] (без папок [code]object\other[/code]).
-
-[b]Скины[/b] — [code]*.dff[/code] в [code]OrcOutFit\Skins[/code]; рендер поверх ped; цепочка: [code]SetupLighting[/code] (SEH) → [code]ApplyAttachmentLightingForPed[/code] ([code]colourScale=1.0[/code] для скина, [code]0.5[/code] для оружия/объектов) → [code]RpClumpRender[/code] → при успехе [code]RemoveLighting[/code]. Опция скрытия базы.
-SA:MP + [code]SkinNickMode[/code]: в основном [b]по нику[/b] ([code][NickBinding][/code]). [code]SkinLocalPreferSelected=1[/code] — выбранный в UI скин на себя [b]в т.ч. при выключенном nick binding[/b]; при включённом nick binding совпадение ника по-прежнему важнее.
-
-[b]Отладочный лог[/b] — [code]OrcOutFit.log[/code] рядом с [code]OrcOutFit.ini[/code]. [code][Features] DebugLogLevel[/code]: [code]0[/code] выкл., [code]1[/code] только [code][E][/code], [code]2[/code] [code][I][/code]+ошибки. Legacy [code]DebugLog=1[/code] = уровень 2. UI: Main → [b]Debug log[/b] (combo). Код: [code]source/orc_log.*[/code].
-
-[b]UI[/b] — вкладки [b]Main / Weapons / Objects / Skins[/b]. Список стандартных ped: [b]сортировка по model id[/b], формат [code]Имя [ID][/code]. Кнопка [b]Wear this skin[/b] — превью модели со стримингом и безопасной сменой в начале кадра.
-[b]Save to Weapons[/b] отключён только для [b]одиночки + дефолтный CJ[/b]; в SA:MP и после примерки — доступно.
-
-[hr]
-
-[size=140][b]Установка[/b][/size]
-
-1) [code]OrcOutFit.asi[/code] в папку игры или modloader (пути от каталога ASI).
-2) [code]OrcOutFit.ini[/code] создаётся рядом (при логировании — [code]OrcOutFit.log[/code]).
-3) Папки: [code]OrcOutFit\Objects[/code], [code]OrcOutFit\Weapons[/code], [code]OrcOutFit\Skins[/code].
-
-[hr]
-
-[size=140][b]Меню[/b][/size]
-
-SP: [code][Main] ActivationKey[/code] (по умолчанию F7).
-SA:MP: [code][Main] Command[/code] (по умолчанию [code]/orcoutfit[/code]); опционально [code]SampAllowActivationKey=1[/code].
-
-Известные клиенты: ник по педу; для локального педа при [code]IdFind == 0xFFFF[/code] — id из пула локального игрока (если оффсет в таблице версий не ноль); пробелы по краям ника обрезаются.
-
-[hr]
-
-[size=140][b]Сборка[/b][/size]
-
-[code]"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OrcOutFit.sln /p:Configuration=Release /p:Platform=x86[/code]
-
-Артефакт: [code]build\Release\OrcOutFit.asi[/code]
-
-[hr]
-
-[size=140][b]OrcOutFit.ini[/b][/size]
-
-[b][Main][/b] — [code]Enabled[/code], [code]ActivationKey[/code], [code]Command[/code], [code]SampAllowActivationKey[/code].
-
-[b][Features][/b] — [code]RenderAllPedsWeapons[/code], [code]RenderAllPedsRadius[/code], [code]ConsiderWeaponSkills[/code], [code]CustomObjects[/code], [code]SkinMode[/code], [code]SkinHideBasePed[/code], [code]SkinNickMode[/code], [code]SkinLocalPreferSelected[/code], [code]DebugLogLevel[/code], legacy [code]DebugLog[/code].
-
-Секции оружия в корне — см. полный [url=https://github.com/dmitriyewich/OrcOutFit/blob/main/README.md]README.md[/url] в репозитории.
-
-[b][SkinMode][/b] — [code]Selected[/code], [code]RandomFromPools[/code] (совместимость; random-пулы в текущей сборке не используются).
-
-[hr]
-
-[size=140][b]Объект .ini[/b][/size]
-
-Секции [code][Skin.<dff>][/code]: кость, offset, rot, scale, [code]ScaleX/Y/Z[/code], опционально [code]Weapons[/code] / [code]WeaponsMode[/code] / [code]HideWeapons[/code].
-
-[hr]
-
-[size=140][b]Скин .ini[/b][/size]
-
-[b][NickBinding][/b] — [code]Enabled[/code], [code]Nicks[/code].
-
-[hr]
-
-[b]Автор:[/b] [url=https://github.com/dmitriyewich]dmitriyewich[/url]
+[RIGHT]:cool:[/RIGHT]

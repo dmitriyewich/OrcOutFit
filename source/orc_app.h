@@ -27,6 +27,10 @@ extern bool g_renderCustomObjects;
 
 extern std::vector<WeaponCfg> g_cfg;
 extern std::vector<WeaponCfg> g_cfg2;
+extern bool g_livePreviewWeaponsActive;
+extern std::string g_livePreviewWeaponSkinDff;
+extern std::vector<WeaponCfg> g_livePreviewWeapon1;
+extern std::vector<WeaponCfg> g_livePreviewWeapon2;
 // Weapon types discovered in current game (weapon.dat / modded weapon.dat).
 extern std::vector<int> g_availableWeaponTypes;
 // Cached model ids for each weapon type (same indexing as g_cfg).
@@ -35,6 +39,10 @@ extern std::vector<int> g_weaponModelId2;
 
 extern std::vector<CustomObjectCfg> g_customObjects;
 extern std::vector<CustomSkinCfg> g_customSkins;
+extern bool g_livePreviewObjectActive;
+extern std::string g_livePreviewObjectIniPath;
+extern std::string g_livePreviewObjectSkinDff;
+extern CustomObjectSkinParams g_livePreviewObjectParams;
 
 extern bool g_skinModeEnabled;
 extern bool g_skinHideBasePed;

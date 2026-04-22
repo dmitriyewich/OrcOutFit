@@ -90,6 +90,14 @@ static bool IsKeyMsg(UINT m) {
     }
 }
 
+static bool WantsUiCursorNow() {
+    // While RMB is held we temporarily return control to camera look-around.
+    return (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0;
+}
+
+static bool g_hadNoOverlayUi = true;
+static bool g_stickyMouseCapture = false;
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (g_inited && ImGui::GetCurrentContext()) {
         // Global toggle key (on down edge).
@@ -102,13 +110,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (g_menuOpen) {
             ImGui_ImplWin32_WndProcHandler(h, m, w, l);
             ImGuiIO& io = ImGui::GetIO();
-            // SA:MP: не трогаем WM_SETCURSOR — иначе «мигание» со штатным курсором.
-            if (!samp_bridge::IsSampBuildKnown() && m == WM_SETCURSOR) {
-                SetCursor(LoadCursorA(nullptr, IDC_ARROW));
-                return TRUE;
-            }
-            if ((io.WantCaptureMouse    && IsMouseMsg(m)) ||
-                (io.WantCaptureKeyboard && IsKeyMsg(m))) {
+            const bool wantsUiCursor = WantsUiCursorNow();
+            const bool wantsMouseCapture = wantsUiCursor || io.WantCaptureMouse || g_stickyMouseCapture;
+            const bool wantsKeyboardCapture = io.WantCaptureKeyboard;
+            if ((wantsMouseCapture && IsMouseMsg(m)) ||
+                (wantsKeyboardCapture && IsKeyMsg(m))) {
                 return 0;
             }
         }
@@ -185,6 +191,8 @@ void DrawFrame() {
     static bool s_wantCursor = false;
 
     if (!g_menuOpen) {
+        g_hadNoOverlayUi = true;
+        g_stickyMouseCapture = false;
         if (samp_bridge::IsSampBuildKnown())
             samp_bridge::SyncSampOverlayCursor(false);
         if (s_wantCursor) {
@@ -204,9 +212,28 @@ void DrawFrame() {
         return;
     }
 
+    const bool enteredOverlayFromNone = g_hadNoOverlayUi;
+    g_hadNoOverlayUi = false;
+
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
+    if (g_hwnd) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (enteredOverlayFromNone) {
+            io.ClearInputMouse();
+        }
+        POINT pt{};
+        if (::GetCursorPos(&pt) != 0 && ::ScreenToClient(g_hwnd, &pt) != 0) {
+            io.AddMousePosEvent(static_cast<float>(pt.x), static_cast<float>(pt.y));
+        }
+    }
     ImGui::NewFrame();
+
+    const bool wantCursor = WantsUiCursorNow();
+    if (wantCursor) {
+        // Keep mouse capture stable between WndProc and NewFrame.
+        ImGui::SetNextFrameWantCaptureMouse(true);
+    }
 
     if (g_drawFn) g_drawFn();
 
@@ -214,9 +241,6 @@ void DrawFrame() {
     ImGui::Render();
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 
-    // Пока зажат ПКМ — отдаём управление игре (look-around), меню видимо.
-    const bool rmbHeld = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-    const bool wantCursor = !rmbHeld;
     const bool sampCursorApi = samp_bridge::IsSampBuildKnown();
 
     if (wantCursor != s_wantCursor) {
@@ -235,6 +259,7 @@ void DrawFrame() {
     }
     if (sampCursorApi)
         samp_bridge::SyncSampOverlayCursor(wantCursor);
+    g_stickyMouseCapture = wantCursor || ImGui::GetIO().WantCaptureMouse;
     if (wantCursor) {
         std::memset(&CPad::NewMouseControllerState, 0, sizeof(CMouseControllerState));
         if (CPad* p = CPad::GetPad(0)) p->DisablePlayerControls = 0xFFFF;

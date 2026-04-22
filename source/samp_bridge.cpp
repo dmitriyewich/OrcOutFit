@@ -73,6 +73,7 @@ struct RuntimeState {
 
 int g_sampOverlayCursorMode = -1;
 bool g_sampOverlayCursorEnabled = false;
+std::uint64_t g_sampOverlayCursorLastApplyMs = 0;
 
 static void TrimSampNameInPlace(char* s) {
     if (!s || !s[0]) return;
@@ -254,9 +255,13 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
         return;
     constexpr int kModeNone = 0;
     constexpr int kModeLockCam = 3;
+    constexpr std::uint64_t kReassertIntervalMs = 1200;
     const int mode = wantUiCursor ? kModeLockCam : kModeNone;
     const bool enabled = wantUiCursor;
-    if (g_sampOverlayCursorMode == mode && g_sampOverlayCursorEnabled == enabled)
+    const std::uint64_t now = GetTickCount64();
+    const bool sameAsCache = (g_sampOverlayCursorMode == mode && g_sampOverlayCursorEnabled == enabled);
+    const bool reassert = enabled && (now - g_sampOverlayCursorLastApplyMs >= kReassertIntervalMs);
+    if (sameAsCache && !reassert)
         return;
 
     __try {
@@ -269,6 +274,7 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
         setCursorMode(reinterpret_cast<void*>(static_cast<std::uintptr_t>(game)), mode, enabled);
         g_sampOverlayCursorMode = mode;
         g_sampOverlayCursorEnabled = enabled;
+        g_sampOverlayCursorLastApplyMs = now;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         static bool s_cursorExLogged = false;

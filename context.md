@@ -63,7 +63,9 @@
   - **Save to `OrcOutFit\Weapons`**: блокируется только в **single-player** для **дефолтного CJ** (`MODEL_PLAYER` + `PED_TYPE_PLAYER1` + нет `samp.dll`); иначе доступно (в т.ч. SA:MP и после примерки скина).
 - UI оружия:
   - рядом с `Show on body` есть `Copy`/`Paste` для текущего `WeaponCfg`,
-  - Paste валидирует буфер и может вставлять между primary/secondary (dual wield).
+  - Paste валидирует буфер и может вставлять между primary/secondary (dual wield),
+  - оставлены только две кнопки сохранения: `Save to Global (OrcOutFit.ini)` и `Save to skin (OrcOutFit\Weapons)`,
+  - `Save to Global` сохраняет весь набор weapon cfg (primary+secondary) в глобальный INI; `Save to skin` — весь набор в `Weapons\<dff>.ini`.
 - Кастомные объекты:
   - скан `*.dff` в `OrcOutFit\Objects`,
   - отдельный `<name>.ini` на каждый объект; для каждого стандартного скина ped — секция `[Skin.<dff_name>]` (имя из `LoadPedObject`, без `object\other`).
@@ -72,6 +74,7 @@
     - `Weapons=` (csv weapon ids),
     - `WeaponsMode=any|all`,
     - `HideWeapons=1` — при срабатывании условия скрывать выбранное оружие на теле.
+  - live preview параметров из UI для выбранной пары `(object ini + skin dff)` применяется сразу в рендере до сохранения.
 - Разрешение имени модели ped:
   - хук `CFileLoader::LoadPedObject` (`0x5B7420`, MinHook) кеширует `modelId -> modelName` (dff из ped.dat);
   - для пользовательских путей/INI используется это имя; числовой fallback папок `id###` не используется.
@@ -87,6 +90,16 @@
 - Per-skin weapon overrides (по имени DFF ped из ped.dat):
   - `OrcOutFit\Weapons\<skin>.ini` (регистр имени файла не важен),
   - полный набор секций оружия как в `OrcOutFit.ini`; приоритет выше глобального `OrcOutFit.ini`.
+  - live preview в UI `Weapons` применяется сразу для выбранного скина (без сохранения), а после Save сбрасывается в постоянные данные.
+
+- Курсор/ввод overlay:
+  - стабильный UI-capture: sticky mouse capture между `WndProc` и `NewFrame`, принудительная синхронизация `MousePos` из OS при входе в overlay,
+  - при активном UI курсоре используется `ImGui::SetNextFrameWantCaptureMouse(true)` для устранения «провалов» захвата,
+  - в SA:MP `SetCursorMode` реутверждается периодически (reassert), чтобы курсор не отваливался при внешних сбросах.
+
+- Активация меню:
+  - в SA:MP по команде `[Main] Command`, клавиша дополнительно через `[Main] SampAllowActivationKey=1`,
+  - изменение `ActivationKey` и `SampAllowActivationKey` в UI применяется сразу (через `RefreshActivationRouting`) без обязательного `Save main / features`.
 
 ## Важные файлы
 

@@ -198,7 +198,10 @@ void OrcUiDraw() {
                 actKeyBufInited = true;
             }
             if (ImGui::InputText("##actkey", actKeyBuf, sizeof(actKeyBuf), ImGuiInputTextFlags_CharsNoBlank))
+            {
                 g_activationVk = ParseActivationVk(actKeyBuf);
+                RefreshActivationRouting();
+            }
 
             ImGui::TextUnformatted("Chat command (SA:MP)");
             static char cmdBuf[96] = {};
@@ -207,7 +210,8 @@ void OrcUiDraw() {
                 g_toggleCommand = cmdBuf;
                 if (!g_toggleCommand.empty() && g_toggleCommand[0] != '/') g_toggleCommand.insert(g_toggleCommand.begin(), '/');
             }
-            ImGui::Checkbox("SA:MP: also allow toggle key", &g_sampAllowActivationKey);
+            if (ImGui::Checkbox("SA:MP: also allow toggle key", &g_sampAllowActivationKey))
+                RefreshActivationRouting();
 
             ImGui::Separator();
             ImGui::TextUnformatted("Features");
@@ -314,6 +318,19 @@ void OrcUiDraw() {
                     OrcApplyLocalPlayerModelById(cur.second);
                     SyncWeaponUiBuffersFromSkinPick();
                 }
+            }
+            if (!pedSkins.empty() &&
+                g_uiWeaponSkinListIdx >= 0 &&
+                g_uiWeaponSkinListIdx < (int)pedSkins.size()) {
+                g_livePreviewWeaponsActive = true;
+                g_livePreviewWeaponSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
+                g_livePreviewWeapon1 = g_uiWeapon1;
+                g_livePreviewWeapon2 = g_uiWeapon2;
+            } else {
+                g_livePreviewWeaponsActive = false;
+                g_livePreviewWeaponSkinDff.clear();
+                g_livePreviewWeapon1.clear();
+                g_livePreviewWeapon2.clear();
             }
 
             WeaponCfg* activeArr = g_uiWeapon1.empty() ? nullptr : g_uiWeapon1.data();
@@ -479,6 +496,10 @@ void OrcUiDraw() {
                     SaveAllWeaponsToIniFile(g_iniPath, g_cfg, g_cfg2);
                     InvalidatePerSkinWeaponCache();
                     SyncWeaponUiBuffersFromSkinPick();
+                    g_livePreviewWeaponsActive = false;
+                    g_livePreviewWeaponSkinDff.clear();
+                    g_livePreviewWeapon1.clear();
+                    g_livePreviewWeapon2.clear();
                 }
                 CPlayerPed* pl = FindPlayerPed(0);
                 // PLAYER1 stays set for the local ped even after SetModelIndex (Wear this skin);
@@ -494,28 +515,13 @@ void OrcUiDraw() {
                         _snprintf_s(outPath, _TRUNCATE, "%s\\%s.ini", g_gameWeaponsDir, dff.c_str());
                         SaveAllWeaponsToIniFile(outPath, g_uiWeapon1, g_uiWeapon2);
                         InvalidatePerSkinWeaponCache();
+                        g_livePreviewWeaponsActive = false;
+                        g_livePreviewWeaponSkinDff.clear();
+                        g_livePreviewWeapon1.clear();
+                        g_livePreviewWeapon2.clear();
                     }
                 }
 
-                bool saveOne = false, saveAll = false;
-                BtnHalfRow("Save one weapon to Global", "Save all to Global", &saveOne, &saveAll);
-                if (saveOne) {
-                    g_cfg = g_uiWeapon1;
-                    g_cfg2 = g_uiWeapon2;
-                    if (g_uiWeaponSecondary) SaveWeaponSection2(g_uiWeaponIdx);
-                    else SaveWeaponSection(g_uiWeaponIdx);
-                    g_uiWeapon1 = g_cfg;
-                    g_uiWeapon2 = g_cfg2;
-                }
-                if (saveAll) {
-                    g_cfg = g_uiWeapon1;
-                    g_cfg2 = g_uiWeapon2;
-                    for (int wt : g_availableWeaponTypes) if (g_cfg[wt].name || g_cfg[wt].boneId) SaveWeaponSection(wt);
-                    for (int wt : g_availableWeaponTypes) if (g_cfg2[wt].enabled || g_cfg2[wt].boneId) SaveWeaponSection2(wt);
-                    SaveMainIni();
-                    g_uiWeapon1 = g_cfg;
-                    g_uiWeapon2 = g_cfg2;
-                }
             }
 
             if (samp_bridge::IsSampBuildKnown()) {
@@ -539,6 +545,9 @@ void OrcUiDraw() {
             ImGui::Separator();
 
             if (g_customObjects.empty()) {
+                g_livePreviewObjectActive = false;
+                g_livePreviewObjectIniPath.clear();
+                g_livePreviewObjectSkinDff.clear();
                 ImGui::TextDisabled("No *.dff in Objects folder.");
                 if (ImGui::Button("Rescan", ImVec2(-FLT_MIN, 0)))
                     DiscoverCustomObjectsAndEnsureIni();
@@ -648,12 +657,27 @@ void OrcUiDraw() {
                 if (!pedSkins.empty()) {
                     if (ImGui::Button("Save [Skin.*] to object .ini", ImVec2(-FLT_MIN, 0))) {
                         SaveObjectSkinParamsToIni(obj.iniPath.c_str(), pedSkins[(size_t)g_uiObjSkinListIdx].first.c_str(), g_uiObjParams);
+                        g_livePreviewObjectActive = false;
+                        g_livePreviewObjectIniPath.clear();
+                        g_livePreviewObjectSkinDff.clear();
                     }
                 }
                 if (ImGui::Button("Rescan Objects folder", ImVec2(-FLT_MIN, 0))) {
                     DiscoverCustomObjectsAndEnsureIni();
                     if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
                     g_uiObjParamsLoaded = false;
+                }
+                if (!pedSkins.empty() &&
+                    g_uiObjSkinListIdx >= 0 &&
+                    g_uiObjSkinListIdx < (int)pedSkins.size()) {
+                    g_livePreviewObjectActive = true;
+                    g_livePreviewObjectIniPath = obj.iniPath;
+                    g_livePreviewObjectSkinDff = pedSkins[(size_t)g_uiObjSkinListIdx].first;
+                    g_livePreviewObjectParams = g_uiObjParams;
+                } else {
+                    g_livePreviewObjectActive = false;
+                    g_livePreviewObjectIniPath.clear();
+                    g_livePreviewObjectSkinDff.clear();
                 }
             }
 

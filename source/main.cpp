@@ -84,6 +84,10 @@ bool g_considerWeaponSkills = true;
 bool g_renderCustomObjects = true;
 std::vector<WeaponCfg> g_cfg;
 std::vector<WeaponCfg> g_cfg2; // secondary dual-wield placement
+bool g_livePreviewWeaponsActive = false;
+std::string g_livePreviewWeaponSkinDff;
+std::vector<WeaponCfg> g_livePreviewWeapon1;
+std::vector<WeaponCfg> g_livePreviewWeapon2;
 std::vector<int> g_availableWeaponTypes;
 std::vector<int> g_weaponModelId;
 std::vector<int> g_weaponModelId2;
@@ -1059,6 +1063,10 @@ bool LoadObjectSkinParamsFromIni(const char* iniPath, const char* skinDffName, C
 }
 
 static std::unordered_map<std::string, CustomObjectSkinParams> g_objectSkinParamCache;
+bool g_livePreviewObjectActive = false;
+std::string g_livePreviewObjectIniPath;
+std::string g_livePreviewObjectSkinDff;
+CustomObjectSkinParams g_livePreviewObjectParams{};
 
 void InvalidateObjectSkinParamCache() {
     g_objectSkinParamCache.clear();
@@ -1094,6 +1102,12 @@ void SaveObjectSkinParamsToIni(const char* iniPath, const char* skinDffName, con
 
 static bool ResolveObjectSkinParamsCached(const std::string& iniPath, const std::string& skinDff, CustomObjectSkinParams& out) {
     if (iniPath.empty() || skinDff.empty()) return false;
+    if (g_livePreviewObjectActive &&
+        _stricmp(g_livePreviewObjectIniPath.c_str(), iniPath.c_str()) == 0 &&
+        _stricmp(g_livePreviewObjectSkinDff.c_str(), skinDff.c_str()) == 0) {
+        out = g_livePreviewObjectParams;
+        return true;
+    }
     const std::string key = ToLowerAscii(iniPath) + "\x1e" + ToLowerAscii(skinDff);
     auto it = g_objectSkinParamCache.find(key);
     if (it != g_objectSkinParamCache.end()) {
@@ -1534,6 +1548,12 @@ static void EnsureWeaponSkinOverrideLoaded(const std::string& skinKeyLower, cons
 static const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
     if (!ped || wt < 0 || wt >= (int)g_cfg.size()) return g_cfg[0];
     const std::string dff = GetPedStdSkinDffName(ped);
+    if (g_livePreviewWeaponsActive &&
+        !dff.empty() &&
+        _stricmp(g_livePreviewWeaponSkinDff.c_str(), dff.c_str()) == 0 &&
+        wt < (int)g_livePreviewWeapon1.size()) {
+        return g_livePreviewWeapon1[wt];
+    }
     if (dff.empty()) return g_cfg[wt];
     char wpath[MAX_PATH];
     if (!ResolveWeaponsIniForSkinDff(dff.c_str(), wpath, sizeof(wpath))) return g_cfg[wt];
@@ -1547,6 +1567,12 @@ static const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
 static const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt) {
     if (!ped || wt < 0 || wt >= (int)g_cfg2.size()) return g_cfg2[0];
     const std::string dff = GetPedStdSkinDffName(ped);
+    if (g_livePreviewWeaponsActive &&
+        !dff.empty() &&
+        _stricmp(g_livePreviewWeaponSkinDff.c_str(), dff.c_str()) == 0 &&
+        wt < (int)g_livePreviewWeapon2.size()) {
+        return g_livePreviewWeapon2[wt];
+    }
     if (dff.empty()) return g_cfg2[wt];
     char wpath[MAX_PATH];
     if (!ResolveWeaponsIniForSkinDff(dff.c_str(), wpath, sizeof(wpath))) return g_cfg2[wt];
