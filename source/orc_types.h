@@ -68,6 +68,32 @@ struct CustomSkinCfg {
     bool txdMissingLogged = false;
 };
 
+struct TextureRemapSlotInfo {
+    std::string originalName;
+    std::vector<std::string> remapNames;
+    int selected = -1; // -1 = original texture, 0..N-1 = *_remap variant
+};
+
+struct TextureRemapPedInfo {
+    std::string dffName;
+    int modelId = -1;
+    int txdIndex = -1;
+    int totalRemapTextures = 0;
+    std::vector<TextureRemapSlotInfo> slots;
+};
+
+struct TextureRemapNickBindingInfo {
+    int id = -1;
+    bool enabled = true;
+    std::string nickListCsv;
+    int slotCount = 0;
+};
+
+enum TextureRemapRandomMode {
+    TEXTURE_REMAP_RANDOM_PER_TEXTURE = 0,
+    TEXTURE_REMAP_RANDOM_LINKED_VARIANT = 1,
+};
+
 // Per standard ped skin (ped.dat DFF name): stored under [Skin.<name>] in `Objects\\<obj>.ini`.
 struct CustomObjectSkinParams {
     bool enabled = true;

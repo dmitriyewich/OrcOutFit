@@ -99,6 +99,7 @@
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />
     <ClCompile Include="source\orc_log.cpp" />
+    <ClCompile Include="source\orc_texture_remap.cpp" />
     <ClCompile Include="source\orc_ui.cpp" />
     <ClCompile Include="source\overlay.cpp" />
     <ClCompile Include="source\samp_bridge.cpp" />

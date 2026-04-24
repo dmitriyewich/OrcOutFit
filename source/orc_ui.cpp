@@ -64,6 +64,7 @@ static int g_uiCustomIdx = 0;
 int g_uiSkinIdx = 0;
 int g_uiSkinEditIdx = -1;
 static char g_uiSkinNickBuf[512] = {};
+static char g_uiTextureNickBuf[512] = {};
 
 static std::vector<WeaponCfg> g_uiWeapon1;
 static std::vector<WeaponCfg> g_uiWeapon2;
@@ -686,62 +687,193 @@ void OrcUiDraw() {
         }
 
         // ------------------------------------------------------------------
-        // Skins (custom DFF only)
+        // Skins
         // ------------------------------------------------------------------
         if (ImGui::BeginTabItem("Skins")) {
-            ImGui::TextWrapped("%s", g_gameSkinDir);
-            ImGui::Separator();
-            ImGui::TextWrapped("Custom skins — DFF/TXD in Skins folder. Random pools UI is disabled until implemented.");
+            if (ImGui::BeginTabBar("OrcOutFitSkinSubTabs", ImGuiTabBarFlags_None)) {
+                if (ImGui::BeginTabItem("Custom skins")) {
+                    ImGui::TextWrapped("%s", g_gameSkinDir);
+                    ImGui::Separator();
+                    ImGui::TextWrapped("Custom skins - DFF/TXD in Skins folder. Random pools UI is disabled until implemented.");
 
-            if (g_customSkins.empty()) {
-                ImGui::TextDisabled("No *.dff in Skins folder.");
-            } else {
-                if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
-                ImGui::PushItemWidth(-FLT_MIN);
-                char previewSkin[160];
-                _snprintf_s(previewSkin, _TRUNCATE, "%s [%d/%d]", g_customSkins[g_uiSkinIdx].name.c_str(), g_uiSkinIdx + 1, (int)g_customSkins.size());
-                ImGui::TextUnformatted("Skin");
-                if (ImGui::BeginCombo("##skinpick", previewSkin)) {
-                    for (int i = 0; i < (int)g_customSkins.size(); i++) {
-                        if (ImGui::Selectable(g_customSkins[i].name.c_str(), i == g_uiSkinIdx)) {
-                            g_uiSkinIdx = i;
-                            g_skinSelectedName = g_customSkins[i].name;
+                    if (g_customSkins.empty()) {
+                        ImGui::TextDisabled("No *.dff in Skins folder.");
+                    } else {
+                        if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
+                        ImGui::PushItemWidth(-FLT_MIN);
+                        char previewSkin[160];
+                        _snprintf_s(previewSkin, _TRUNCATE, "%s [%d/%d]", g_customSkins[g_uiSkinIdx].name.c_str(), g_uiSkinIdx + 1, (int)g_customSkins.size());
+                        ImGui::TextUnformatted("Skin");
+                        if (ImGui::BeginCombo("##skinpick", previewSkin)) {
+                            for (int i = 0; i < (int)g_customSkins.size(); i++) {
+                                if (ImGui::Selectable(g_customSkins[i].name.c_str(), i == g_uiSkinIdx)) {
+                                    g_uiSkinIdx = i;
+                                    g_skinSelectedName = g_customSkins[i].name;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+
+                        auto& skin = g_customSkins[g_uiSkinIdx];
+                        const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
+                        if (sampNickUiOff)
+                            ImGui::TextWrapped("Unsupported SA:MP build - nick binding inactive (SP mode).");
+                        ImGui::BeginDisabled(sampNickUiOff);
+                        ImGui::Checkbox("Bind this skin to nick(s)", &skin.bindToNick);
+                        if (g_uiSkinEditIdx != g_uiSkinIdx) {
+                            g_uiSkinEditIdx = g_uiSkinIdx;
+                            _snprintf_s(g_uiSkinNickBuf, _TRUNCATE, "%s", skin.nickListCsv.c_str());
+                        }
+                        ImGui::TextWrapped("Nicks (comma-separated).");
+                        if (ImGui::InputTextWithHint("##skinnicks", "Nick1,Nick2", g_uiSkinNickBuf, IM_ARRAYSIZE(g_uiSkinNickBuf))) {
+                            skin.nickListCsv = g_uiSkinNickBuf;
+                            skin.nicknames = ParseNickCsv(skin.nickListCsv);
+                        }
+                        ImGui::EndDisabled();
+                        ImGui::PopItemWidth();
+                        if (ImGui::Button("Save skin .ini", ImVec2(-FLT_MIN, 0))) {
+                            skin.nickListCsv = g_uiSkinNickBuf;
+                            skin.nicknames = ParseNickCsv(skin.nickListCsv);
+                            SaveSkinCfgToIni(skin);
                         }
                     }
-                    ImGui::EndCombo();
+
+                    ImGui::Separator();
+                    bool sm = false, rs = false;
+                    BtnHalfRow("Save skin mode selection", "Rescan skins", &sm, &rs);
+                    if (sm) SaveSkinModeIni();
+                    if (rs) {
+                        DiscoverCustomSkins();
+                        if (g_uiSkinIdx < (int)g_customSkins.size()) g_skinSelectedName = g_customSkins[g_uiSkinIdx].name;
+                    }
+                    ImGui::EndTabItem();
                 }
 
-                auto& skin = g_customSkins[g_uiSkinIdx];
-                const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
-                if (sampNickUiOff)
-                    ImGui::TextWrapped("Unsupported SA:MP build — nick binding inactive (SP mode).");
-                ImGui::BeginDisabled(sampNickUiOff);
-                ImGui::Checkbox("Bind this skin to nick(s)", &skin.bindToNick);
-                if (g_uiSkinEditIdx != g_uiSkinIdx) {
-                    g_uiSkinEditIdx = g_uiSkinIdx;
-                    _snprintf_s(g_uiSkinNickBuf, _TRUNCATE, "%s", skin.nickListCsv.c_str());
-                }
-                ImGui::TextWrapped("Nicks (comma-separated).");
-                if (ImGui::InputTextWithHint("##skinnicks", "Nick1,Nick2", g_uiSkinNickBuf, IM_ARRAYSIZE(g_uiSkinNickBuf))) {
-                    skin.nickListCsv = g_uiSkinNickBuf;
-                    skin.nicknames = ParseNickCsv(skin.nickListCsv);
-                }
-                ImGui::EndDisabled();
-                ImGui::PopItemWidth();
-                if (ImGui::Button("Save skin .ini", ImVec2(-FLT_MIN, 0))) {
-                    skin.nickListCsv = g_uiSkinNickBuf;
-                    skin.nicknames = ParseNickCsv(skin.nickListCsv);
-                    SaveSkinCfgToIni(skin);
-                }
-            }
+                if (ImGui::BeginTabItem("Texture")) {
+                    ImGui::Checkbox("Enable texture remaps (*_remap)", &g_skinTextureRemapEnabled);
+                    const bool textureNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
+                    if (textureNickUiOff)
+                        ImGui::TextWrapped("Unsupported SA:MP build - texture nick binding inactive.");
+                    ImGui::BeginDisabled(textureNickUiOff);
+                    ImGui::Checkbox("Texture nick binding (SA:MP)", &g_skinTextureRemapNickMode);
+                    ImGui::EndDisabled();
+                    const char* randomModeNames[] = { "Per texture", "Linked variant" };
+                    if (g_skinTextureRemapRandomMode < TEXTURE_REMAP_RANDOM_PER_TEXTURE ||
+                        g_skinTextureRemapRandomMode > TEXTURE_REMAP_RANDOM_LINKED_VARIANT) {
+                        g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
+                    }
+                    ImGui::PushItemWidth(-FLT_MIN);
+                    if (ImGui::BeginCombo("Random mode", randomModeNames[g_skinTextureRemapRandomMode])) {
+                        for (int i = TEXTURE_REMAP_RANDOM_PER_TEXTURE; i <= TEXTURE_REMAP_RANDOM_LINKED_VARIANT; ++i) {
+                            if (ImGui::Selectable(randomModeNames[i], g_skinTextureRemapRandomMode == i))
+                                g_skinTextureRemapRandomMode = i;
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::PopItemWidth();
+                    ImGui::TextWrapped("PedFuncs-style remap works on standard ped TXDs loaded by the game.");
+                    if (ImGui::Button("Save texture settings", ImVec2(-FLT_MIN, 0)))
+                        SaveSkinModeIni();
 
-            ImGui::Separator();
-            bool sm = false, rs = false;
-            BtnHalfRow("Save skin mode selection", "Rescan skins", &sm, &rs);
-            if (sm) SaveSkinModeIni();
-            if (rs) {
-                DiscoverCustomSkins();
-                if (g_uiSkinIdx < (int)g_customSkins.size()) g_skinSelectedName = g_customSkins[g_uiSkinIdx].name;
+                    ImGui::Separator();
+                    TextureRemapPedInfo localInfo;
+                    if (!OrcGetLocalPedTextureRemaps(localInfo)) {
+                        ImGui::TextDisabled("No local ped yet.");
+                    } else {
+                        const char* dff = localInfo.dffName.empty() ? "?" : localInfo.dffName.c_str();
+                        ImGui::Text("Local ped: %s [%d]", dff, localInfo.modelId);
+                        ImGui::Text("TXD slot: %d", localInfo.txdIndex);
+
+                        bool randomize = false, original = false;
+                        BtnHalfRow("Randomize local", "Original textures", &randomize, &original);
+                        if (randomize) {
+                            OrcRandomizeLocalPedTextureRemaps();
+                            OrcGetLocalPedTextureRemaps(localInfo);
+                        }
+                        if (original) {
+                            OrcSetAllLocalPedTextureRemaps(-1);
+                            OrcGetLocalPedTextureRemaps(localInfo);
+                        }
+
+                        if (localInfo.slots.empty()) {
+                            ImGui::TextDisabled("No *_remap textures found in the loaded TXD.");
+                        } else {
+                            ImGui::PushItemWidth(-FLT_MIN);
+                            for (int i = 0; i < (int)localInfo.slots.size(); ++i) {
+                                const TextureRemapSlotInfo& slot = localInfo.slots[(size_t)i];
+                                ImGui::TextUnformatted(slot.originalName.c_str());
+
+                                int selected = slot.selected;
+                                const char* preview = "Original";
+                                if (selected >= 0 && selected < (int)slot.remapNames.size())
+                                    preview = slot.remapNames[(size_t)selected].c_str();
+
+                                char comboId[32];
+                                _snprintf_s(comboId, _TRUNCATE, "##texremap%d", i);
+                                if (ImGui::BeginCombo(comboId, preview)) {
+                                    if (ImGui::Selectable("Original", selected == -1)) {
+                                        OrcSetLocalPedTextureRemap(i, -1);
+                                        selected = -1;
+                                    }
+                                    for (int r = 0; r < (int)slot.remapNames.size(); ++r) {
+                                        if (ImGui::Selectable(slot.remapNames[(size_t)r].c_str(), selected == r)) {
+                                            OrcSetLocalPedTextureRemap(i, r);
+                                            selected = r;
+                                        }
+                                    }
+                                    ImGui::EndCombo();
+                                }
+                            }
+                            ImGui::PopItemWidth();
+                        }
+
+                        ImGui::Separator();
+                        ImGui::TextUnformatted("Nick binding");
+                        ImGui::PushItemWidth(-FLT_MIN);
+                        ImGui::InputTextWithHint("##texturenicks", "Nick1,Nick2", g_uiTextureNickBuf, IM_ARRAYSIZE(g_uiTextureNickBuf));
+                        ImGui::PopItemWidth();
+                        bool saveBind = false, reloadBind = false;
+                        BtnHalfRow("Save current texture binding", "Reload texture bindings", &saveBind, &reloadBind);
+                        if (saveBind)
+                            OrcSaveLocalPedTextureRemapNickBinding(g_uiTextureNickBuf);
+                        if (reloadBind)
+                            OrcReloadTextureRemapNickBindings();
+
+                        std::vector<TextureRemapNickBindingInfo> bindings;
+                        OrcCollectLocalPedTextureRemapNickBindings(bindings);
+                        ImGui::Text("Nick bindings for this ped: %d", (int)bindings.size());
+                        int deleteBindingId = -1;
+                        for (const auto& binding : bindings) {
+                            ImGui::Text("#%d: %s (%d slot(s))",
+                                        binding.id,
+                                        binding.nickListCsv.empty() ? "?" : binding.nickListCsv.c_str(),
+                                        binding.slotCount);
+                            ImGui::SameLine();
+                            char deleteId[32];
+                            _snprintf_s(deleteId, _TRUNCATE, "Delete##texnick%d", binding.id);
+                            if (ImGui::SmallButton(deleteId))
+                                deleteBindingId = binding.id;
+                        }
+                        if (deleteBindingId >= 0)
+                            OrcDeleteLocalPedTextureRemapNickBinding(deleteBindingId);
+                    }
+
+                    ImGui::Separator();
+                    std::vector<TextureRemapPedInfo> known;
+                    OrcCollectPedTextureRemapStats(known);
+                    ImGui::Text("Known remap ped models: %d", (int)known.size());
+                    if (!known.empty() && ImGui::BeginChild("##texture_known_models", ImVec2(-FLT_MIN, 120.0f), true)) {
+                        for (const auto& info : known) {
+                            const char* dff = info.dffName.empty() ? "?" : info.dffName.c_str();
+                            ImGui::Text("%s [%d]: %d texture(s), %d slot(s)", dff, info.modelId, info.totalRemapTextures, (int)info.slots.size());
+                        }
+                        ImGui::EndChild();
+                    }
+
+                    ImGui::EndTabItem();
+                }
+
+                ImGui::EndTabBar();
             }
             ImGui::EndTabItem();
         }

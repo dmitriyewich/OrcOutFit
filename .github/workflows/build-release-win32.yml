@@ -1,0 +1,42 @@
+name: Build OrcOutFit Win32
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release Win32
+        shell: pwsh
+        run: msbuild OrcOutFit.vcxproj /t:Build "/p:Configuration=Release;Platform=Win32;PlatformToolset=v143"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrcOutFit-Release-Win32
+          path: build/Release/OrcOutFit.asi
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Release/OrcOutFit.asi

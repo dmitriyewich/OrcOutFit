@@ -39,6 +39,15 @@
 - **SA:MP** при включённом **`SkinNickMode`**: скин в основном **по нику** (`[NickBinding]` в INI скина); совпадение ника важнее выбранного в списке скина.
 - **Локальный игрок:** **`SkinLocalPreferSelected`** (*Skin: always use selected skin for me*) включает выбранный в UI скин **в том числе при выключенном nick binding**; при включённом nick binding скин по совпадению ника по-прежнему **важнее**. Без этой опции и без ник-привязки оверлей на себя не ставится.
 
+### Texture remap стандартных ped
+- Подвкладка **Skins → Texture** включает PedFuncs-style замену текстур стандартных ped-моделей.
+- Если в TXD модели есть текстуры вида **`*_remap`**, плагин ищет базовую текстуру с именем до `_remap` и временно подменяет её в материалах ped перед рендером.
+- Для локального ped в UI доступны только реально найденные уникальные варианты, **Randomize local** и возврат к **Original textures**; PedFuncs-циклы по несуществующим номерам не используются.
+- **Random mode**: `Linked variant` (по умолчанию) выбирает общий remap-index для всего ped, а если у отдельного слота такого индекса нет — берёт случайный реальный вариант этого слота. Повтор того же варианта подряд не запрещается.
+- **Nick binding** для texture remap: текущий набор выбранных текстур можно сохранить для ника SA:MP. Binding имеет приоритет; если для ника binding не найден, используется random.
+- Binding-файлы: **`OrcOutFit\Skins\Textures\<dff>.ini`**. Внутри сохраняются реальные имена original/remap-текстур, а не порядковые номера.
+- Дополнительные `peds1..peds4.txd` кешируются через hook `AssignRemapTxd`, а поиск текстур расширяется hook-ом `RwTexDictionaryFindNamedTexture`, как в логике PedFuncs.
+
 ### Отладочный лог
 - Файл **`OrcOutFit.log`** создаётся **рядом с `OrcOutFit.ini`** (не обязательно рядом с ASI при modloader — путь считается от INI).
 - Уровни в **`[Features] DebugLogLevel`**: **`0`** — выкл.; **`1`** — только ошибки (префикс **`[E]`** в логе); **`2`** — полный trace (**`[I]`** + ошибки).
@@ -47,6 +56,7 @@
 
 ### Интерфейс
 - Вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**.
+- Внутри **Skins** две подвкладки: **Custom skins** (прежняя логика DFF поверх ped) и **Texture** (`*_remap` для стандартных ped TXD).
 - Список стандартных ped для редактирования/примерки: **сортировка по model id по возрастанию**, подписи **`Имя [ID]`**.
 - **Wear this skin (local player)** — смена модели локального педа для превью: стриминг (`RequestModel` / `LoadAllRequestedModels`), затем `CPed::SetModelIndex` в начале следующего кадра (безопасно для clump).
 - Во вкладке **Weapons** оставлены только две кнопки сохранения:
@@ -83,6 +93,7 @@
    - `OrcOutFit\Objects` — кастомные объекты + их INI
    - `OrcOutFit\Weapons` — опциональные пресеты оружия `<dff>.ini`
    - `OrcOutFit\Skins` — кастомные скины DFF/TXD
+   - `OrcOutFit\Skins\Textures` — nick bindings для texture remap `<dff>.ini`
 
 ---
 
@@ -97,6 +108,15 @@
 Артефакт: **`build\Release\OrcOutFit.asi`** (каталог `build/` в `.gitignore`; после сборки появляется локально).
 
 Зависимости: **plugin-sdk**, **imgui**, **MinHook** в `source\external\`.
+
+### GitHub Actions (Release Win32)
+
+- Workflow: **`.github/workflows/build-release-win32.yml`**.
+- Триггеры: ручной запуск (`workflow_dispatch`) и публикация релиза (`release.published`).
+- Сборка в CI: `msbuild OrcOutFit.vcxproj /p:Configuration=Release /p:Platform=Win32`.
+- Публикация:
+  - workflow artifact: `OrcOutFit-Release-Win32`;
+  - release asset: `build/Release/OrcOutFit.asi`.
 
 ### `Plugin.lib` (plugin-sdk)
 
@@ -139,6 +159,9 @@
 | `SkinHideBasePed` | Скрыть базовый clump |
 | `SkinNickMode` | Привязка скинов по нику SA:MP |
 | `SkinLocalPreferSelected` | `1` — всегда использовать **выбранный в UI** скин на локальном игроке (если нет скина по нику); `0` — только ник |
+| `SkinTextureRemap` | Включить PedFuncs-style texture remap для стандартных ped TXD (`*_remap`) |
+| `SkinTextureRemapNickMode` | Включить приоритетные texture-remap привязки по нику SA:MP |
+| `SkinTextureRemapRandomMode` | `0` = `Per texture`, `1` = `Linked variant` (дефолт) |
 | `DebugLogLevel` | `0` / `1` (ошибки) / `2` (info+ошибки); см. раздел «Отладочный лог» |
 | `DebugLog` | Legacy: `1` = то же, что **`DebugLogLevel=2`**, если уровень не задан отдельно |
 
@@ -163,6 +186,10 @@
 
 **`[NickBinding]`**: `Enabled`, `Nicks` (через запятую и/или новую строку, без учёта регистра).
 
+## INI texture binding (`OrcOutFit\Skins\Textures\<dff>.ini`)
+
+Секции **`[Binding.N]`**: `Enabled`, `Nicks`, `SlotCount`, пары `SlotNOriginal` / `SlotNRemap`. Новые binding-и имеют больший `N` и при совпадении ника перекрывают старые.
+
 ---
 
 ## Поддержка SA:MP
@@ -175,7 +202,8 @@
 
 | Путь | Назначение |
 |------|------------|
-| `source/main.cpp` | Рендер, конфиг, хуки, streaming, скины |
+| `source/main.cpp` | Рендер, конфиг, основные хуки, streaming, скины |
+| `source/orc_texture_remap.cpp`, `source/orc_texture_remap.h` | Texture remap стандартных ped TXD (`*_remap`) |
 | `source/orc_log.cpp`, `source/orc_log.h` | Лог в файл, уровни Info/Error |
 | `source/orc_app.h`, `source/orc_types.h` | Состояние плагина, типы |
 | `source/orc_ui.cpp` | ImGui |

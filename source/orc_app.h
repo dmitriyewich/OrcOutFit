@@ -15,6 +15,7 @@ extern char g_iniPath[MAX_PATH];
 extern char g_gameObjDir[MAX_PATH];
 extern char g_gameWeaponsDir[MAX_PATH];
 extern char g_gameSkinDir[MAX_PATH];
+extern char g_gameTextureDir[MAX_PATH];
 
 extern bool g_enabled;
 extern bool g_renderAllPedsWeapons;
@@ -49,6 +50,9 @@ extern bool g_skinModeEnabled;
 extern bool g_skinHideBasePed;
 extern bool g_skinNickMode;
 extern bool g_skinLocalPreferSelected;
+extern bool g_skinTextureRemapEnabled;
+extern bool g_skinTextureRemapNickMode;
+extern int g_skinTextureRemapRandomMode;
 // SKINS/random/<dffBaseName>/*.dff — случайный вариант на каждого педа с этим model id.
 extern bool g_skinRandomFromPools;
 extern int g_skinRandomPoolModels;
@@ -77,12 +81,22 @@ void InvalidateObjectSkinParamCache();
 void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2);
 
 // ped.dat DFF basename for ped (LoadPedObject hook); empty if unknown.
+const char* OrcTryGetPedModelNameById(int modelId);
 std::string GetPedStdSkinDffName(CPed* ped);
 bool ResolveWeaponsIniForSkinDff(const char* skinDffName, char* outPath, size_t outPathChars);
 bool OrcApplyLocalPlayerModelById(int modelId);
 
 // Ped.dat DFF names with model ids (for UI lists).
 void OrcCollectPedSkins(std::vector<std::pair<std::string, int>>& out);
+void OrcCollectPedTextureRemapStats(std::vector<TextureRemapPedInfo>& out);
+bool OrcGetLocalPedTextureRemaps(TextureRemapPedInfo& out);
+bool OrcSetLocalPedTextureRemap(int slot, int remap);
+bool OrcRandomizeLocalPedTextureRemaps();
+bool OrcSetAllLocalPedTextureRemaps(int remap);
+void OrcReloadTextureRemapNickBindings();
+void OrcCollectLocalPedTextureRemapNickBindings(std::vector<TextureRemapNickBindingInfo>& out);
+bool OrcSaveLocalPedTextureRemapNickBinding(const char* nickCsv);
+bool OrcDeleteLocalPedTextureRemapNickBinding(int bindingId);
 
 bool LoadObjectSkinParamsFromIni(const char* iniPath, const char* skinDffName, CustomObjectSkinParams& out);
 void SaveObjectSkinParamsToIni(const char* iniPath, const char* skinDffName, const CustomObjectSkinParams& p);

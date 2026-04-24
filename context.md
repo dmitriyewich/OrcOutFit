@@ -21,7 +21,8 @@
 - Плагин рендерит:
   - оружие на теле ped (локальный игрок + опционально все ped),
   - кастомные объекты из папки `Objects`,
-  - кастомный skin-режим для локального игрока из папки `Skins`.
+  - кастомный skin-режим для локального игрока из папки `Skins`,
+  - PedFuncs-style texture remap для стандартных ped TXD по текстурам `*_remap`.
 - Оружие, которое сейчас в руках у ped, на теле не рисуется.
 - Выходной артефакт проекта:
   - `OrcOutFit.asi`
@@ -61,7 +62,7 @@
   - использует тот же радиус `RenderAllPedsRadius`,
   - для каждого ped берётся его `dff` и секция `[Skin.<dff>]` из каждого object ini.
 - UI:
-  - вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**;
+  - вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**; внутри **Skins** есть подвкладки **Custom skins** и **Texture**;
   - в Main добавлены отдельные флаги **Render weapons for all peds** и **Render objects for all peds**;
   - слайдер `All peds radius` общий для обоих флагов;
   - список стандартных ped из кеша `LoadPedObject`: **сортировка по `model id` по возрастанию**, подписи **`Имя [ID]`** (Weapons и Objects);
@@ -93,6 +94,18 @@
   - **Лог `OrcOutFit.log` (рядом с INI):** `[Features] DebugLogLevel` — `0` выкл., `1` только ошибки (`[E]`), `2` полный trace (`[I]` + ошибки). Ключ **`DebugLog=1`** (legacy) по-прежнему включает уровень 2. Реализация: `source/orc_log.cpp`; в UI: Main → **Debug log** (combo).
   - случайные пулы `Skins\random` **не сканируются**; `ResolveSkinForPed` не использует random-fallback,
   - ключ `RandomFromPools` в `[SkinMode]` в INI остаётся для совместимости.
+- Skin texture remap (`[Features] SkinTextureRemap`):
+  - подвкладка **Skins → Texture** включает PedFuncs-style замену материалов стандартного ped перед его рендером и восстановление сразу после `pedRenderEvent.after`;
+  - для каждого ped сканируется TXD стандартной модели (`CBaseModelInfo::m_nTxdIndex`) и собираются пары `original` / `*_remap`; базовое имя берётся как часть до `_remap`;
+  - список вариантов строится только из реально найденных уникальных texture names; PedFuncs-style циклическая индексация/повторы и несуществующие номера не используются;
+  - поддерживается до 8 remap-слотов на модель, ручной выбор реального варианта, возврат к оригиналу и randomize;
+  - `[Features] SkinTextureRemapRandomMode`: `0` = `Per texture`, `1` = `Linked variant` (дефолт); linked выбирает один общий remap-index для всех слотов, где он есть, а для слотов с меньшим числом вариантов берёт случайный реальный вариант;
+  - random не блокирует повтор того же варианта подряд: повторы остаются естественной частью случайного выбора;
+  - `[Features] SkinTextureRemapNickMode=1` включает привязки texture remap по нику SA:MP; binding всегда имеет приоритет, а если binding для ника не найден — остаётся random;
+  - привязки хранятся в `OrcOutFit\Skins\Textures\<dff>.ini`, секции `[Binding.N]`: `Nicks`, `SlotCount`, `SlotNOriginal`, `SlotNRemap`; сохраняются реальные texture names, а не индексы;
+  - хук `AssignRemapTxd` кеширует дополнительные `peds1..peds4.txd`, а хук `RwTexDictionaryFindNamedTexture` ищет недостающие текстуры в этих словарях;
+  - состояние ped сбрасывается при `pedSetModelEvent`, выключении плагина/фичи и shutdown; во время cutscene-окна rescan откладывается;
+  - реализация вынесена из `main.cpp` в отдельный модуль `source\orc_texture_remap.cpp/.h`; `main.cpp` только подключает hooks/events и конфиг.
 - Per-skin weapon overrides (по имени DFF ped из ped.dat):
   - `OrcOutFit\Weapons\<skin>.ini` (регистр имени файла не важен),
   - полный набор секций оружия как в `OrcOutFit.ini`; приоритет выше глобального `OrcOutFit.ini`.
@@ -111,7 +124,7 @@
 
 - Основной код:
   - `C:\Games\CODEX\WeaponsOutFit\source\main.cpp`
-  - UI (ImGui): `source\orc_ui.cpp`, `source\orc_ui.h`; общие типы: `source\orc_types.h`; мост к состоянию: `source\orc_app.h`; лог: `source\orc_log.cpp`, `source\orc_log.h`
+  - UI (ImGui): `source\orc_ui.cpp`, `source\orc_ui.h`; общие типы: `source\orc_types.h`; мост к состоянию: `source\orc_app.h`; лог: `source\orc_log.cpp`, `source\orc_log.h`; texture remap + nick bindings: `source\orc_texture_remap.cpp`, `source\orc_texture_remap.h`
 - MinHook:
   - `C:\Games\CODEX\WeaponsOutFit\source\external\MinHook\`
 - Проект Visual Studio:
@@ -165,6 +178,11 @@
   - Пример: `MSBuild.exe OrcOutFit.sln /p:Configuration=Release /p:Platform=x86`
 - Ожидаемый выходной файл:
   - `C:\Games\CODEX\WeaponsOutFit\build\Release\OrcOutFit.asi`
+- GitHub Actions workflow:
+  - `.github/workflows/build-release-win32.yml`
+  - триггеры: `workflow_dispatch` и `release.published`
+  - в CI используется сборка `msbuild OrcOutFit.vcxproj /p:Configuration=Release /p:Platform=Win32`
+  - артефакт CI и release-asset: `build/Release/OrcOutFit.asi`
 
 - Важно: `Plugin.lib` (из `plugin-sdk`) должен существовать в:
   - `source\external\plugin-sdk\output\lib\Plugin.lib`
@@ -183,6 +201,7 @@
   - `OrcOutFit\Objects`
   - `OrcOutFit\Weapons`
   - `OrcOutFit\Skins`
+  - `OrcOutFit\Skins\Textures`
 
 ## Правила `reference`
 

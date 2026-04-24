@@ -27,18 +27,21 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 #include <array>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstdlib>
+#include <utility>
 
 #include "overlay.h"
 #include "samp_bridge.h"
 #include "orc_types.h"
 #include "orc_app.h"
 #include "orc_ui.h"
+#include "orc_texture_remap.h"
 #include "external/MinHook/include/MinHook.h"
 
 using namespace plugin;
@@ -48,6 +51,7 @@ char    g_iniPath[MAX_PATH] = {};
 char    g_gameObjDir[MAX_PATH] = {};
 char    g_gameWeaponsDir[MAX_PATH] = {};
 char    g_gameSkinDir[MAX_PATH] = {};
+char    g_gameTextureDir[MAX_PATH] = {};
 
 static void LogInit() {
     char modPath[MAX_PATH] = {};
@@ -66,6 +70,7 @@ static void LogInit() {
     _snprintf_s(g_gameObjDir, _TRUNCATE, "%s\\OrcOutFit\\Objects", moduleDir);
     _snprintf_s(g_gameWeaponsDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons", moduleDir);
     _snprintf_s(g_gameSkinDir, _TRUNCATE, "%s\\OrcOutFit\\Skins", moduleDir);
+    _snprintf_s(g_gameTextureDir, _TRUNCATE, "%s\\OrcOutFit\\Skins\\Textures", moduleDir);
 
     std::srand(static_cast<unsigned>(GetTickCount()));
 }
@@ -269,7 +274,7 @@ static void EnsurePedDatHookInstalled() {
         OrcLogInfo("LoadPedObject hook installed (0x5B7420)");
 }
 
-static const char* TryGetPedModelNameById(int modelId) {
+const char* OrcTryGetPedModelNameById(int modelId) {
     if (modelId <= 0) return nullptr;
     if (modelId >= (int)g_pedModelNameById.size()) return nullptr;
     if (g_pedModelNameById[modelId].empty()) return nullptr;
@@ -407,6 +412,9 @@ bool g_skinModeEnabled = false;
 bool g_skinHideBasePed = true;
 bool g_skinNickMode = true;
 bool g_skinLocalPreferSelected = false;
+bool g_skinTextureRemapEnabled = false;
+bool g_skinTextureRemapNickMode = true;
+int g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
 bool g_skinRandomFromPools = false;
 int g_skinRandomPoolModels = 0;
 int g_skinRandomPoolVariants = 0;
@@ -635,6 +643,13 @@ void LoadConfig() {
     g_skinHideBasePed = GetPrivateProfileIntA("Features", "SkinHideBasePed", 1, g_iniPath) != 0;
     g_skinNickMode = GetPrivateProfileIntA("Features", "SkinNickMode", 1, g_iniPath) != 0;
     g_skinLocalPreferSelected = GetPrivateProfileIntA("Features", "SkinLocalPreferSelected", 0, g_iniPath) != 0;
+    g_skinTextureRemapEnabled = GetPrivateProfileIntA("Features", "SkinTextureRemap", 0, g_iniPath) != 0;
+    g_skinTextureRemapNickMode = GetPrivateProfileIntA("Features", "SkinTextureRemapNickMode", 1, g_iniPath) != 0;
+    g_skinTextureRemapRandomMode = GetPrivateProfileIntA("Features", "SkinTextureRemapRandomMode", TEXTURE_REMAP_RANDOM_LINKED_VARIANT, g_iniPath);
+    if (g_skinTextureRemapRandomMode < TEXTURE_REMAP_RANDOM_PER_TEXTURE ||
+        g_skinTextureRemapRandomMode > TEXTURE_REMAP_RANDOM_LINKED_VARIANT) {
+        g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
+    }
     g_sampAllowActivationKey = GetPrivateProfileIntA("Main", "SampAllowActivationKey", 0, g_iniPath) != 0;
     char keyBuf[32] = {};
     GetPrivateProfileStringA("Main", "ActivationKey", "F7", keyBuf, sizeof(keyBuf), g_iniPath);
@@ -721,6 +736,9 @@ static void SaveDefaultConfig() {
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
           "SkinLocalPreferSelected=0\n"
+          "SkinTextureRemap=0\n"
+          "SkinTextureRemapNickMode=1\n"
+          "SkinTextureRemapRandomMode=1\n"
           "; DebugLogLevel: 0=off, 1=errors only, 2=info (full). Legacy DebugLog=1 equals level 2.\n"
           "DebugLogLevel=0\n"
           "DebugLog=0\n\n", f);
@@ -776,6 +794,12 @@ void SaveMainIni() {
     WritePrivateProfileStringA("Features", "SkinNickMode", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinLocalPreferSelected ? 1 : 0);
     WritePrivateProfileStringA("Features", "SkinLocalPreferSelected", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapEnabled ? 1 : 0);
+    WritePrivateProfileStringA("Features", "SkinTextureRemap", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapNickMode ? 1 : 0);
+    WritePrivateProfileStringA("Features", "SkinTextureRemapNickMode", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapRandomMode);
+    WritePrivateProfileStringA("Features", "SkinTextureRemapRandomMode", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", static_cast<int>(g_orcLogLevel));
     WritePrivateProfileStringA("Features", "DebugLogLevel", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
@@ -927,7 +951,6 @@ std::vector<std::string> ParseNickCsv(const std::string& csv) {
     flush();
     return out;
 }
-
 static std::string FindBestTxdPath(const std::string& dir, const std::string& base) {
     // 1) strict same-base match (case-insensitive)
     std::string mask = JoinPath(dir, "*.*");
@@ -1418,6 +1441,12 @@ void SaveSkinModeIni() {
     WritePrivateProfileStringA("Features", "SkinNickMode", buf, g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinLocalPreferSelected ? 1 : 0);
     WritePrivateProfileStringA("Features", "SkinLocalPreferSelected", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapEnabled ? 1 : 0);
+    WritePrivateProfileStringA("Features", "SkinTextureRemap", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapNickMode ? 1 : 0);
+    WritePrivateProfileStringA("Features", "SkinTextureRemapNickMode", buf, g_iniPath);
+    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapRandomMode);
+    WritePrivateProfileStringA("Features", "SkinTextureRemapRandomMode", buf, g_iniPath);
     WritePrivateProfileStringA("SkinMode", "Selected", g_skinSelectedName.c_str(), g_iniPath);
     _snprintf_s(buf, _TRUNCATE, "%d", g_skinRandomFromPools ? 1 : 0);
     WritePrivateProfileStringA("SkinMode", "RandomFromPools", buf, g_iniPath);
@@ -1490,7 +1519,7 @@ void InvalidatePerSkinWeaponCache() {
 
 std::string GetPedStdSkinDffName(CPed* ped) {
     if (!ped) return {};
-    if (const char* hook = TryGetPedModelNameById((int)ped->m_nModelIndex))
+    if (const char* hook = OrcTryGetPedModelNameById((int)ped->m_nModelIndex))
         return std::string(hook);
     if (ped->IsPlayer()) {
         auto* pl = reinterpret_cast<CPlayerPed*>(ped);
@@ -2340,6 +2369,7 @@ static void SyncAndRender() {
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
         DestroyAllRandomPoolSkins();
+        OrcTextureRemapClearRuntimeState();
         return;
     }
     CPlayerPed* player = FindPlayerPed(0);
@@ -2349,6 +2379,7 @@ static void SyncAndRender() {
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
         DestroyAllRandomPoolSkins();
+        OrcTextureRemapClearRuntimeState();
         return;
     }
 
@@ -2527,6 +2558,7 @@ static void OnDrawingEvent() {
 }
 
 static void OnPedRenderBefore(CPed* ped) {
+    OrcTextureRemapApplyBefore(ped);
     if (!g_skinModeEnabled || !g_skinHideBasePed) return;
     CPlayerPed* player = FindPlayerPed(0);
     if (!ped || !ped->m_pRwClump) return;
@@ -2549,6 +2581,7 @@ static void OnPedRenderBefore(CPed* ped) {
 }
 
 static void OnPedRenderAfter(CPed* ped) {
+    OrcTextureRemapRestoreAfter();
     // Always try to finish previously captured hide snapshot, even if toggles changed.
     if (!g_hideSnapshotValid) return;
     if (!ped || ped != g_hiddenPed) return;
@@ -2584,6 +2617,7 @@ static void OnShutdownRw() {
         s.txdSlot = -1;
     }
     DestroyAllRandomPoolSkins();
+    OrcTextureRemapClearRuntimeState();
     // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.
     DWORD oldProt;
     BYTE* p = reinterpret_cast<BYTE*>(0x5D95B0);
@@ -2603,6 +2637,8 @@ public:
         // проставит g_iniPath через LogInit().
         Events::initRwEvent.after += &OnInitRw;
         Events::drawingEvent += &OnDrawingEvent;
+        Events::processScriptsEvent += &OrcTextureRemapOnProcessScripts;
+        Events::pedSetModelEvent += &OrcTextureRemapOnPedSetModel;
         Events::pedRenderEvent.before += &OnPedRenderBefore;
         Events::pedRenderEvent.after += &OnPedRenderAfter;
         Events::d3dResetEvent += &OnD3dReset;
@@ -2623,6 +2659,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon.dat load.
         EnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();
+        OrcTextureRemapInstallHooks();
     }
     return TRUE;
 }
