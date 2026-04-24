@@ -38,6 +38,7 @@ ipch/
 # plugin-sdk: premake/MSBuild generated files (keep vendored sources clean)
 source/external/plugin-sdk/plugin.sln
 source/external/plugin-sdk/Plugin_*/
+!source/external/plugin-sdk/plugin_sa/game_sa/eModelInfoType.h
 source/external/plugin-sdk/examples/**/*.sln
 source/external/plugin-sdk/examples/**/*.vcxproj*
 source/external/plugin-sdk/examples/**/*.workspace
