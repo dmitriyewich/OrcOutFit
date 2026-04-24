@@ -27,11 +27,11 @@ jobs:
         shell: pwsh
         run: |
           $env:PLUGIN_SDK_DIR = "$PWD/source/external/plugin-sdk"
-          msbuild source/external/plugin-sdk/plugin_sa/Plugin_SA.vcxproj /t:Build "/p:Configuration=Release;Platform=Win32;PlatformToolset=v143"
+          msbuild source/external/plugin-sdk/plugin_sa/Plugin_SA.vcxproj /t:Build "/p:Configuration=Release;Platform=Win32;PlatformToolset=v145"
 
       - name: Build Release Win32
         shell: pwsh
-        run: msbuild OrcOutFit.sln /t:Build "/p:Configuration=Release;Platform=x86;PlatformToolset=v143"
+        run: msbuild OrcOutFit.sln /t:Build "/p:Configuration=Release;Platform=x86;PlatformToolset=v145"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
