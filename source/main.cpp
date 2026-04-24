@@ -79,6 +79,7 @@ static void LogInit() {
 // Config: per-weapon attachment (типы и кости: orc_types.h)
 // ----------------------------------------------------------------------------
 static RpAtomic* InitAtomicCB(RpAtomic* a, void*);
+static RpAtomic* InitAttachmentAtomicCB(RpAtomic* a, void*);
 bool g_enabled = true;
 bool g_renderAllPedsWeapons = false;
 bool g_renderAllPedsObjects = false;
@@ -1090,7 +1091,12 @@ bool LoadObjectSkinParamsFromIni(const char* iniPath, const char* skinDffName, C
     return true;
 }
 
-static std::unordered_map<std::string, CustomObjectSkinParams> g_objectSkinParamCache;
+struct ObjectSkinParamCacheEntry {
+    bool found = false;
+    CustomObjectSkinParams params{};
+};
+
+static std::unordered_map<std::string, ObjectSkinParamCacheEntry> g_objectSkinParamCache;
 bool g_livePreviewObjectActive = false;
 std::string g_livePreviewObjectIniPath;
 std::string g_livePreviewObjectSkinDff;
@@ -1139,12 +1145,20 @@ static bool ResolveObjectSkinParamsCached(const std::string& iniPath, const std:
     const std::string key = ToLowerAscii(iniPath) + "\x1e" + ToLowerAscii(skinDff);
     auto it = g_objectSkinParamCache.find(key);
     if (it != g_objectSkinParamCache.end()) {
-        out = it->second;
+        if (!it->second.found) return false;
+        out = it->second.params;
         return true;
     }
-    if (!LoadObjectSkinParamsFromIni(iniPath.c_str(), skinDff.c_str(), out))
+
+    ObjectSkinParamCacheEntry entry{};
+    if (!LoadObjectSkinParamsFromIni(iniPath.c_str(), skinDff.c_str(), entry.params)) {
+        g_objectSkinParamCache[key] = entry;
         return false;
-    g_objectSkinParamCache[key] = out;
+    }
+
+    entry.found = true;
+    out = entry.params;
+    g_objectSkinParamCache[key] = entry;
     return true;
 }
 
@@ -1235,7 +1249,7 @@ static bool EnsureCustomModelLoaded(CustomObjectCfg& o) {
         RpClump* readClump = RpClumpStreamRead(stream);
         if (readClump) {
             o.rwObject = reinterpret_cast<RwObject*>(readClump);
-            RpClumpForAllAtomics(readClump, InitAtomicCB, nullptr);
+            RpClumpForAllAtomics(readClump, InitAttachmentAtomicCB, nullptr);
             ok = true;
             OrcLogInfo("object \"%s\": clump loaded", o.name.c_str());
         }
@@ -1340,6 +1354,7 @@ void SaveSkinCfgToIni(const CustomSkinCfg& s) {
 void DiscoverCustomObjectsAndEnsureIni() {
     for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
     g_customObjects.clear();
+    InvalidateObjectSkinParamCache();
 
     DWORD attr = GetFileAttributesA(g_gameObjDir);
     if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -1880,7 +1895,14 @@ static void OrcTryRpClumpRender(RpClump* clump) {
 // ----------------------------------------------------------------------------
 // Whitens material color — в паре с rpGEOMETRYMODULATEMATERIALCOLOR даёт
 // чистое lighting * 1.0 без родного тинта оружия.
+static RpMaterial* AddRefMatCB(RpMaterial* m, void*) {
+    if (!m) return m;
+    m->refCount++;
+    return m;
+}
+
 static RpMaterial* WhiteMatCB(RpMaterial* m, void*) {
+    if (!m) return m;
     m->color = { 255, 255, 255, 255 };
     return m;
 }
@@ -1890,7 +1912,6 @@ static RpAtomic* PrepAtomicCB(RpAtomic* a, void*) {
     if (!a) return a;
     if (a->geometry) {
         a->geometry->flags |= rpGEOMETRYMODULATEMATERIALCOLOR;
-        RpGeometryForAllMaterials(a->geometry, WhiteMatCB, nullptr);
     }
     return a;
 }
@@ -1905,9 +1926,16 @@ static RpAtomic* InitAtomicCB(RpAtomic* a, void*) {
     if (!a) return a;
     CVisibilityPlugins::SetAtomicRenderCallback(a, nullptr);
     if (a->geometry) {
-        RpGeometryForAllMaterials(a->geometry,
-            +[](RpMaterial* m, void*)->RpMaterial*{ if (m) m->refCount++; return m; },
-            nullptr);
+        RpGeometryForAllMaterials(a->geometry, AddRefMatCB, nullptr);
+    }
+    return a;
+}
+
+static RpAtomic* InitAttachmentAtomicCB(RpAtomic* a, void*) {
+    InitAtomicCB(a, nullptr);
+    if (a && a->geometry) {
+        a->geometry->flags |= rpGEOMETRYMODULATEMATERIALCOLOR;
+        RpGeometryForAllMaterials(a->geometry, WhiteMatCB, nullptr);
     }
     return a;
 }
@@ -1987,9 +2015,9 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
 
     // Сброс render-callback на дефолтный RW + leak материалов (см. InitAtomicCB).
     if (inst->type == rpCLUMP) {
-        RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), InitAtomicCB, nullptr);
+        RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), InitAttachmentAtomicCB, nullptr);
     } else if (inst->type == rpATOMIC) {
-        InitAtomicCB(reinterpret_cast<RpAtomic*>(inst), nullptr);
+        InitAttachmentAtomicCB(reinterpret_cast<RpAtomic*>(inst), nullptr);
     }
 
     int fi = FindFree(arr);

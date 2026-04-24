@@ -60,7 +60,8 @@
 - Кастомные объекты всех ped (опция):
   - включается отдельным флагом `RenderAllPedsObjects`,
   - использует тот же радиус `RenderAllPedsRadius`,
-  - для каждого ped берётся его `dff` и секция `[Skin.<dff>]` из каждого object ini.
+  - для каждого ped берётся его `dff` и секция `[Skin.<dff>]` из каждого object ini,
+  - резолв object/skin параметров кеширует и найденные секции, и отрицательные промахи; кеш сбрасывается при `Reload INI`, сохранении object params, смене модели ped и `Rescan Objects`.
 - UI:
   - вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**; внутри **Skins** есть подвкладки **Custom skins** и **Texture**;
   - в Main добавлены отдельные флаги **Render weapons for all peds** и **Render objects for all peds**;
@@ -82,6 +83,7 @@
     - `WeaponsMode=any|all`,
     - `HideWeapons=1` — при срабатывании условия скрывать выбранное оружие на теле.
   - live preview параметров из UI для выбранной пары `(object ini + skin dff)` применяется сразу в рендере до сохранения.
+  - attachment-материалы объектов/оружия подготавливаются один раз при загрузке/создании инстанса (`InitAttachmentAtomicCB`); per-frame `PrepAtomicCB` больше не обходит все материалы.
 - Разрешение имени модели ped:
   - хук `CFileLoader::LoadPedObject` (`0x5B7420`, MinHook) кеширует `modelId -> modelName` (dff из ped.dat);
   - для пользовательских путей/INI используется это имя; числовой fallback папок `id###` не используется.
@@ -181,7 +183,8 @@
 - GitHub Actions workflow:
   - `.github/workflows/build-release-win32.yml`
   - триггеры: `workflow_dispatch` и `release.published`
-  - в CI используется сборка `msbuild OrcOutFit.vcxproj /p:Configuration=Release /p:Platform=Win32`
+  - в CI сначала собирается `source/external/plugin-sdk/plugin_sa/Plugin_SA.vcxproj` (`Release|Win32`, `PlatformToolset=v143`) для `Plugin.lib`,
+  - затем собирается `OrcOutFit.sln` (`Release|x86`, `PlatformToolset=v143`),
   - артефакт CI и release-asset: `build/Release/OrcOutFit.asi`
 
 - Важно: `Plugin.lib` (из `plugin-sdk`) должен существовать в:

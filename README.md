@@ -24,12 +24,13 @@
 ### Все педы в радиусе (опционально)
 - Режимы **«оружие у всех ped»** и **«объекты у всех ped»** с радиусом от локального игрока.
 - Для оружия используется отдельный per-ped cache инстансов; пресеты оружия подбираются по **`GetPedStdSkinDffName`**.
-- Для объектов на каждом ped применяются секции `[Skin.<dff>]` из object INI.
+- Для объектов на каждом ped применяются секции `[Skin.<dff>]` из object INI; найденные секции и отсутствующие пары object/skin кешируются, чтобы режим не перечитывал INI каждый кадр.
 
 ### Кастомные объекты
 - Сканирование **`*.dff`** в **`OrcOutFit\Objects`**.
 - Для каждого объекта — **`<имя>.ini`**. Настройки по стандартным скинам ped — только в секциях **`[Skin.<dff_name>]`** (имя DFF из `LoadPedObject`, без отдельных папок «под скин»).
 - Масштаб: `Scale` и `ScaleX/Y/Z`; условный рендер по списку оружия (`Weapons`, `WeaponsMode`, `HideWeapons`) внутри секции `[Skin.*]`.
+- Подготовка материалов объектов выполняется один раз при загрузке инстанса; per-frame рендер больше не обходит все материалы объекта.
 
 ### Кастомные скины (DFF поверх педа)
 - Сканирование **`*.dff`** в **`OrcOutFit\Skins`**.
@@ -113,7 +114,7 @@
 
 - Workflow: **`.github/workflows/build-release-win32.yml`**.
 - Триггеры: ручной запуск (`workflow_dispatch`) и публикация релиза (`release.published`).
-- Сборка в CI: `msbuild OrcOutFit.vcxproj /p:Configuration=Release /p:Platform=Win32`.
+- Сборка в CI: сначала `source/external/plugin-sdk/plugin_sa/Plugin_SA.vcxproj` (`Release|Win32`, `PlatformToolset=v143`) для `Plugin.lib`, затем `OrcOutFit.sln` (`Release|x86`, `PlatformToolset=v143`).
 - Публикация:
   - workflow artifact: `OrcOutFit-Release-Win32`;
   - release asset: `build/Release/OrcOutFit.asi`.
@@ -121,7 +122,7 @@
 ### `Plugin.lib` (plugin-sdk)
 
 - Ожидаемый путь: `source\external\plugin-sdk\output\lib\Plugin.lib`
-- Если линковка ругается, сгенерируйте проекты premake и соберите `Plugin_SA` (Release|Win32). Подробности см. в истории проекта / `plugin-sdk` README.
+- В CI `Plugin.lib` собирается автоматически из vendored `plugin-sdk`; локально при ошибке линковки соберите `Plugin_SA` (`Release|Win32`) или используйте основной `.sln`-сценарий сборки после подготовки plugin-sdk.
 
 ---
 
