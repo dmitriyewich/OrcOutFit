@@ -76,6 +76,7 @@ void SaveSkinModeIni();
 void SaveMainIni();
 
 void InvalidatePerSkinWeaponCache();
+void InvalidateCustomSkinLookupCache();
 void InvalidateObjectSkinParamCache();
 
 void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2);

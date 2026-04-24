@@ -813,6 +813,32 @@ void SaveMainIni() {
 std::vector<CustomObjectCfg> g_customObjects;
 std::vector<CustomSkinCfg> g_customSkins;
 
+static bool g_customSkinLookupDirty = true;
+static std::unordered_map<std::string, int> g_customSkinNickLookup;
+static int g_selectedSkinCacheIdx = -1;
+static std::string g_selectedSkinCacheNameLower;
+
+void InvalidateCustomSkinLookupCache() {
+    g_customSkinLookupDirty = true;
+    g_customSkinNickLookup.clear();
+    g_selectedSkinCacheIdx = -1;
+    g_selectedSkinCacheNameLower.clear();
+}
+
+static void EnsureCustomSkinNickLookup() {
+    if (!g_customSkinLookupDirty) return;
+    g_customSkinNickLookup.clear();
+    for (int i = 0; i < (int)g_customSkins.size(); ++i) {
+        const CustomSkinCfg& s = g_customSkins[(size_t)i];
+        if (!s.bindToNick || s.nicknames.empty()) continue;
+        for (const auto& nick : s.nicknames) {
+            if (!nick.empty())
+                g_customSkinNickLookup.emplace(nick, i);
+        }
+    }
+    g_customSkinLookupDirty = false;
+}
+
 struct SkinRandomPool {
     int modelId = -1;
     std::string folderName;
@@ -1349,6 +1375,7 @@ void SaveSkinCfgToIni(const CustomSkinCfg& s) {
     fputs(s.nickListCsv.c_str(), f);
     fputc('\n', f);
     fclose(f);
+    InvalidateCustomSkinLookupCache();
 }
 
 void DiscoverCustomObjectsAndEnsureIni() {
@@ -1395,6 +1422,7 @@ void DiscoverCustomObjectsAndEnsureIni() {
 void DiscoverCustomSkins() {
     for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
     g_customSkins.clear();
+    InvalidateCustomSkinLookupCache();
     DestroyAllRandomPoolSkins();
     DWORD attr = GetFileAttributesA(g_gameSkinDir);
     if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -1527,9 +1555,17 @@ void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, s
 static std::unordered_map<std::string, std::vector<WeaponCfg>> g_weaponSkinOv1;
 static std::unordered_map<std::string, std::vector<WeaponCfg>> g_weaponSkinOv2;
 
+struct WeaponSkinIniPathCacheEntry {
+    bool found = false;
+    std::string path;
+};
+
+static std::unordered_map<std::string, WeaponSkinIniPathCacheEntry> g_weaponSkinIniPathCache;
+
 void InvalidatePerSkinWeaponCache() {
     g_weaponSkinOv1.clear();
     g_weaponSkinOv2.clear();
+    g_weaponSkinIniPathCache.clear();
 }
 
 std::string GetPedStdSkinDffName(CPed* ped) {
@@ -1561,26 +1597,47 @@ void OrcCollectPedSkins(std::vector<std::pair<std::string, int>>& out) {
 bool ResolveWeaponsIniForSkinDff(const char* skinDffName, char* outPath, size_t outPathChars) {
     if (!skinDffName || !skinDffName[0] || !outPath || outPathChars == 0) return false;
     outPath[0] = 0;
-    DWORD da = GetFileAttributesA(g_gameWeaponsDir);
-    if (da == INVALID_FILE_ATTRIBUTES || !(da & FILE_ATTRIBUTE_DIRECTORY)) return false;
-
     const std::string want = ToLowerAscii(std::string(skinDffName));
+    auto cached = g_weaponSkinIniPathCache.find(want);
+    if (cached != g_weaponSkinIniPathCache.end()) {
+        if (!cached->second.found)
+            return false;
+        _snprintf_s(outPath, outPathChars, _TRUNCATE, "%s", cached->second.path.c_str());
+        return outPath[0] != 0;
+    }
+
+    DWORD da = GetFileAttributesA(g_gameWeaponsDir);
+    if (da == INVALID_FILE_ATTRIBUTES || !(da & FILE_ATTRIBUTE_DIRECTORY)) {
+        g_weaponSkinIniPathCache[want] = WeaponSkinIniPathCacheEntry{};
+        return false;
+    }
+
     std::string mask = JoinPath(std::string(g_gameWeaponsDir), "*.ini");
     WIN32_FIND_DATAA fd{};
     HANDLE h = FindFirstFileA(mask.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    if (h == INVALID_HANDLE_VALUE) {
+        g_weaponSkinIniPathCache[want] = WeaponSkinIniPathCacheEntry{};
+        return false;
+    }
     bool ok = false;
+    std::string foundPath;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         std::string fname = fd.cFileName;
         if (LowerExt(fname) != ".ini") continue;
         if (ToLowerAscii(BaseNameNoExt(fname)) == want) {
-            _snprintf_s(outPath, outPathChars, _TRUNCATE, "%s\\%s", g_gameWeaponsDir, fd.cFileName);
+            foundPath = JoinPath(std::string(g_gameWeaponsDir), fname);
+            _snprintf_s(outPath, outPathChars, _TRUNCATE, "%s", foundPath.c_str());
             ok = true;
             break;
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+
+    WeaponSkinIniPathCacheEntry entry{};
+    entry.found = ok;
+    if (ok) entry.path = foundPath;
+    g_weaponSkinIniPathCache[want] = std::move(entry);
     return ok;
 }
 
@@ -2179,12 +2236,26 @@ static void RenderCustomObject(CPed* ped, CustomObjectCfg& o, const CustomObject
 static CustomSkinCfg* GetSelectedSkin() {
     if (g_customSkins.empty()) return nullptr;
     if (!g_skinSelectedName.empty()) {
-        for (auto& s : g_customSkins) {
-            if (ToLowerAscii(s.name) == ToLowerAscii(g_skinSelectedName)) return &s;
+        const std::string selectedLower = ToLowerAscii(g_skinSelectedName);
+        if (g_selectedSkinCacheIdx >= 0 &&
+            g_selectedSkinCacheIdx < (int)g_customSkins.size() &&
+            g_selectedSkinCacheNameLower == selectedLower &&
+            ToLowerAscii(g_customSkins[(size_t)g_selectedSkinCacheIdx].name) == selectedLower) {
+            return &g_customSkins[(size_t)g_selectedSkinCacheIdx];
+        }
+
+        for (int i = 0; i < (int)g_customSkins.size(); ++i) {
+            if (ToLowerAscii(g_customSkins[(size_t)i].name) == selectedLower) {
+                g_selectedSkinCacheIdx = i;
+                g_selectedSkinCacheNameLower = selectedLower;
+                return &g_customSkins[(size_t)i];
+            }
         }
     }
     if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
     g_skinSelectedName = g_customSkins[g_uiSkinIdx].name;
+    g_selectedSkinCacheIdx = g_uiSkinIdx;
+    g_selectedSkinCacheNameLower = ToLowerAscii(g_skinSelectedName);
     return &g_customSkins[g_uiSkinIdx];
 }
 
@@ -2234,10 +2305,13 @@ static bool SkinMatchesNickname(const CustomSkinCfg& s, const std::string& nickL
 
 static CustomSkinCfg* FindNickSkin(const std::string& nickLower) {
     if (nickLower.empty()) return nullptr;
-    for (auto& s : g_customSkins) {
-        if (SkinMatchesNickname(s, nickLower)) return &s;
-    }
-    return nullptr;
+    EnsureCustomSkinNickLookup();
+    auto it = g_customSkinNickLookup.find(nickLower);
+    if (it == g_customSkinNickLookup.end()) return nullptr;
+    const int idx = it->second;
+    if (idx < 0 || idx >= (int)g_customSkins.size()) return nullptr;
+    if (!SkinMatchesNickname(g_customSkins[(size_t)idx], nickLower)) return nullptr;
+    return &g_customSkins[(size_t)idx];
 }
 
 static CustomSkinCfg* ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer, bool* isLocalPedOut) {

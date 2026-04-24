@@ -56,7 +56,8 @@
 - Оружие всех ped (опция):
   - включается флагом `RenderAllPedsWeapons`,
   - фильтруется по радиусу `RenderAllPedsRadius`,
-  - используется per-ped cache инстансов по `CPools::GetPedRef`.
+  - используется per-ped cache инстансов по `CPools::GetPedRef`,
+  - резолв `OrcOutFit\Weapons\<dff>.ini` кеширует найденный путь и отрицательные промахи, чтобы рендер всех ped не сканировал папку `Weapons` из per-frame пути.
 - Кастомные объекты всех ped (опция):
   - включается отдельным флагом `RenderAllPedsObjects`,
   - использует тот же радиус `RenderAllPedsRadius`,
@@ -90,6 +91,7 @@
 - Skin mode (`[Features] SkinMode`):
   - скан `*.dff` в `OrcOutFit\Skins` (папка `Skins`, не `SKINS`),
   - при **SA:MP** и включённом **`[Features] SkinNickMode`**: кастомный clump выбирается **по нику** (`[NickBinding]` в INI скина); при совпадении ника он **важнее** выбранного в UI скина,
+  - nick binding использует кеш `nick -> skin index`, а выбранный UI-скин кешируется по имени; кеш сбрасывается при рескане/сохранении skin INI и live-изменениях nick binding в UI,
   - **`[Features] SkinLocalPreferSelected`** (*always use selected*): на **локального игрока** вешается скин из вкладки Skins (`SkinMode`/`Selected`), если опция включена — **в том числе при выключенном `SkinNickMode`**; при включённом nick mode без совпадения ника поведение то же; при совпадении ника побеждает скин по `[NickBinding]`,
   - рендер выбранного clump поверх ped, скрытие базового ped (опция), bind через `RpSkinAtomicSetHAnimHierarchy`;
   - **кастомный скин:** загрузка как у прочих кастом-clump (`InitAtomicCB`); рендер: `CPed::SetupLighting` (SEH) → `ApplyAttachmentLightingForPed` с **colourScale=1.0** → `RpClumpRender` → при успешном `SetupLighting` — `RemoveLighting` (у оружия/объектов **colourScale=0.5**); без `PrepAtomicCB` для скина.

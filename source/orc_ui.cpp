@@ -719,7 +719,8 @@ void OrcUiDraw() {
                         if (sampNickUiOff)
                             ImGui::TextWrapped("Unsupported SA:MP build - nick binding inactive (SP mode).");
                         ImGui::BeginDisabled(sampNickUiOff);
-                        ImGui::Checkbox("Bind this skin to nick(s)", &skin.bindToNick);
+                        if (ImGui::Checkbox("Bind this skin to nick(s)", &skin.bindToNick))
+                            InvalidateCustomSkinLookupCache();
                         if (g_uiSkinEditIdx != g_uiSkinIdx) {
                             g_uiSkinEditIdx = g_uiSkinIdx;
                             _snprintf_s(g_uiSkinNickBuf, _TRUNCATE, "%s", skin.nickListCsv.c_str());
@@ -728,12 +729,14 @@ void OrcUiDraw() {
                         if (ImGui::InputTextWithHint("##skinnicks", "Nick1,Nick2", g_uiSkinNickBuf, IM_ARRAYSIZE(g_uiSkinNickBuf))) {
                             skin.nickListCsv = g_uiSkinNickBuf;
                             skin.nicknames = ParseNickCsv(skin.nickListCsv);
+                            InvalidateCustomSkinLookupCache();
                         }
                         ImGui::EndDisabled();
                         ImGui::PopItemWidth();
                         if (ImGui::Button("Save skin .ini", ImVec2(-FLT_MIN, 0))) {
                             skin.nickListCsv = g_uiSkinNickBuf;
                             skin.nicknames = ParseNickCsv(skin.nickListCsv);
+                            InvalidateCustomSkinLookupCache();
                             SaveSkinCfgToIni(skin);
                         }
                     }
