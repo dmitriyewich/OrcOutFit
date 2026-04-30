@@ -75,6 +75,12 @@ int g_sampOverlayCursorMode = -1;
 bool g_sampOverlayCursorEnabled = false;
 std::uint64_t g_sampOverlayCursorLastApplyMs = 0;
 
+void ResetOverlayCursorCache() {
+    g_sampOverlayCursorMode = -1;
+    g_sampOverlayCursorEnabled = false;
+    g_sampOverlayCursorLastApplyMs = 0;
+}
+
 static void TrimSampNameInPlace(char* s) {
     if (!s || !s[0]) return;
     char* p = s;
@@ -255,7 +261,7 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
         return;
     constexpr int kModeNone = 0;
     constexpr int kModeLockCam = 3;
-    constexpr std::uint64_t kReassertIntervalMs = 1200;
+    constexpr std::uint64_t kReassertIntervalMs = 200;
     const int mode = wantUiCursor ? kModeLockCam : kModeNone;
     const bool enabled = wantUiCursor;
     const std::uint64_t now = GetTickCount64();
@@ -286,6 +292,8 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
 }
 
 void Shutdown() {
+    ResetOverlayCursorCache();
+
     if (!g_state.minHookInitialized)
         return;
 
@@ -318,4 +326,3 @@ void Shutdown() {
 }
 
 } // namespace samp_bridge
-

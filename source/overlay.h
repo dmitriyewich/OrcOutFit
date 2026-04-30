@@ -4,9 +4,10 @@ namespace overlay {
 
 using DrawFn = void(*)();
 
-// Should be called each frame from drawingEvent.
-void Init();         // no-op if already inited or device/hwnd not ready
-void DrawFrame();    // NewFrame -> user draw -> Render
+// Called from drawingEvent after the game has reached a drawable frame.
+// It installs D3D9 hooks once; actual UI rendering is driven by Present/EndScene.
+void Init();
+void DrawFrame();    // legacy no-op for the existing drawingEvent call site
 void Shutdown();
 
 bool IsOpen();

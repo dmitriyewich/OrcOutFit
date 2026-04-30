@@ -2,7 +2,7 @@
 <img width="238" height="408" alt="kHKmcxq" src="https://github.com/user-attachments/assets/44e51b41-9600-4cb8-ae4e-611afc44ed08" />
 Нативный **ASI-плагин** для **GTA San Andreas 1.0 US** (x86), в том числе для **SA:MP**. Рисует оружие на теле педа, кастомные объекты и кастомные скины поверх модели, с настройкой через **ImGui**-оверлей и INI-файлы.
 
-**Репозиторий:** [github.com/dmitriyewich/OrcOutFit](https://github.com/dmitriyewich/OrcOutFit) — исходники, `.github/workflows`, профиль сборки Visual Studio и **`README.md`**. `context.md`, `README.txt`, `AGENTS.md`, журнал агента (`.claude/work.md`) и правила Cursor остаются локальными; публиковать их можно только по явному запросу пользователя или при строгой необходимости для публичной сборки.
+**Репозиторий:** [github.com/dmitriyewich/OrcOutFit](https://github.com/dmitriyewich/OrcOutFit) — исходники, `.github/workflows`, профиль сборки Visual Studio и **`README.md`**. `context.md` и `README.txt` считаются локальными заметками по умолчанию и публикуются только по явному запросу; `AGENTS.md`, журнал агента (`.claude/work.md`) и правила Cursor остаются локальными.
 
 ---
 
@@ -138,7 +138,7 @@
 | SA:MP | **`[Main] Command`** (по умолчанию **`/orcoutfit`**). Опционально **`SampAllowActivationKey=1`** |
 
 Удержание **ПКМ** отдаёт камере игры (меню может оставаться открытым).
-Для стабильности курсора/drag в SA:MP используется sticky-capture + периодический reassert `SetCursorMode`.
+ImGui-рендер подключается через D3D9 hooks (`Present` / fallback `EndScene`, `Reset`) после первого drawable-кадра игры, поэтому одиночная игра не ждёт полной инициализации SA:MP. Для стабильности курсора/drag используется sticky-capture; в распознанном SA:MP периодически подтверждается `SetCursorMode`, а в одиночной игре и неизвестных сборках работает single-player fallback. При сбое рендера меню курсор и управление принудительно возвращаются игре.
 
 ---
 
@@ -212,7 +212,7 @@
 | `source/orc_log.cpp`, `source/orc_log.h` | Лог в файл, уровни Info/Error |
 | `source/orc_app.h`, `source/orc_types.h` | Состояние плагина, типы |
 | `source/orc_ui.cpp` | ImGui |
-| `source/overlay.cpp` | D3D9 + ввод |
+| `source/overlay.cpp` | D3D9 hooks + ввод/курсор |
 | `source/samp_bridge.cpp` | SA:MP |
 
 ---
