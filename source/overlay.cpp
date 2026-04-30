@@ -138,6 +138,28 @@ void WriteByte(uintptr_t addr, BYTE value) {
     WriteBytes(addr, &value, 1);
 }
 
+void LoadUiFont(ImGuiIO& io) {
+    static constexpr const char* kFontCandidates[] = {
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\tahoma.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    };
+    const ImWchar* ranges = io.Fonts->GetGlyphRangesCyrillic();
+    for (const char* path : kFontCandidates) {
+        if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
+            continue;
+        if (io.Fonts->AddFontFromFileTTF(path, 14.0f, nullptr, ranges)) {
+            OrcLogInfo("overlay: loaded UI font %s", path);
+            return;
+        }
+    }
+
+    ImFontConfig cfg{};
+    cfg.SizePixels = 14.0f;
+    io.Fonts->AddFontDefault(&cfg);
+    OrcLogError("overlay: failed to load Cyrillic UI font, using ImGui default");
+}
+
 void CaptureCursorPatchSnapshot() {
     if (g_cursorPatchSnapshot.valid)
         return;
@@ -643,6 +665,8 @@ bool InitializeImGuiIfNeeded(IDirect3DDevice9* device) {
     io.ConfigNavCaptureKeyboard = false;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     io.MouseDrawCursor = false;
+
+    LoadUiFont(io);
 
     ImGui::StyleColorsDark();
     ImGuiStyle& st = ImGui::GetStyle();

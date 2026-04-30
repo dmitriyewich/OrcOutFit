@@ -42,6 +42,7 @@
 #include "orc_types.h"
 #include "orc_app.h"
 #include "orc_ini.h"
+#include "orc_locale.h"
 #include "orc_ui.h"
 #include "orc_texture_remap.h"
 #include "external/MinHook/include/MinHook.h"
@@ -654,6 +655,9 @@ void LoadConfig() {
         g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
     }
     g_sampAllowActivationKey = GetPrivateProfileIntA("Main", "SampAllowActivationKey", 0, g_iniPath) != 0;
+    char languageBuf[16] = {};
+    GetPrivateProfileStringA("Main", "Language", "ru", languageBuf, sizeof(languageBuf), g_iniPath);
+    g_orcUiLanguage = OrcParseLanguage(languageBuf);
     char keyBuf[32] = {};
     GetPrivateProfileStringA("Main", "ActivationKey", "F7", keyBuf, sizeof(keyBuf), g_iniPath);
     g_activationVk = ParseActivationVk(keyBuf);
@@ -748,6 +752,7 @@ static void AppendSkinModeIniValues(std::vector<OrcIniValue>& values) {
 
 static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Main", "Enabled", g_enabled ? 1 : 0);
+    AddIniValue(values, "Main", "Language", OrcLanguageId(g_orcUiLanguage));
     AddIniValue(values, "Main", "ActivationKey", VkToString(g_activationVk));
     AddIniValue(values, "Main", "Command", g_toggleCommand.c_str());
     AddIniInt(values, "Main", "SampAllowActivationKey", g_sampAllowActivationKey ? 1 : 0);
@@ -784,6 +789,7 @@ static void SaveDefaultConfig() {
           "; где NN = числовой eWeaponType (например [Weapon50]).\n\n"
           "[Main]\n"
           "Enabled=1\n"
+          "Language=ru\n"
           "ActivationKey=F7\n"
           "SampAllowActivationKey=0\n"
           "Command=/orcoutfit\n\n"
@@ -1684,6 +1690,7 @@ static void AppendMainIniText(std::string& out) {
     out += "; OrcOutFit configuration.\n\n";
     out += "[Main]\n";
     AppendFormat(out, "Enabled=%d\n", g_enabled ? 1 : 0);
+    AppendFormat(out, "Language=%s\n", OrcLanguageId(g_orcUiLanguage));
     AppendFormat(out, "ActivationKey=%s\n", VkToString(g_activationVk));
     AppendFormat(out, "SampAllowActivationKey=%d\n", g_sampAllowActivationKey ? 1 : 0);
     AppendFormat(out, "Command=%s\n\n", g_toggleCommand.c_str());

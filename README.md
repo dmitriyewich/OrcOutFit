@@ -60,6 +60,8 @@
 ### Интерфейс
 - Вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**.
 - Внутри **Skins** две подвкладки: **Custom skins** (прежняя логика DFF поверх ped) и **Texture** (`*_remap` для стандартных ped TXD).
+- Интерфейс локализован на русский и английский язык; выбор хранится в **`[Main] Language=ru|en`** и переключается во вкладке **Main**.
+- Кириллица в ImGui поддерживается загрузкой системного шрифта Windows (Segoe UI / Tahoma / Arial); проект компилируется с **`/utf-8`**.
 - Список стандартных ped для редактирования/примерки: **сортировка по model id по возрастанию**, подписи **`Имя [ID]`**.
 - **Wear this skin (local player)** — смена модели локального педа для превью: стриминг (`RequestModel` / `LoadAllRequestedModels`), затем `CPed::SetModelIndex` в начале следующего кадра (безопасно для clump).
 - Во вкладке **Weapons** оставлены только две кнопки сохранения:
@@ -148,6 +150,7 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 | Ключ | Описание |
 |------|----------|
 | `Enabled` | Плагин вкл/выкл |
+| `Language` | Язык интерфейса: `ru` или `en` |
 | `ActivationKey` | Клавиша (SP и опционально SA:MP) |
 | `SampAllowActivationKey` | В SA:MP также разрешить клавишу (`0`/`1`) |
 | `Command` | Чат-команда (с `/`) |
@@ -209,6 +212,7 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 |------|------------|
 | `source/main.cpp` | Рендер, конфиг, основные хуки, streaming, скины |
 | `source/orc_texture_remap.cpp`, `source/orc_texture_remap.h` | Texture remap стандартных ped TXD (`*_remap`) |
+| `source/orc_locale.cpp`, `source/orc_locale.h` | Ключи и строки локализации интерфейса (`ru` / `en`) |
 | `source/orc_log.cpp`, `source/orc_log.h` | Лог в файл, уровни Info/Error |
 | `source/orc_app.h`, `source/orc_types.h` | Состояние плагина, типы |
 | `source/orc_ui.cpp` | ImGui |
