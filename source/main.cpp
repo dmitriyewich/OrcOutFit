@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cstdarg>
 #include <cmath>
 #include <algorithm>
 #include <array>
@@ -40,6 +41,7 @@
 #include "samp_bridge.h"
 #include "orc_types.h"
 #include "orc_app.h"
+#include "orc_ini.h"
 #include "orc_ui.h"
 #include "orc_texture_remap.h"
 #include "external/MinHook/include/MinHook.h"
@@ -703,6 +705,64 @@ void LoadConfig() {
     // Weapon types are discovered in SetupDefaults (InitWeaponTypesAndStorage).
 }
 
+static void AddIniValue(std::vector<OrcIniValue>& values, const char* section, const char* key, const char* value) {
+    OrcIniValue v;
+    v.section = section ? section : "";
+    v.key = key ? key : "";
+    v.value = value ? value : "";
+    values.push_back(std::move(v));
+}
+
+static void AddIniInt(std::vector<OrcIniValue>& values, const char* section, const char* key, int value) {
+    char buf[32];
+    _snprintf_s(buf, _TRUNCATE, "%d", value);
+    AddIniValue(values, section, key, buf);
+}
+
+static void AddIniFloat0(std::vector<OrcIniValue>& values, const char* section, const char* key, float value) {
+    char buf[32];
+    _snprintf_s(buf, _TRUNCATE, "%.0f", value);
+    AddIniValue(values, section, key, buf);
+}
+
+static void AddIniFloat(std::vector<OrcIniValue>& values, const char* section, const char* key, float value, const char* fmt) {
+    char buf[32];
+    _snprintf_s(buf, _TRUNCATE, fmt, value);
+    AddIniValue(values, section, key, buf);
+}
+
+static void AppendSkinFeatureIniValues(std::vector<OrcIniValue>& values) {
+    AddIniInt(values, "Features", "SkinMode", g_skinModeEnabled ? 1 : 0);
+    AddIniInt(values, "Features", "SkinHideBasePed", g_skinHideBasePed ? 1 : 0);
+    AddIniInt(values, "Features", "SkinNickMode", g_skinNickMode ? 1 : 0);
+    AddIniInt(values, "Features", "SkinLocalPreferSelected", g_skinLocalPreferSelected ? 1 : 0);
+    AddIniInt(values, "Features", "SkinTextureRemap", g_skinTextureRemapEnabled ? 1 : 0);
+    AddIniInt(values, "Features", "SkinTextureRemapNickMode", g_skinTextureRemapNickMode ? 1 : 0);
+    AddIniInt(values, "Features", "SkinTextureRemapRandomMode", g_skinTextureRemapRandomMode);
+}
+
+static void AppendSkinModeIniValues(std::vector<OrcIniValue>& values) {
+    AddIniValue(values, "SkinMode", "Selected", g_skinSelectedName.c_str());
+    AddIniInt(values, "SkinMode", "RandomFromPools", g_skinRandomFromPools ? 1 : 0);
+}
+
+static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
+    AddIniInt(values, "Main", "Enabled", g_enabled ? 1 : 0);
+    AddIniValue(values, "Main", "ActivationKey", VkToString(g_activationVk));
+    AddIniValue(values, "Main", "Command", g_toggleCommand.c_str());
+    AddIniInt(values, "Main", "SampAllowActivationKey", g_sampAllowActivationKey ? 1 : 0);
+
+    AddIniInt(values, "Features", "RenderAllPedsWeapons", g_renderAllPedsWeapons ? 1 : 0);
+    AddIniInt(values, "Features", "RenderAllPedsObjects", g_renderAllPedsObjects ? 1 : 0);
+    AddIniFloat0(values, "Features", "RenderAllPedsRadius", g_renderAllPedsRadius);
+    AddIniInt(values, "Features", "ConsiderWeaponSkills", g_considerWeaponSkills ? 1 : 0);
+    AddIniInt(values, "Features", "CustomObjects", g_renderCustomObjects ? 1 : 0);
+    AppendSkinFeatureIniValues(values);
+    AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
+    AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
+    AppendSkinModeIniValues(values);
+}
+
 static void SaveDefaultConfig() {
     if (GetFileAttributesA(g_iniPath) != INVALID_FILE_ATTRIBUTES) return;
     FILE* f = fopen(g_iniPath, "w");
@@ -761,50 +821,10 @@ static void SaveDefaultConfig() {
 }
 
 void SaveMainIni() {
-    if (GetFileAttributesA(g_iniPath) == INVALID_FILE_ATTRIBUTES) {
-        FILE* t = fopen(g_iniPath, "w");
-        if (!t) {
-            OrcLogError("SaveMainIni: cannot create %s", g_iniPath);
-            return;
-        }
-        fclose(t);
-    }
-    char buf[32];
-    _snprintf_s(buf, _TRUNCATE, "%d", g_enabled ? 1 : 0);
-    WritePrivateProfileStringA("Main", "Enabled", buf, g_iniPath);
-    WritePrivateProfileStringA("Main", "ActivationKey", VkToString(g_activationVk), g_iniPath);
-    WritePrivateProfileStringA("Main", "Command", g_toggleCommand.c_str(), g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_sampAllowActivationKey ? 1 : 0);
-    WritePrivateProfileStringA("Main", "SampAllowActivationKey", buf, g_iniPath);
-
-    _snprintf_s(buf, _TRUNCATE, "%d", g_renderAllPedsWeapons ? 1 : 0);
-    WritePrivateProfileStringA("Features", "RenderAllPedsWeapons", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_renderAllPedsObjects ? 1 : 0);
-    WritePrivateProfileStringA("Features", "RenderAllPedsObjects", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%.0f", g_renderAllPedsRadius);
-    WritePrivateProfileStringA("Features", "RenderAllPedsRadius", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_considerWeaponSkills ? 1 : 0);
-    WritePrivateProfileStringA("Features", "ConsiderWeaponSkills", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_renderCustomObjects ? 1 : 0);
-    WritePrivateProfileStringA("Features", "CustomObjects", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinModeEnabled ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinMode", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinHideBasePed ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinHideBasePed", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinNickMode ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinNickMode", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinLocalPreferSelected ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinLocalPreferSelected", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapEnabled ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinTextureRemap", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapNickMode ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinTextureRemapNickMode", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapRandomMode);
-    WritePrivateProfileStringA("Features", "SkinTextureRemapRandomMode", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", static_cast<int>(g_orcLogLevel));
-    WritePrivateProfileStringA("Features", "DebugLogLevel", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
-    WritePrivateProfileStringA("Features", "DebugLog", buf, g_iniPath);
+    std::vector<OrcIniValue> values;
+    AppendMainIniValues(values);
+    if (!OrcIniWriteValues(g_iniPath, "; OrcOutFit configuration.\n\n", values))
+        OrcLogError("SaveMainIni: cannot write %s", g_iniPath);
 }
 
 // ----------------------------------------------------------------------------
@@ -902,31 +922,6 @@ static std::string JoinPath(const std::string& a, const std::string& b) {
 static bool FileExistsA(const char* p) {
     DWORD a = GetFileAttributesA(p);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-static void EnsureDirectoryExistsA(const char* fullDirPath) {
-    if (!fullDirPath || !fullDirPath[0]) return;
-    std::string path = fullDirPath;
-    for (size_t i = 0; i < path.size(); ++i)
-        if (path[i] == '/') path[i] = '\\';
-
-    for (size_t i = 1; i < path.size(); ++i) {
-        if (path[i] != '\\') continue;
-        std::string partial = path.substr(0, i);
-        if (partial.size() == 2 && partial[1] == ':') continue;
-        CreateDirectoryA(partial.c_str(), nullptr);
-    }
-    CreateDirectoryA(path.c_str(), nullptr);
-}
-
-static void EnsureDirForFilePath(const char* filePath) {
-    if (!filePath) return;
-    const char* slash = strrchr(filePath, '\\');
-    if (!slash) slash = strrchr(filePath, '/');
-    if (!slash || slash == filePath) return;
-    std::string dir(filePath, slash - filePath);
-    if (dir.empty()) return;
-    EnsureDirectoryExistsA(dir.c_str());
 }
 
 static std::string BaseNameNoExt(const std::string& file) {
@@ -1134,29 +1129,27 @@ void InvalidateObjectSkinParamCache() {
 
 void SaveObjectSkinParamsToIni(const char* iniPath, const char* skinDffName, const CustomObjectSkinParams& p) {
     if (!iniPath || !iniPath[0] || !skinDffName || !skinDffName[0]) return;
-    EnsureDirForFilePath(iniPath);
     const std::string sec = ObjectSkinIniSection(skinDffName);
-    char buf[64];
-    auto W = [&](const char* k, const char* v) {
-        WritePrivateProfileStringA(sec.c_str(), k, v, iniPath);
-    };
-    _snprintf_s(buf, _TRUNCATE, "%d", p.enabled ? 1 : 0); W("Enabled", buf);
-    _snprintf_s(buf, _TRUNCATE, "%d", p.boneId); W("Bone", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", p.x); W("OffsetX", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", p.y); W("OffsetY", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", p.z); W("OffsetZ", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", p.rx / D2R); W("RotationX", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", p.ry / D2R); W("RotationY", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", p.rz / D2R); W("RotationZ", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", p.scale); W("Scale", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", p.scaleX); W("ScaleX", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", p.scaleY); W("ScaleY", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", p.scaleZ); W("ScaleZ", buf);
+    std::vector<OrcIniValue> values;
+    AddIniInt(values, sec.c_str(), "Enabled", p.enabled ? 1 : 0);
+    AddIniInt(values, sec.c_str(), "Bone", p.boneId);
+    AddIniFloat(values, sec.c_str(), "OffsetX", p.x, "%.3f");
+    AddIniFloat(values, sec.c_str(), "OffsetY", p.y, "%.3f");
+    AddIniFloat(values, sec.c_str(), "OffsetZ", p.z, "%.3f");
+    AddIniFloat(values, sec.c_str(), "RotationX", p.rx / D2R, "%.2f");
+    AddIniFloat(values, sec.c_str(), "RotationY", p.ry / D2R, "%.2f");
+    AddIniFloat(values, sec.c_str(), "RotationZ", p.rz / D2R, "%.2f");
+    AddIniFloat(values, sec.c_str(), "Scale", p.scale, "%.3f");
+    AddIniFloat(values, sec.c_str(), "ScaleX", p.scaleX, "%.3f");
+    AddIniFloat(values, sec.c_str(), "ScaleY", p.scaleY, "%.3f");
+    AddIniFloat(values, sec.c_str(), "ScaleZ", p.scaleZ, "%.3f");
     char wcsv[256];
     WeaponTypesToCsv(p.weaponTypes, wcsv, sizeof(wcsv));
-    W("Weapons", wcsv);
-    W("WeaponsMode", p.weaponRequireAll ? "all" : "any");
-    _snprintf_s(buf, _TRUNCATE, "%d", p.hideSelectedWeapons ? 1 : 0); W("HideWeapons", buf);
+    AddIniValue(values, sec.c_str(), "Weapons", wcsv);
+    AddIniValue(values, sec.c_str(), "WeaponsMode", p.weaponRequireAll ? "all" : "any");
+    AddIniInt(values, sec.c_str(), "HideWeapons", p.hideSelectedWeapons ? 1 : 0);
+    if (!OrcIniWriteValues(iniPath, "; OrcOutFit custom object config.\n\n", values))
+        OrcLogError("SaveObjectSkinParamsToIni: cannot write %s", iniPath);
     InvalidateObjectSkinParamCache();
 }
 
@@ -1360,21 +1353,22 @@ static void LoadSkinCfgFromIni(CustomSkinCfg& s) {
 
 void SaveSkinCfgToIni(const CustomSkinCfg& s) {
     if (s.iniPath.empty()) return;
-    FILE* f = fopen(s.iniPath.c_str(), "w");
-    if (!f) {
+    std::string text;
+    text.reserve(128 + s.nickListCsv.size());
+    text += "; OrcOutFit custom skin config for ";
+    text += s.name;
+    text += "\n";
+    text += "; Nicks: one per line and/or comma-separated (case-insensitive).\n\n";
+    text += "[NickBinding]\n";
+    text += "Enabled=";
+    text += s.bindToNick ? "1\n" : "0\n";
+    text += "Nicks=";
+    text += s.nickListCsv;
+    text += "\n";
+    if (!OrcWriteTextFileAtomic(s.iniPath.c_str(), text)) {
         OrcLogError("SaveSkinCfgToIni: cannot write %s", s.iniPath.c_str());
         return;
     }
-    fprintf(f,
-        "; OrcOutFit custom skin config for %s\n"
-        "; Nicks: one per line and/or comma-separated (case-insensitive).\n\n"
-        "[NickBinding]\n"
-        "Enabled=%d\n"
-        "Nicks=",
-        s.name.c_str(), s.bindToNick ? 1 : 0);
-    fputs(s.nickListCsv.c_str(), f);
-    fputc('\n', f);
-    fclose(f);
     InvalidateCustomSkinLookupCache();
 }
 
@@ -1467,32 +1461,11 @@ void DiscoverCustomSkins() {
 }
 
 void SaveSkinModeIni() {
-    if (GetFileAttributesA(g_iniPath) == INVALID_FILE_ATTRIBUTES) {
-        FILE* t = fopen(g_iniPath, "w");
-        if (!t) {
-            OrcLogError("SaveSkinModeIni: cannot create %s", g_iniPath);
-            return;
-        }
-        fclose(t);
-    }
-    char buf[64];
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinModeEnabled ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinMode", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinHideBasePed ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinHideBasePed", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinNickMode ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinNickMode", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinLocalPreferSelected ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinLocalPreferSelected", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapEnabled ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinTextureRemap", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapNickMode ? 1 : 0);
-    WritePrivateProfileStringA("Features", "SkinTextureRemapNickMode", buf, g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinTextureRemapRandomMode);
-    WritePrivateProfileStringA("Features", "SkinTextureRemapRandomMode", buf, g_iniPath);
-    WritePrivateProfileStringA("SkinMode", "Selected", g_skinSelectedName.c_str(), g_iniPath);
-    _snprintf_s(buf, _TRUNCATE, "%d", g_skinRandomFromPools ? 1 : 0);
-    WritePrivateProfileStringA("SkinMode", "RandomFromPools", buf, g_iniPath);
+    std::vector<OrcIniValue> values;
+    AppendSkinFeatureIniValues(values);
+    AppendSkinModeIniValues(values);
+    if (!OrcIniWriteValues(g_iniPath, "; OrcOutFit configuration.\n\n", values))
+        OrcLogError("SaveSkinModeIni: cannot write %s", g_iniPath);
 }
 
 static bool LoadWeaponOverridesFromIni(const char* fullIni, std::vector<WeaponCfg>* outCfg) {
@@ -1698,15 +1671,74 @@ bool OrcApplyLocalPlayerModelById(int modelId) {
     return true;
 }
 
+static void AppendFormat(std::string& out, const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
+    va_end(ap);
+    out += buf;
+}
+
+static void AppendMainIniText(std::string& out) {
+    out += "; OrcOutFit configuration.\n\n";
+    out += "[Main]\n";
+    AppendFormat(out, "Enabled=%d\n", g_enabled ? 1 : 0);
+    AppendFormat(out, "ActivationKey=%s\n", VkToString(g_activationVk));
+    AppendFormat(out, "SampAllowActivationKey=%d\n", g_sampAllowActivationKey ? 1 : 0);
+    AppendFormat(out, "Command=%s\n\n", g_toggleCommand.c_str());
+
+    out += "[Features]\n";
+    AppendFormat(out, "RenderAllPedsWeapons=%d\n", g_renderAllPedsWeapons ? 1 : 0);
+    AppendFormat(out, "RenderAllPedsObjects=%d\n", g_renderAllPedsObjects ? 1 : 0);
+    AppendFormat(out, "RenderAllPedsRadius=%.0f\n", g_renderAllPedsRadius);
+    AppendFormat(out, "ConsiderWeaponSkills=%d\n", g_considerWeaponSkills ? 1 : 0);
+    AppendFormat(out, "CustomObjects=%d\n", g_renderCustomObjects ? 1 : 0);
+    AppendFormat(out, "SkinMode=%d\n", g_skinModeEnabled ? 1 : 0);
+    AppendFormat(out, "SkinHideBasePed=%d\n", g_skinHideBasePed ? 1 : 0);
+    AppendFormat(out, "SkinNickMode=%d\n", g_skinNickMode ? 1 : 0);
+    AppendFormat(out, "SkinLocalPreferSelected=%d\n", g_skinLocalPreferSelected ? 1 : 0);
+    AppendFormat(out, "SkinTextureRemap=%d\n", g_skinTextureRemapEnabled ? 1 : 0);
+    AppendFormat(out, "SkinTextureRemapNickMode=%d\n", g_skinTextureRemapNickMode ? 1 : 0);
+    AppendFormat(out, "SkinTextureRemapRandomMode=%d\n", g_skinTextureRemapRandomMode);
+    AppendFormat(out, "DebugLogLevel=%d\n", static_cast<int>(g_orcLogLevel));
+    AppendFormat(out, "DebugLog=%d\n\n", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
+
+    out += "[SkinMode]\n";
+    AppendFormat(out, "Selected=%s\n", g_skinSelectedName.c_str());
+    AppendFormat(out, "RandomFromPools=%d\n\n", g_skinRandomFromPools ? 1 : 0);
+}
+
+static void AppendWeaponSectionText(std::string& out, const char* section, const WeaponCfg& c) {
+    out += "[";
+    out += section ? section : "";
+    out += "]\n";
+    AppendFormat(out,
+        "Enabled=%d\n"
+        "Bone=%d\n"
+        "OffsetX=%.3f\n"
+        "OffsetY=%.3f\n"
+        "OffsetZ=%.3f\n"
+        "RotationX=%.2f\n"
+        "RotationY=%.2f\n"
+        "RotationZ=%.2f\n"
+        "Scale=%.3f\n\n",
+        c.enabled ? 1 : 0,
+        c.boneId,
+        c.x, c.y, c.z,
+        c.rx / D2R, c.ry / D2R, c.rz / D2R,
+        c.scale);
+}
+
 void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& w1, const std::vector<WeaponCfg>& w2) {
     if (!iniPath || !iniPath[0]) return;
-    EnsureDirForFilePath(iniPath);
-    FILE* t = fopen(iniPath, "w");
-    if (t) {
-        fputs("; OrcOutFit weapon preset (same section layout as OrcOutFit.ini).\n\n", t);
-        fclose(t);
-    } else
-        OrcLogError("SaveAllWeaponsToIniFile: cannot create %s", iniPath);
+    std::string text;
+    text.reserve(8192 + (w1.size() + w2.size()) * 256);
+    if (_stricmp(iniPath, g_iniPath) == 0)
+        AppendMainIniText(text);
+    else
+        text += "; OrcOutFit weapon preset (same section layout as OrcOutFit.ini).\n\n";
+
     for (int wt = 1; wt < (int)w1.size() && wt < (int)w2.size(); wt++) {
         const WeaponCfg& c = w1[wt];
         char sec[96];
@@ -1714,20 +1746,9 @@ void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& 
         else _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
         char secNum[32];
         _snprintf_s(secNum, _TRUNCATE, "Weapon%d", wt);
-        char buf[32];
-        auto W = [&](const char* key, const char* v) {
-            WritePrivateProfileStringA(sec, key, v, iniPath);
-            if (lstrcmpiA(sec, secNum) != 0) WritePrivateProfileStringA(secNum, key, v, iniPath);
-        };
-        _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0); W("Enabled", buf);
-        _snprintf_s(buf, _TRUNCATE, "%d", c.boneId); W("Bone", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.3f", c.x); W("OffsetX", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.3f", c.y); W("OffsetY", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.3f", c.z); W("OffsetZ", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.2f", c.rx / D2R); W("RotationX", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.2f", c.ry / D2R); W("RotationY", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.2f", c.rz / D2R); W("RotationZ", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale); W("Scale", buf);
+        AppendWeaponSectionText(text, sec, c);
+        if (lstrcmpiA(sec, secNum) != 0)
+            AppendWeaponSectionText(text, secNum, c);
 
         const WeaponCfg& c2 = w2[wt];
         char sec2[96];
@@ -1735,20 +1756,12 @@ void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& 
         else _snprintf_s(sec2, _TRUNCATE, "Weapon%d_2", wt);
         char secNum2[32];
         _snprintf_s(secNum2, _TRUNCATE, "Weapon%d_2", wt);
-        auto W2 = [&](const char* key, const char* v) {
-            WritePrivateProfileStringA(sec2, key, v, iniPath);
-            if (lstrcmpiA(sec2, secNum2) != 0) WritePrivateProfileStringA(secNum2, key, v, iniPath);
-        };
-        _snprintf_s(buf, _TRUNCATE, "%d", c2.enabled ? 1 : 0); W2("Enabled", buf);
-        _snprintf_s(buf, _TRUNCATE, "%d", c2.boneId); W2("Bone", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.3f", c2.x); W2("OffsetX", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.3f", c2.y); W2("OffsetY", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.3f", c2.z); W2("OffsetZ", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.2f", c2.rx / D2R); W2("RotationX", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.2f", c2.ry / D2R); W2("RotationY", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.2f", c2.rz / D2R); W2("RotationZ", buf);
-        _snprintf_s(buf, _TRUNCATE, "%.3f", c2.scale); W2("Scale", buf);
+        AppendWeaponSectionText(text, sec2, c2);
+        if (lstrcmpiA(sec2, secNum2) != 0)
+            AppendWeaponSectionText(text, secNum2, c2);
     }
+    if (!OrcWriteTextFileAtomic(iniPath, text))
+        OrcLogError("SaveAllWeaponsToIniFile: cannot write %s", iniPath);
 }
 
 // ----------------------------------------------------------------------------
@@ -1763,20 +1776,23 @@ void SaveWeaponSection(int wt) {
     char secNum[32];
     _snprintf_s(secNum, _TRUNCATE, "Weapon%d", wt);
 
-    char buf[32];
-    auto W = [&](const char* key, const char* v) {
-        WritePrivateProfileStringA(sec, key, v, g_iniPath);
-        if (lstrcmpiA(sec, secNum) != 0) WritePrivateProfileStringA(secNum, key, v, g_iniPath);
+    std::vector<OrcIniValue> values;
+    auto AddSection = [&](const char* section) {
+        AddIniInt(values, section, "Enabled", c.enabled ? 1 : 0);
+        AddIniInt(values, section, "Bone", c.boneId);
+        AddIniFloat(values, section, "OffsetX", c.x, "%.3f");
+        AddIniFloat(values, section, "OffsetY", c.y, "%.3f");
+        AddIniFloat(values, section, "OffsetZ", c.z, "%.3f");
+        AddIniFloat(values, section, "RotationX", c.rx / D2R, "%.2f");
+        AddIniFloat(values, section, "RotationY", c.ry / D2R, "%.2f");
+        AddIniFloat(values, section, "RotationZ", c.rz / D2R, "%.2f");
+        AddIniFloat(values, section, "Scale", c.scale, "%.3f");
     };
-    _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);     W("Enabled", buf);
-    _snprintf_s(buf, _TRUNCATE, "%d", c.boneId);              W("Bone", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", c.x);                 W("OffsetX", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", c.y);                 W("OffsetY", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", c.z);                 W("OffsetZ", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", c.rx / D2R);          W("RotationX", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", c.ry / D2R);          W("RotationY", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", c.rz / D2R);          W("RotationZ", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);             W("Scale", buf);
+    AddSection(sec);
+    if (lstrcmpiA(sec, secNum) != 0)
+        AddSection(secNum);
+    if (!OrcIniWriteValues(g_iniPath, "; OrcOutFit configuration.\n\n", values))
+        OrcLogError("SaveWeaponSection: cannot write %s", g_iniPath);
 }
 
 void SaveWeaponSection2(int wt) {
@@ -1788,20 +1804,23 @@ void SaveWeaponSection2(int wt) {
     char secNum[32];
     _snprintf_s(secNum, _TRUNCATE, "Weapon%d_2", wt);
 
-    char buf[32];
-    auto W = [&](const char* key, const char* v) {
-        WritePrivateProfileStringA(sec, key, v, g_iniPath);
-        if (lstrcmpiA(sec, secNum) != 0) WritePrivateProfileStringA(secNum, key, v, g_iniPath);
+    std::vector<OrcIniValue> values;
+    auto AddSection = [&](const char* section) {
+        AddIniInt(values, section, "Enabled", c.enabled ? 1 : 0);
+        AddIniInt(values, section, "Bone", c.boneId);
+        AddIniFloat(values, section, "OffsetX", c.x, "%.3f");
+        AddIniFloat(values, section, "OffsetY", c.y, "%.3f");
+        AddIniFloat(values, section, "OffsetZ", c.z, "%.3f");
+        AddIniFloat(values, section, "RotationX", c.rx / D2R, "%.2f");
+        AddIniFloat(values, section, "RotationY", c.ry / D2R, "%.2f");
+        AddIniFloat(values, section, "RotationZ", c.rz / D2R, "%.2f");
+        AddIniFloat(values, section, "Scale", c.scale, "%.3f");
     };
-    _snprintf_s(buf, _TRUNCATE, "%d", c.enabled ? 1 : 0);     W("Enabled", buf);
-    _snprintf_s(buf, _TRUNCATE, "%d", c.boneId);              W("Bone", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", c.x);                 W("OffsetX", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", c.y);                 W("OffsetY", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", c.z);                 W("OffsetZ", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", c.rx / D2R);          W("RotationX", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", c.ry / D2R);          W("RotationY", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.2f", c.rz / D2R);          W("RotationZ", buf);
-    _snprintf_s(buf, _TRUNCATE, "%.3f", c.scale);             W("Scale", buf);
+    AddSection(sec);
+    if (lstrcmpiA(sec, secNum) != 0)
+        AddSection(secNum);
+    if (!OrcIniWriteValues(g_iniPath, "; OrcOutFit configuration.\n\n", values))
+        OrcLogError("SaveWeaponSection2: cannot write %s", g_iniPath);
 }
 
 // ----------------------------------------------------------------------------

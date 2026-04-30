@@ -7,12 +7,14 @@
 - Идентификация стандартного ped для INI/пресетов: **имя DFF из хука `LoadPedObject`** (`modelId → имя` из `ped.dat`). Отдельные пользовательские пути вида `id###` для папок пресетов **не используются** (см. `OrcOutFit\Weapons\<dff>.ini` и `[Skin.<dff>]`).
 - Для оружия использовать `weapon.dat`-first подход (хук `LoadWeaponObject`) с безопасным fallback.
 - После существенных правок обязательно делать проверочную сборку `Release|Win32`.
-- Документацию (`context.md`, `README.md`, `README.txt`) синхронизировать с текущей реализацией по запросу пользователя; они **в репозитории** вместе с исходниками (см. «Публикация в Git»).
+- Локальная сборка использует `PlatformToolset=v145` из проекта Visual Studio 18; GitHub Actions намеренно переопределяет сборку на `PlatformToolset=v143`, потому что на `windows-latest` доступны v143 build tools. Не унифицировать эти toolset-ы без явной проверки CI.
+- Публичную документацию (`README.md`) синхронизировать с текущей реализацией при изменении поведения, установки, сборки или пользовательских сценариев. Локальные заметки (`context.md`, `README.txt`, `AGENTS.md`) обновлять по необходимости, но не публиковать без явного запроса пользователя или строгой необходимости для публичной сборки.
 
 ## Публикация в Git
 
-- Удалённый репозиторий `https://github.com/dmitriyewich/OrcOutFit` содержит **исходный код** (`source/`, в т.ч. `source/external/`), **файлы проекта VS** (`OrcOutFit.sln`, `OrcOutFit.vcxproj`, `.gitignore`) и **документацию в корне** (`context.md`, `README.md`, `README.txt`).
-- В коммиты **не включаются**: `.claude/`, `.cursor/rules/` (см. `.gitignore` и `.cursor/rules/orcoutfit-workflow.mdc`).
+- Удалённый репозиторий `https://github.com/dmitriyewich/OrcOutFit` должен содержать только публично необходимые файлы: **исходный код** (`source/`, в т.ч. `source/external/`), **GitHub workflow** (`.github/workflows/`), **профиль/файлы сборки VS** (`OrcOutFit.sln`, `OrcOutFit.vcxproj`) и **`README.md`**.
+- Всё остальное остаётся локальным по умолчанию. В коммиты **не включаются**: `AGENTS.md`, `.claude/`, `.cursor/rules/`, `context.md`, `README.txt` — кроме случая, когда пользователь явно попросил опубликовать файл или файл строго необходим для публичной сборки.
+- Техническое исключение: `.gitignore` можно менять, когда это нужно, чтобы локальные файлы не попадали в Git.
 
 ## Назначение проекта
 
@@ -75,6 +77,7 @@
   - Paste валидирует буфер и может вставлять между primary/secondary (dual wield),
   - оставлены только две кнопки сохранения: `Save to Global (OrcOutFit.ini)` и `Save to skin (OrcOutFit\Weapons)`,
   - `Save to Global` сохраняет весь набор weapon cfg (primary+secondary) в глобальный INI; `Save to skin` — весь набор в `Weapons\<dff>.ini`.
+  - сохранение настроек больше не использует серии `WritePrivateProfileStringA`: INI-изменения собираются в памяти и записываются одним проходом через temp-файл и rename; глобальное сохранение оружия одновременно пишет актуальные `[Main]`, `[Features]`, `[SkinMode]` и weapon sections.
 - Кастомные объекты:
   - скан `*.dff` в `OrcOutFit\Objects`,
   - отдельный `<name>.ini` на каждый объект; для каждого стандартного скина ped — секция `[Skin.<dff_name>]` (имя из `LoadPedObject`, без `object\other`).
@@ -137,7 +140,7 @@
   - `C:\Games\CODEX\WeaponsOutFit\OrcOutFit.sln`
 - Конфиг:
   - рядом с ASI: `OrcOutFit.ini`
-- Документация в корне репозитория: `context.md`, `README.md`, `README.txt`; журнал `.claude\work.md` и правила `.cursor\rules\` — только локально (не в Git).
+- Публичная документация в репозитории: `README.md`. Локальные заметки/правила: `context.md`, `README.txt`, `AGENTS.md`, журнал `.claude\work.md` и правила `.cursor\rules\` — только локально; публиковать их можно только по явному запросу пользователя или при строгой необходимости для публичной сборки.
 
 ## Ключевые offsets и адреса (GTA SA 1.0 US)
 
@@ -180,6 +183,8 @@
 - Целевая конфигурация:
   - `Release | Win32` в `.vcxproj`; в `.sln` платформа называется **`x86`** (маппится на `Win32`).
   - Пример: `MSBuild.exe OrcOutFit.sln /p:Configuration=Release /p:Platform=x86`
+  - локально используется `PlatformToolset=v145` из `OrcOutFit.vcxproj`;
+  - CI не должен наследовать локальный `v145`: workflow явно передаёт `PlatformToolset=v143`.
 - Ожидаемый выходной файл:
   - `C:\Games\CODEX\WeaponsOutFit\build\Release\OrcOutFit.asi`
 - GitHub Actions workflow:

@@ -29,6 +29,7 @@
 
 #include "orc_types.h"
 #include "orc_app.h"
+#include "orc_ini.h"
 #include "orc_log.h"
 #include "samp_bridge.h"
 #include "external/MinHook/include/MinHook.h"
@@ -40,21 +41,6 @@ static std::string TextureRemapToLowerAscii(std::string s) {
         if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
     }
     return s;
-}
-
-static void TextureRemapEnsureDirectoryExists(const char* fullDirPath) {
-    if (!fullDirPath || !fullDirPath[0]) return;
-    std::string path = fullDirPath;
-    for (char& c : path) {
-        if (c == '/') c = '\\';
-    }
-    for (size_t i = 0; i < path.size(); ++i) {
-        if (path[i] != '\\') continue;
-        std::string partial = path.substr(0, i);
-        if (partial.size() == 2 && partial[1] == ':') continue;
-        CreateDirectoryA(partial.c_str(), nullptr);
-    }
-    CreateDirectoryA(path.c_str(), nullptr);
 }
 
 static std::string TextureRemapFileStemForDff(const char* dffName, int modelId) {
@@ -730,35 +716,38 @@ bool OrcSaveLocalPedTextureRemapNickBinding(const char* nickCsv) {
 
     const char* dff = OrcTryGetPedModelNameById(state->modelId);
     const std::string path = TextureRemapIniPathForDff(dff, state->modelId);
-    TextureRemapEnsureDirectoryExists(g_gameTextureDir);
 
     const int nextId = GetPrivateProfileIntA("Main", "NextBindingId", 0, path.c_str());
     const int id = nextId;
     char nextBuf[32] = {};
     _snprintf_s(nextBuf, _TRUNCATE, "%d", nextId + 1);
-    WritePrivateProfileStringA("Main", "NextBindingId", nextBuf, path.c_str());
 
     char section[32] = {};
     _snprintf_s(section, _TRUNCATE, "Binding.%d", id);
-    WritePrivateProfileStringA(section, "Enabled", "1", path.c_str());
-    WritePrivateProfileStringA(section, "Nicks", nickCsv ? nickCsv : "", path.c_str());
+    std::vector<OrcIniValue> values;
+    values.push_back({ "Main", "NextBindingId", nextBuf });
+    values.push_back({ section, "Enabled", "1" });
+    values.push_back({ section, "Nicks", nickCsv ? nickCsv : "" });
 
     char countBuf[32] = {};
     _snprintf_s(countBuf, _TRUNCATE, "%d", state->slotCount);
-    WritePrivateProfileStringA(section, "SlotCount", countBuf, path.c_str());
+    values.push_back({ section, "SlotCount", countBuf });
 
     for (int i = 0; i < state->slotCount; ++i) {
         const TextureRemapSlotState& slot = state->slots[(size_t)i];
         char keyOriginal[32], keyRemap[32];
         _snprintf_s(keyOriginal, _TRUNCATE, "Slot%dOriginal", i);
         _snprintf_s(keyRemap, _TRUNCATE, "Slot%dRemap", i);
-        WritePrivateProfileStringA(section, keyOriginal, slot.originalName.c_str(), path.c_str());
+        values.push_back({ section, keyOriginal, slot.originalName });
 
         const char* remapName = "";
         if (slot.selected >= 0 && slot.selected < (int)slot.remapNames.size())
             remapName = slot.remapNames[(size_t)slot.selected].c_str();
-        WritePrivateProfileStringA(section, keyRemap, remapName, path.c_str());
+        values.push_back({ section, keyRemap, remapName });
     }
+
+    if (!OrcIniWriteValues(path.c_str(), "; OrcOutFit texture remap bindings.\n\n", values))
+        return false;
 
     const std::string key = TextureRemapDffKey(dff, state->modelId);
     g_textureRemapNickBindingsByDff.erase(key);
@@ -775,7 +764,7 @@ bool OrcDeleteLocalPedTextureRemapNickBinding(int bindingId) {
     const std::string path = TextureRemapIniPathForDff(dff, state->modelId);
     char section[32] = {};
     _snprintf_s(section, _TRUNCATE, "Binding.%d", bindingId);
-    if (!WritePrivateProfileStringA(section, nullptr, nullptr, path.c_str()))
+    if (!OrcIniDeleteSection(path.c_str(), section))
         return false;
 
     const std::string key = TextureRemapDffKey(dff, state->modelId);

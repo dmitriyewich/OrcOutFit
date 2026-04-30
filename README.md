@@ -1,9 +1,8 @@
 # OrcOutFit
 <img width="238" height="408" alt="kHKmcxq" src="https://github.com/user-attachments/assets/44e51b41-9600-4cb8-ae4e-611afc44ed08" />
-
 Нативный **ASI-плагин** для **GTA San Andreas 1.0 US** (x86), в том числе для **SA:MP**. Рисует оружие на теле педа, кастомные объекты и кастомные скины поверх модели, с настройкой через **ImGui**-оверлей и INI-файлы.
 
-**Репозиторий:** [github.com/dmitriyewich/OrcOutFit](https://github.com/dmitriyewich/OrcOutFit) — исходники, проект Visual Studio и файлы **`README.md`**, **`README.txt`**, **`context.md`**. Журнал агента (`.claude/work.md`) и правила Cursor остаются локальными.
+**Репозиторий:** [github.com/dmitriyewich/OrcOutFit](https://github.com/dmitriyewich/OrcOutFit) — исходники, `.github/workflows`, профиль сборки Visual Studio и **`README.md`**. `context.md`, `README.txt`, `AGENTS.md`, журнал агента (`.claude/work.md`) и правила Cursor остаются локальными; публиковать их можно только по явному запросу пользователя или при строгой необходимости для публичной сборки.
 
 ---
 
@@ -66,6 +65,7 @@
 - Во вкладке **Weapons** оставлены только две кнопки сохранения:
   - **Save to Global (`OrcOutFit.ini`)** — сохраняет весь набор оружия (primary + secondary) в глобальный INI.
   - **Save to skin (`OrcOutFit\Weapons`)** — сохраняет весь набор оружия (primary + secondary) в `Weapons\<dff>.ini`.
+- Сохранение INI выполняется пакетно: плагин собирает изменения в памяти и пишет файл одним проходом, чтобы не стопорить игру серией WinAPI INI-записей.
 - **Save to skin (`OrcOutFit\Weapons`)** недоступен только в **одиночной игре** для **дефолтного CJ** (`MODEL_PLAYER`); в SA:MP и после примерки другой модели сохранение доступно.
 - В редакторе оружия: **Copy/Paste** у `Show on body`.
 - В редакторах **Weapons** и **Objects** включён **live preview**: offset/rotation/scale применяются сразу в рендере без обязательного сохранения.
@@ -104,6 +104,7 @@
 ## Сборка
 
 - Visual Studio + **MSBuild**, платформа решения: **`x86`** (в `.vcxproj` — Win32).
+- Локальный проект использует `PlatformToolset=v145` (Visual Studio 18). В GitHub Actions сборка намеренно переопределяется на `PlatformToolset=v143`, потому что `windows-latest` предоставляет v143 build tools.
 
 ```bat
 "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OrcOutFit.sln /p:Configuration=Release /p:Platform=x86
@@ -117,7 +118,7 @@
 
 - Workflow: **`.github/workflows/build-release-win32.yml`**.
 - Триггеры: ручной запуск (`workflow_dispatch`) и публикация релиза (`release.published`).
-- Сборка в CI: сначала `source/external/plugin-sdk/plugin_sa/Plugin_SA.vcxproj` (`Release|Win32`, `PlatformToolset=v143`) для `Plugin.lib`, затем `OrcOutFit.sln` (`Release|x86`, `PlatformToolset=v143`).
+- Сборка в CI: сначала `source/external/plugin-sdk/plugin_sa/Plugin_SA.vcxproj` (`Release|Win32`, `PlatformToolset=v143`) для `Plugin.lib`, затем `OrcOutFit.sln` (`Release|x86`, `PlatformToolset=v143`). Это намеренно отличается от локального `v145`.
 - Публикация:
   - workflow artifact: `OrcOutFit-Release-Win32`;
   - release asset: `build/Release/OrcOutFit.asi`.

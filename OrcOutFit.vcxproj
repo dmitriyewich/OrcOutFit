@@ -98,6 +98,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />
+    <ClCompile Include="source\orc_ini.cpp" />
     <ClCompile Include="source\orc_log.cpp" />
     <ClCompile Include="source\orc_texture_remap.cpp" />
     <ClCompile Include="source\orc_ui.cpp" />

@@ -249,7 +249,6 @@ void OrcUiDraw() {
             ImGui::Separator();
             if (ImGui::Button("Save main / features", ImVec2(-FLT_MIN, 0))) {
                 SaveMainIni();
-                SaveSkinModeIni();
                 RefreshActivationRouting();
                 OrcLogInfo("UI: saved main INI + skin mode flags");
             }

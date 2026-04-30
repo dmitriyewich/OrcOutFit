@@ -61,3 +61,6 @@ Desktop.ini
 # Local / agent-only (see .cursor/rules/orcoutfit-workflow.mdc)
 .claude/
 .cursor/rules/
+AGENTS.md
+context.md
+README.txt
