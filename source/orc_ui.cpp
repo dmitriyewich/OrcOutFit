@@ -7,6 +7,7 @@
 #include "samp_bridge.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "eWeaponType.h"
 #include "ePedType.h"
 #include "eModelID.h"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -75,16 +77,25 @@ static float UiControlWidth(float avail) {
     return std::min(maxWidth, std::max(minWidth, avail * 0.48f));
 }
 
+static float UiEdgeGutter() {
+    return std::max(4.0f, UiScaled(6.0f));
+}
+
+static float UiContentWidth() {
+    return std::max(1.0f, ImGui::GetContentRegionAvail().x - UiEdgeGutter());
+}
+
+static bool UiButtonFullWidth(const char* label) {
+    return ImGui::Button(label, ImVec2(UiContentWidth(), 0.0f));
+}
+
 static bool UiBeginControlRowEx(const char* id, const char* label, float* outControlWidth = nullptr) {
     ImGui::PushID(id);
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float avail = UiContentWidth();
     const float controlW = UiControlWidth(avail);
-    const float labelW = std::max(UiScaled(112.0f), avail - controlW - spacing);
-    if (outControlWidth)
-        *outControlWidth = controlW;
+    const float labelW = std::max(1.0f, avail - controlW);
 
-    if (!ImGui::BeginTable("##control_row", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
+    if (!ImGui::BeginTable("##control_row", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings, ImVec2(avail, 0.0f))) {
         ImGui::PopID();
         return false;
     }
@@ -93,11 +104,14 @@ static bool UiBeginControlRowEx(const char* id, const char* label, float* outCon
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
     ImGui::AlignTextToFramePadding();
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + labelW);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
     ImGui::TextUnformatted(label);
     ImGui::PopTextWrapPos();
     ImGui::TableSetColumnIndex(1);
-    ImGui::SetNextItemWidth(controlW);
+    const float innerControlW = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    if (outControlWidth)
+        *outControlWidth = innerControlW;
+    ImGui::SetNextItemWidth(innerControlW);
     return true;
 }
 
@@ -112,10 +126,10 @@ static void UiEndControlRow() {
 
 static void UiBeginWideControl(const char* id, const char* label) {
     ImGui::PushID(id);
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + UiContentWidth());
     ImGui::TextUnformatted(label);
     ImGui::PopTextWrapPos();
-    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::SetNextItemWidth(UiContentWidth());
 }
 
 static void UiEndWideControl() {
@@ -230,7 +244,7 @@ static void UiButtonPair(const char* first, const char* second, bool* firstClick
 
     const ImGuiStyle& style = ImGui::GetStyle();
     const float spacing = style.ItemSpacing.x;
-    const float avail = ImGui::GetContentRegionAvail().x;
+    const float avail = UiContentWidth();
     const float halfWidth = (avail - spacing) * 0.5f;
     const bool fitsInline = UiButtonTextFits(first, halfWidth) && UiButtonTextFits(second, halfWidth);
 
@@ -243,9 +257,9 @@ static void UiButtonPair(const char* first, const char* second, bool* firstClick
         return;
     }
 
-    if (ImGui::Button(first, ImVec2(-FLT_MIN, 0.0f)))
+    if (UiButtonFullWidth(first))
         *firstClicked = true;
-    if (ImGui::Button(second, ImVec2(-FLT_MIN, 0.0f)))
+    if (UiButtonFullWidth(second))
         *secondClicked = true;
 }
 
@@ -254,6 +268,7 @@ static bool g_mainWindowInitialized = false;
 static ImVec2 g_mainWindowPos(60.0f, 40.0f);
 static ImVec2 g_mainWindowSize(410.0f, 680.0f);
 static float g_mainWindowAppliedScale = 1.0f;
+static bool g_mainWindowApplyRect = true;
 
 static void GetMainWindowLimits(const ImVec2& displaySize, float scale, ImVec2& minSize, ImVec2& maxSize) {
     const float margin = kMainWindowMargin * scale;
@@ -288,6 +303,34 @@ static void ClampMainWindowRect(const ImVec2& displaySize, ImVec2& position, ImV
     } else {
         position.y = std::max(0.0f, (displaySize.y - size.y) * 0.5f);
     }
+}
+
+static bool UiVec2Changed(const ImVec2& before, const ImVec2& after, float epsilon = 0.5f) {
+    return std::fabs(before.x - after.x) > epsilon || std::fabs(before.y - after.y) > epsilon;
+}
+
+static bool ClampActiveMainWindowDrag(const ImVec2& displaySize, ImVec2& position, ImVec2& size, float scale) {
+    ImGuiContext* context = ImGui::GetCurrentContext();
+    if (!context || !context->MovingWindow || displaySize.x <= 0.0f || displaySize.y <= 0.0f)
+        return false;
+
+    ImGuiWindow* movingWindow = context->MovingWindow->RootWindow ? context->MovingWindow->RootWindow : context->MovingWindow;
+    if (!movingWindow || context->ActiveId != movingWindow->MoveId || !context->IO.MouseDown[ImGuiMouseButton_Left])
+        return false;
+    if (!movingWindow->Name || std::strcmp(movingWindow->Name, T(OrcTextId::WindowTitle)) != 0)
+        return false;
+
+    ImVec2 targetPos(
+        context->IO.MousePos.x - context->ActiveIdClickOffset.x,
+        context->IO.MousePos.y - context->ActiveIdClickOffset.y);
+    ImVec2 targetSize = movingWindow->SizeFull;
+    if (targetSize.x <= 0.0f || targetSize.y <= 0.0f)
+        targetSize = size;
+
+    ClampMainWindowRect(displaySize, targetPos, targetSize, scale);
+    position = targetPos;
+    size = targetSize;
+    return true;
 }
 
 static std::string LowerAsciiUi(std::string s) {
@@ -330,7 +373,7 @@ static void WeaponFilterEditorParams(CustomObjectSkinParams& obj) {
     UiCheckbox("obj_hide_weapons", T(OrcTextId::HideSelectedWeapons), &obj.hideSelectedWeapons);
 
     const float childH = UiScaled(140.0f);
-    if (ImGui::BeginChild("##obj_weapon_filter_list", ImVec2(-FLT_MIN, childH), true)) {
+    if (ImGui::BeginChild("##obj_weapon_filter_list", ImVec2(UiContentWidth(), childH), true)) {
         for (int wt : g_availableWeaponTypes) {
             if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
             if (!g_cfg[wt].name) continue;
@@ -352,7 +395,7 @@ static void WeaponFilterEditorParams(CustomObjectSkinParams& obj) {
     }
     ImGui::EndChild();
 
-    if (ImGui::Button(T(OrcTextId::ClearWeaponSelection), ImVec2(-FLT_MIN, 0))) {
+    if (UiButtonFullWidth(T(OrcTextId::ClearWeaponSelection))) {
         obj.weaponTypes.clear();
     }
 }
@@ -403,6 +446,7 @@ void OrcUiDraw() {
     ImVec2 minSize;
     ImVec2 maxSize;
     GetMainWindowLimits(io.DisplaySize, uiScale, minSize, maxSize);
+    bool applyWindowRect = g_mainWindowApplyRect;
     if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
         if (!g_mainWindowInitialized) {
             const float margin = kMainWindowMargin * uiScale;
@@ -412,6 +456,7 @@ void OrcUiDraw() {
             g_mainWindowPos.y = std::max(margin, UiScaled(40.0f));
             g_mainWindowInitialized = true;
             g_mainWindowAppliedScale = uiScale;
+            applyWindowRect = true;
         } else if (std::fabs(uiScale - g_mainWindowAppliedScale) > 0.001f) {
             const float ratio = uiScale / std::max(g_mainWindowAppliedScale, 0.001f);
             g_mainWindowPos.x *= ratio;
@@ -419,28 +464,43 @@ void OrcUiDraw() {
             g_mainWindowSize.x *= ratio;
             g_mainWindowSize.y *= ratio;
             g_mainWindowAppliedScale = uiScale;
+            applyWindowRect = true;
         }
 
+        const ImVec2 beforeClampPos = g_mainWindowPos;
+        const ImVec2 beforeClampSize = g_mainWindowSize;
         ClampMainWindowRect(io.DisplaySize, g_mainWindowPos, g_mainWindowSize, uiScale);
+        applyWindowRect = applyWindowRect || UiVec2Changed(beforeClampPos, g_mainWindowPos) || UiVec2Changed(beforeClampSize, g_mainWindowSize);
+        if (ClampActiveMainWindowDrag(io.DisplaySize, g_mainWindowPos, g_mainWindowSize, uiScale))
+            applyWindowRect = true;
     }
 
-    ImGui::SetNextWindowPos(g_mainWindowPos, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(g_mainWindowSize, ImGuiCond_Always);
+    if (applyWindowRect) {
+        ImGui::SetNextWindowPos(g_mainWindowPos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(g_mainWindowSize, ImGuiCond_Always);
+        g_mainWindowApplyRect = false;
+    }
     ImGui::SetNextWindowSizeConstraints(minSize, maxSize);
 
     bool open = true;
     const ImGuiWindowFlags wflags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
     if (!ImGui::Begin(T(OrcTextId::WindowTitle), &open, wflags)) {
-        g_mainWindowPos = ImGui::GetWindowPos();
-        g_mainWindowSize = ImGui::GetWindowSize();
+        const ImVec2 actualPos = ImGui::GetWindowPos();
+        const ImVec2 actualSize = ImGui::GetWindowSize();
+        g_mainWindowPos = actualPos;
+        g_mainWindowSize = actualSize;
         ClampMainWindowRect(io.DisplaySize, g_mainWindowPos, g_mainWindowSize, uiScale);
+        g_mainWindowApplyRect = UiVec2Changed(actualPos, g_mainWindowPos) || UiVec2Changed(actualSize, g_mainWindowSize);
         ImGui::End();
         if (!open) overlay::SetOpen(false);
         return;
     }
-    g_mainWindowPos = ImGui::GetWindowPos();
-    g_mainWindowSize = ImGui::GetWindowSize();
+    const ImVec2 actualPos = ImGui::GetWindowPos();
+    const ImVec2 actualSize = ImGui::GetWindowSize();
+    g_mainWindowPos = actualPos;
+    g_mainWindowSize = actualSize;
     ClampMainWindowRect(io.DisplaySize, g_mainWindowPos, g_mainWindowSize, uiScale);
+    g_mainWindowApplyRect = UiVec2Changed(actualPos, g_mainWindowPos) || UiVec2Changed(actualSize, g_mainWindowSize);
     if (!open) overlay::SetOpen(false);
 
     if (ImGui::BeginTabBar("OrcOutFitTabs", ImGuiTabBarFlags_None)) {
@@ -489,7 +549,7 @@ void OrcUiDraw() {
             ImGui::TextDisabled("%s", OrcLogGetPath());
 
             ImGui::Separator();
-            if (ImGui::Button(T(OrcTextId::SaveMainFeatures), ImVec2(-FLT_MIN, 0))) {
+            if (UiButtonFullWidth(T(OrcTextId::SaveMainFeatures))) {
                 SaveMainIni();
                 RefreshActivationRouting();
                 OrcLogInfo("UI: saved main INI + skin mode flags");
@@ -559,7 +619,7 @@ void OrcUiDraw() {
                     }
                     UiEndControlRow();
                 }
-                if (ImGui::Button(T(OrcTextId::WearThisSkin), ImVec2(-FLT_MIN, 0))) {
+                if (UiButtonFullWidth(T(OrcTextId::WearThisSkin))) {
                     OrcApplyLocalPlayerModelById(cur.second);
                     SyncWeaponUiBuffersFromSkinPick();
                 }
@@ -584,7 +644,6 @@ void OrcUiDraw() {
             const int activeCount2 = (int)g_uiWeapon2.size();
 
             ImGui::Separator();
-            ImGui::PushItemWidth(-FLT_MIN);
             static bool g_uiWeaponSecondary = false;
             struct WeaponCopyBuf {
                 bool valid = false;
@@ -683,7 +742,6 @@ void OrcUiDraw() {
             const bool canEdit = (editingArr != nullptr && g_uiWeaponIdx >= 0 && g_uiWeaponIdx < editingCount);
             if (!canEdit) {
                 ImGui::TextDisabled("%s", T(OrcTextId::WeaponEditorUnavailable));
-                ImGui::PopItemWidth();
             } else {
                 auto& c = editingArr[g_uiWeaponIdx];
                 UiCheckbox("show_on_body", T(OrcTextId::ShowOnBody), &c.enabled);
@@ -727,10 +785,9 @@ void OrcUiDraw() {
                 if (UiDragFloat("wrz", T(OrcTextId::RotationZ), &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) c.rz = rzd * D2R;
 
                 UiDragFloat("wsc", T(OrcTextId::Scale), &c.scale, 0.01f, 0.05f, 10.0f, "%.3f");
-                ImGui::PopItemWidth();
 
                 ImGui::Separator();
-                if (ImGui::Button(T(OrcTextId::SaveToGlobal), ImVec2(-FLT_MIN, 0))) {
+                if (UiButtonFullWidth(T(OrcTextId::SaveToGlobal))) {
                     g_cfg = g_uiWeapon1;
                     g_cfg2 = g_uiWeapon2;
                     SaveAllWeaponsToIniFile(g_iniPath, g_cfg, g_cfg2);
@@ -749,7 +806,7 @@ void OrcUiDraw() {
                 if (blockSkinSave) {
                     ImGui::TextDisabled("%s", T(OrcTextId::PerSkinPresetDisabledForCj));
                 } else if (!pedSkins.empty()) {
-                    if (ImGui::Button(T(OrcTextId::SaveToSkinWeapons), ImVec2(-FLT_MIN, 0))) {
+                    if (UiButtonFullWidth(T(OrcTextId::SaveToSkinWeapons))) {
                         const std::string& dff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
                         char outPath[MAX_PATH];
                         _snprintf_s(outPath, _TRUNCATE, "%s\\%s.ini", g_gameWeaponsDir, dff.c_str());
@@ -789,13 +846,12 @@ void OrcUiDraw() {
                 g_livePreviewObjectIniPath.clear();
                 g_livePreviewObjectSkinDff.clear();
                 ImGui::TextDisabled("%s", T(OrcTextId::NoDffObjectsFolder));
-                if (ImGui::Button(T(OrcTextId::Rescan), ImVec2(-FLT_MIN, 0)))
+                if (UiButtonFullWidth(T(OrcTextId::Rescan)))
                     DiscoverCustomObjectsAndEnsureIni();
             } else {
                 if (g_uiCustomIdx < 0 || g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
                 auto& obj = g_customObjects[g_uiCustomIdx];
 
-                ImGui::PushItemWidth(-FLT_MIN);
                 char oprev[160];
                 _snprintf_s(oprev, _TRUNCATE, "%s [%d/%d]", obj.name.c_str(), g_uiCustomIdx + 1, (int)g_customObjects.size());
                 if (UiBeginControlRow("objpick", T(OrcTextId::Object))) {
@@ -887,20 +943,19 @@ void OrcUiDraw() {
 
                 UiDragFloat("osc", T(OrcTextId::Scale), &g_uiObjParams.scale, 0.01f, 0.05f, 10.0f, "%.3f");
                 UiDragFloat3("oscxyz", T(OrcTextId::ScaleXyz), &g_uiObjParams.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
-                ImGui::PopItemWidth();
 
                 WeaponFilterEditorParams(g_uiObjParams);
 
                 ImGui::Separator();
                 if (!pedSkins.empty()) {
-                    if (ImGui::Button(T(OrcTextId::SaveSkinSectionToObjectIni), ImVec2(-FLT_MIN, 0))) {
+                    if (UiButtonFullWidth(T(OrcTextId::SaveSkinSectionToObjectIni))) {
                         SaveObjectSkinParamsToIni(obj.iniPath.c_str(), pedSkins[(size_t)g_uiObjSkinListIdx].first.c_str(), g_uiObjParams);
                         g_livePreviewObjectActive = false;
                         g_livePreviewObjectIniPath.clear();
                         g_livePreviewObjectSkinDff.clear();
                     }
                 }
-                if (ImGui::Button(T(OrcTextId::RescanObjectsFolder), ImVec2(-FLT_MIN, 0))) {
+                if (UiButtonFullWidth(T(OrcTextId::RescanObjectsFolder))) {
                     DiscoverCustomObjectsAndEnsureIni();
                     if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
                     g_uiObjParamsLoaded = false;
@@ -936,7 +991,6 @@ void OrcUiDraw() {
                         ImGui::TextDisabled("%s", T(OrcTextId::NoDffSkinsFolder));
                     } else {
                         if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
-                        ImGui::PushItemWidth(-FLT_MIN);
                         char previewSkin[160];
                         _snprintf_s(previewSkin, _TRUNCATE, "%s [%d/%d]", g_customSkins[g_uiSkinIdx].name.c_str(), g_uiSkinIdx + 1, (int)g_customSkins.size());
                         if (UiBeginControlRow("skinpick", T(OrcTextId::Skin))) {
@@ -969,8 +1023,7 @@ void OrcUiDraw() {
                             InvalidateCustomSkinLookupCache();
                         }
                         ImGui::EndDisabled();
-                        ImGui::PopItemWidth();
-                        if (ImGui::Button(T(OrcTextId::SaveSkinIni), ImVec2(-FLT_MIN, 0))) {
+                        if (UiButtonFullWidth(T(OrcTextId::SaveSkinIni))) {
                             skin.nickListCsv = g_uiSkinNickBuf;
                             skin.nicknames = ParseNickCsv(skin.nickListCsv);
                             InvalidateCustomSkinLookupCache();
@@ -1003,7 +1056,6 @@ void OrcUiDraw() {
                         g_skinTextureRemapRandomMode > TEXTURE_REMAP_RANDOM_LINKED_VARIANT) {
                         g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
                     }
-                    ImGui::PushItemWidth(-FLT_MIN);
                     if (UiBeginControlRow("texture_random_mode", T(OrcTextId::RandomMode))) {
                         if (ImGui::BeginCombo("##value", T(randomModeNames[g_skinTextureRemapRandomMode]))) {
                             for (int i = TEXTURE_REMAP_RANDOM_PER_TEXTURE; i <= TEXTURE_REMAP_RANDOM_LINKED_VARIANT; ++i) {
@@ -1014,9 +1066,8 @@ void OrcUiDraw() {
                         }
                         UiEndControlRow();
                     }
-                    ImGui::PopItemWidth();
                     ImGui::TextWrapped("%s", T(OrcTextId::TextureRemapHint));
-                    if (ImGui::Button(T(OrcTextId::SaveTextureSettings), ImVec2(-FLT_MIN, 0)))
+                    if (UiButtonFullWidth(T(OrcTextId::SaveTextureSettings)))
                         SaveSkinModeIni();
 
                     ImGui::Separator();
@@ -1042,7 +1093,6 @@ void OrcUiDraw() {
                         if (localInfo.slots.empty()) {
                             ImGui::TextDisabled("%s", T(OrcTextId::NoRemapTexturesFound));
                         } else {
-                            ImGui::PushItemWidth(-FLT_MIN);
                             for (int i = 0; i < (int)localInfo.slots.size(); ++i) {
                                 const TextureRemapSlotInfo& slot = localInfo.slots[(size_t)i];
 
@@ -1070,13 +1120,10 @@ void OrcUiDraw() {
                                     UiEndControlRow();
                                 }
                             }
-                            ImGui::PopItemWidth();
                         }
 
                         ImGui::Separator();
-                        ImGui::PushItemWidth(-FLT_MIN);
                         UiInputTextWithHint("texturenicks", T(OrcTextId::NickBinding), T(OrcTextId::NickPlaceholder), g_uiTextureNickBuf, IM_ARRAYSIZE(g_uiTextureNickBuf));
-                        ImGui::PopItemWidth();
                         bool saveBind = false, reloadBind = false;
                         UiButtonPair(T(OrcTextId::SaveCurrentTextureBinding), T(OrcTextId::ReloadTextureBindings), &saveBind, &reloadBind);
                         if (saveBind)
@@ -1108,7 +1155,7 @@ void OrcUiDraw() {
                     std::vector<TextureRemapPedInfo> known;
                     OrcCollectPedTextureRemapStats(known);
                     ImGui::Text("%s", OrcFormat(OrcTextId::KnownRemapPedModelsFormat, (int)known.size()).c_str());
-                    if (!known.empty() && ImGui::BeginChild("##texture_known_models", ImVec2(-FLT_MIN, UiScaled(110.0f)), true)) {
+                    if (!known.empty() && ImGui::BeginChild("##texture_known_models", ImVec2(UiContentWidth(), UiScaled(110.0f)), true)) {
                         for (const auto& info : known) {
                             const char* dff = info.dffName.empty() ? "?" : info.dffName.c_str();
                             ImGui::Text("%s", OrcFormat(
@@ -1185,7 +1232,7 @@ void OrcUiDraw() {
                 RefreshActivationRouting();
 
             ImGui::Separator();
-            if (ImGui::Button(T(OrcTextId::SaveSettings), ImVec2(-FLT_MIN, 0))) {
+            if (UiButtonFullWidth(T(OrcTextId::SaveSettings))) {
                 SaveMainIni();
                 RefreshActivationRouting();
                 OrcLogInfo("UI: saved settings");
