@@ -7,10 +7,17 @@
     X(Language, "Язык", "Language") \
     X(LanguageRussian, "Русский", "Russian") \
     X(LanguageEnglish, "English", "English") \
+    X(Interface, "Интерфейс", "Interface") \
+    X(UiAutoScale, "Автомасштаб интерфейса", "Auto-scale UI") \
+    X(UiScale, "Масштаб интерфейса", "UI scale") \
+    X(UiFontSize, "Размер шрифта", "Font size") \
+    X(Activation, "Активация меню", "Menu activation") \
+    X(SaveSettings, "Сохранить настройки", "Save settings") \
     X(TabMain, "Главная", "Main") \
     X(TabWeapons, "Оружие", "Weapons") \
     X(TabObjects, "Объекты", "Objects") \
     X(TabSkins, "Скины", "Skins") \
+    X(TabSettings, "Настройки", "Settings") \
     X(TabCustomSkins, "Кастомные скины", "Custom skins") \
     X(TabTexture, "Текстуры", "Texture") \
     X(BoneNone, "(нет)", "(none)") \
@@ -42,6 +49,7 @@
     X(ClearWeaponSelection, "Очистить выбор оружия", "Clear weapon selection") \
     X(PluginEnabled, "Плагин включен", "Plugin enabled") \
     X(ToggleKey, "Клавиша меню (SP / опционально SA:MP)", "Toggle key (SP / optional in SA:MP)") \
+    X(ToggleKeyHelp, "Допустимые значения: F1..F12, A..Z, 0..9 или числовой VK-код 1..255. В SA:MP клавиша работает только если включена опция ниже; иначе используйте чат-команду.", "Accepted values: F1..F12, A..Z, 0..9, or numeric VK code 1..255. In SA:MP the key works only when the option below is enabled; otherwise use the chat command.") \
     X(ChatCommand, "Команда чата (SA:MP)", "Chat command (SA:MP)") \
     X(SampAllowToggleKey, "SA:MP: также разрешить клавишу меню", "SA:MP: also allow toggle key") \
     X(Features, "Функции", "Features") \

@@ -16,6 +16,8 @@ void Toggle();
 void SetToggleVirtualKey(int vk);
 int  GetToggleVirtualKey();
 void SetHotkeyEnabled(bool enabled);
+float GetCurrentUiScale();
+float GetCurrentUiAutoScale();
 
 void SetDrawCallback(DrawFn);
 

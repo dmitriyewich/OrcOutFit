@@ -58,18 +58,31 @@ static const char* T(OrcTextId id) {
     return OrcText(id);
 }
 
+static float UiLayoutScale() {
+    const float scale = overlay::GetCurrentUiScale();
+    if (!std::isfinite(scale) || scale <= 0.0f)
+        return 1.0f;
+    return std::max(0.70f, scale);
+}
+
+static float UiScaled(float value) {
+    return value * UiLayoutScale();
+}
+
 static float UiControlWidth(float avail) {
-    const float minWidth = 150.0f;
-    const float maxWidth = 260.0f;
+    const float minWidth = UiScaled(138.0f);
+    const float maxWidth = UiScaled(240.0f);
     return std::min(maxWidth, std::max(minWidth, avail * 0.48f));
 }
 
-static bool UiBeginControlRow(const char* id, const char* label) {
+static bool UiBeginControlRowEx(const char* id, const char* label, float* outControlWidth = nullptr) {
     ImGui::PushID(id);
     const float avail = ImGui::GetContentRegionAvail().x;
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float controlW = UiControlWidth(avail);
-    const float labelW = std::max(120.0f, avail - controlW - spacing);
+    const float labelW = std::max(UiScaled(112.0f), avail - controlW - spacing);
+    if (outControlWidth)
+        *outControlWidth = controlW;
 
     if (!ImGui::BeginTable("##control_row", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
         ImGui::PopID();
@@ -86,6 +99,10 @@ static bool UiBeginControlRow(const char* id, const char* label) {
     ImGui::TableSetColumnIndex(1);
     ImGui::SetNextItemWidth(controlW);
     return true;
+}
+
+static bool UiBeginControlRow(const char* id, const char* label) {
+    return UiBeginControlRowEx(id, label, nullptr);
 }
 
 static void UiEndControlRow() {
@@ -129,6 +146,35 @@ static bool UiInputText(const char* id, const char* label, char* buffer, size_t 
     return changed;
 }
 
+static void UiHelpMarker(const char* tooltip) {
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        if (ImGui::BeginTooltip()) {
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted(tooltip);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    }
+}
+
+static bool UiInputTextWithHelp(const char* id, const char* label, const char* tooltip, char* buffer, size_t bufferSize, ImGuiInputTextFlags flags = 0) {
+    float controlW = 0.0f;
+    if (!UiBeginControlRowEx(id, label, &controlW))
+        return false;
+
+    const char* marker = "(?)";
+    const float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+    const float markerW = ImGui::CalcTextSize(marker).x;
+    const float inputW = std::max(UiScaled(72.0f), controlW - spacing - markerW);
+    ImGui::SetNextItemWidth(inputW);
+    const bool changed = ImGui::InputText("##value", buffer, bufferSize, flags);
+    ImGui::SameLine(0.0f, spacing);
+    UiHelpMarker(tooltip);
+    UiEndControlRow();
+    return changed;
+}
+
 static bool UiInputTextWithHint(const char* id, const char* label, const char* hint, char* buffer, size_t bufferSize, ImGuiInputTextFlags flags = 0) {
     if (!UiBeginControlRow(id, label))
         return false;
@@ -148,6 +194,13 @@ static bool UiInputInt(const char* id, const char* label, int* value, int step, 
 static bool UiSliderFloat(const char* id, const char* label, float* value, float minValue, float maxValue, const char* format, ImGuiSliderFlags flags = 0) {
     UiBeginWideControl(id, label);
     const bool changed = ImGui::SliderFloat("##value", value, minValue, maxValue, format, flags);
+    UiEndWideControl();
+    return changed;
+}
+
+static bool UiSliderInt(const char* id, const char* label, int* value, int minValue, int maxValue, const char* format, ImGuiSliderFlags flags = 0) {
+    UiBeginWideControl(id, label);
+    const bool changed = ImGui::SliderInt("##value", value, minValue, maxValue, format, flags);
     UiEndWideControl();
     return changed;
 }
@@ -196,6 +249,38 @@ static void UiButtonPair(const char* first, const char* second, bool* firstClick
         *secondClicked = true;
 }
 
+static void ClampCurrentWindowToDisplay() {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f)
+        return;
+
+    const float pad = 0.0f;
+    const ImVec2 maxSize(std::max(1.0f, io.DisplaySize.x), std::max(1.0f, io.DisplaySize.y));
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const ImVec2 size = ImGui::GetWindowSize();
+    const ImVec2 clampedSize(std::min(size.x, maxSize.x), std::min(size.y, maxSize.y));
+    if (std::fabs(clampedSize.x - size.x) > 0.5f || std::fabs(clampedSize.y - size.y) > 0.5f)
+        ImGui::SetWindowSize(clampedSize, ImGuiCond_Always);
+
+    ImVec2 clamped = pos;
+    if (clampedSize.x + pad * 2.0f <= io.DisplaySize.x) {
+        const float maxX = std::max(pad, io.DisplaySize.x - clampedSize.x - pad);
+        clamped.x = std::min(maxX, std::max(pad, clamped.x));
+    } else {
+        clamped.x = pad;
+    }
+
+    if (clampedSize.y + pad * 2.0f <= io.DisplaySize.y) {
+        const float maxY = std::max(pad, io.DisplaySize.y - clampedSize.y - pad);
+        clamped.y = std::min(maxY, std::max(pad, clamped.y));
+    } else {
+        clamped.y = pad;
+    }
+
+    if (std::fabs(clamped.x - pos.x) > 0.5f || std::fabs(clamped.y - pos.y) > 0.5f)
+        ImGui::SetWindowPos(clamped, ImGuiCond_Always);
+}
+
 static std::string LowerAsciiUi(std::string s) {
     for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
     return s;
@@ -235,7 +320,7 @@ static void WeaponFilterEditorParams(CustomObjectSkinParams& obj) {
 
     UiCheckbox("obj_hide_weapons", T(OrcTextId::HideSelectedWeapons), &obj.hideSelectedWeapons);
 
-    const float childH = 150.0f;
+    const float childH = UiScaled(140.0f);
     if (ImGui::BeginChild("##obj_weapon_filter_list", ImVec2(-FLT_MIN, childH), true)) {
         for (int wt : g_availableWeaponTypes) {
             if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
@@ -305,11 +390,19 @@ static void TryInitWeaponSkinListToLocalPed() {
 
 void OrcUiDraw() {
     ImGuiIO& io = ImGui::GetIO();
-    const float winW = 440.0f;
-    const float winH = 720.0f;
+    const float marginX = UiScaled(16.0f);
+    const float marginY = UiScaled(24.0f);
+    const float maxW = std::max(1.0f, io.DisplaySize.x - marginX);
+    const float maxH = std::max(1.0f, io.DisplaySize.y - marginY);
+    const float winW = std::min(UiScaled(410.0f), maxW);
+    const float winH = std::min(UiScaled(680.0f), maxH);
+    const float minW = std::min(UiScaled(340.0f), maxW);
+    const float minH = std::min(UiScaled(520.0f), maxH);
     ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(380.0f, 620.0f), ImVec2(io.DisplaySize.x - 16.0f, io.DisplaySize.y - 24.0f));
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - winW - 20.0f, 48.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(minW, minH), ImVec2(maxW, maxH));
+    ImGui::SetNextWindowPos(
+        ImVec2(std::max(UiScaled(8.0f), io.DisplaySize.x - winW - UiScaled(18.0f)), UiScaled(40.0f)),
+        ImGuiCond_FirstUseEver);
 
     bool open = true;
     const ImGuiWindowFlags wflags = ImGuiWindowFlags_NoCollapse;
@@ -319,6 +412,7 @@ void OrcUiDraw() {
         return;
     }
     if (!open) overlay::SetOpen(false);
+    ClampCurrentWindowToDisplay();
 
     if (ImGui::BeginTabBar("OrcOutFitTabs", ImGuiTabBarFlags_None)) {
 
@@ -327,43 +421,6 @@ void OrcUiDraw() {
         // ------------------------------------------------------------------
         if (ImGui::BeginTabItem(T(OrcTextId::TabMain))) {
             UiCheckbox("plugin_enabled", T(OrcTextId::PluginEnabled), &g_enabled);
-            const OrcUiLanguage languages[] = { OrcUiLanguage::Russian, OrcUiLanguage::English };
-            if (UiBeginControlRow("language", T(OrcTextId::Language))) {
-                if (ImGui::BeginCombo("##value", OrcLanguageDisplayName(g_orcUiLanguage))) {
-                    for (OrcUiLanguage language : languages) {
-                        const bool selected = language == g_orcUiLanguage;
-                        if (ImGui::Selectable(OrcLanguageDisplayName(language), selected)) {
-                            g_orcUiLanguage = language;
-                            SaveMainIni();
-                        }
-                        if (selected)
-                            ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-                UiEndControlRow();
-            }
-            ImGui::PushItemWidth(-FLT_MIN);
-            static char actKeyBuf[32] = "F7";
-            static bool actKeyBufInited = false;
-            if (!actKeyBufInited) {
-                _snprintf_s(actKeyBuf, _TRUNCATE, "%s", VkToString(g_activationVk));
-                actKeyBufInited = true;
-            }
-            if (UiInputText("actkey", T(OrcTextId::ToggleKey), actKeyBuf, sizeof(actKeyBuf), ImGuiInputTextFlags_CharsNoBlank))
-            {
-                g_activationVk = ParseActivationVk(actKeyBuf);
-                RefreshActivationRouting();
-            }
-
-            static char cmdBuf[96] = {};
-            if (cmdBuf[0] == 0) _snprintf_s(cmdBuf, _TRUNCATE, "%s", g_toggleCommand.c_str());
-            if (UiInputText("cmd", T(OrcTextId::ChatCommand), cmdBuf, sizeof(cmdBuf))) {
-                g_toggleCommand = cmdBuf;
-                if (!g_toggleCommand.empty() && g_toggleCommand[0] != '/') g_toggleCommand.insert(g_toggleCommand.begin(), '/');
-            }
-            if (UiCheckbox("samp_allow_toggle_key", T(OrcTextId::SampAllowToggleKey), &g_sampAllowActivationKey))
-                RefreshActivationRouting();
 
             ImGui::Separator();
             ImGui::TextUnformatted(T(OrcTextId::Features));
@@ -401,7 +458,6 @@ void OrcUiDraw() {
                 UiEndControlRow();
             }
             ImGui::TextDisabled("%s", OrcLogGetPath());
-            ImGui::PopItemWidth();
 
             ImGui::Separator();
             if (ImGui::Button(T(OrcTextId::SaveMainFeatures), ImVec2(-FLT_MIN, 0))) {
@@ -467,7 +523,7 @@ void OrcUiDraw() {
                                 ImDrawList* dl = ImGui::GetWindowDrawList();
                                 const ImVec2 mn = ImGui::GetItemRectMin();
                                 const ImVec2 mx = ImGui::GetItemRectMax();
-                                dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
+                                dl->AddRectFilled(mn, ImVec2(mn.x + UiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
                             }
                         }
                         ImGui::EndCombo();
@@ -561,7 +617,7 @@ void OrcUiDraw() {
                             ImDrawList* dl = ImGui::GetWindowDrawList();
                             const ImVec2 mn = ImGui::GetItemRectMin();
                             const ImVec2 mx = ImGui::GetItemRectMax();
-                            dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
+                            dl->AddRectFilled(mn, ImVec2(mn.x + UiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
                         }
                         if (g_considerWeaponSkills && IsDualCapable(wt)) {
                             char lbl2[128];
@@ -572,7 +628,7 @@ void OrcUiDraw() {
                                 ImDrawList* dl = ImGui::GetWindowDrawList();
                                 const ImVec2 mn = ImGui::GetItemRectMin();
                                 const ImVec2 mx = ImGui::GetItemRectMax();
-                                dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
+                                dl->AddRectFilled(mn, ImVec2(mn.x + UiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
                             }
                         }
                     }
@@ -767,7 +823,7 @@ void OrcUiDraw() {
                                     ImDrawList* dl = ImGui::GetWindowDrawList();
                                     const ImVec2 mn = ImGui::GetItemRectMin();
                                     const ImVec2 mx = ImGui::GetItemRectMax();
-                                    dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
+                                    dl->AddRectFilled(mn, ImVec2(mn.x + UiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
                                 }
                             }
                             ImGui::EndCombo();
@@ -1022,7 +1078,7 @@ void OrcUiDraw() {
                     std::vector<TextureRemapPedInfo> known;
                     OrcCollectPedTextureRemapStats(known);
                     ImGui::Text("%s", OrcFormat(OrcTextId::KnownRemapPedModelsFormat, (int)known.size()).c_str());
-                    if (!known.empty() && ImGui::BeginChild("##texture_known_models", ImVec2(-FLT_MIN, 120.0f), true)) {
+                    if (!known.empty() && ImGui::BeginChild("##texture_known_models", ImVec2(-FLT_MIN, UiScaled(110.0f)), true)) {
                         for (const auto& info : known) {
                             const char* dff = info.dffName.empty() ? "?" : info.dffName.c_str();
                             ImGui::Text("%s", OrcFormat(
@@ -1040,6 +1096,71 @@ void OrcUiDraw() {
 
                 ImGui::EndTabBar();
             }
+            ImGui::EndTabItem();
+        }
+
+        // ------------------------------------------------------------------
+        // Settings
+        // ------------------------------------------------------------------
+        if (ImGui::BeginTabItem(T(OrcTextId::TabSettings))) {
+            const OrcUiLanguage languages[] = { OrcUiLanguage::Russian, OrcUiLanguage::English };
+            if (UiBeginControlRow("language", T(OrcTextId::Language))) {
+                if (ImGui::BeginCombo("##value", OrcLanguageDisplayName(g_orcUiLanguage))) {
+                    for (OrcUiLanguage language : languages) {
+                        const bool selected = language == g_orcUiLanguage;
+                        if (ImGui::Selectable(OrcLanguageDisplayName(language), selected)) {
+                            g_orcUiLanguage = language;
+                            SaveMainIni();
+                        }
+                        if (selected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                UiEndControlRow();
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted(T(OrcTextId::Interface));
+            UiCheckbox("ui_auto_scale", T(OrcTextId::UiAutoScale), &g_uiAutoScale);
+            if (UiSliderFloat("ui_scale", T(OrcTextId::UiScale), &g_uiScale, 0.75f, 1.60f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+                g_uiScale = std::min(1.60f, std::max(0.75f, g_uiScale));
+            int fontSize = static_cast<int>(std::round(g_uiFontSize));
+            if (UiSliderInt("ui_font_size", T(OrcTextId::UiFontSize), &fontSize, 13, 22, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+                g_uiFontSize = static_cast<float>(fontSize);
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted(T(OrcTextId::Activation));
+            static char actKeyBuf[32] = "F7";
+            static bool actKeyBufInited = false;
+            if (!actKeyBufInited) {
+                _snprintf_s(actKeyBuf, _TRUNCATE, "%s", VkToString(g_activationVk));
+                actKeyBufInited = true;
+            }
+            if (UiInputTextWithHelp("actkey", T(OrcTextId::ToggleKey), T(OrcTextId::ToggleKeyHelp), actKeyBuf, sizeof(actKeyBuf), ImGuiInputTextFlags_CharsNoBlank)) {
+                g_activationVk = ParseActivationVk(actKeyBuf);
+                RefreshActivationRouting();
+            }
+
+            static char cmdBuf[96] = {};
+            if (cmdBuf[0] == 0)
+                _snprintf_s(cmdBuf, _TRUNCATE, "%s", g_toggleCommand.c_str());
+            if (UiInputText("cmd", T(OrcTextId::ChatCommand), cmdBuf, sizeof(cmdBuf))) {
+                g_toggleCommand = cmdBuf;
+                if (!g_toggleCommand.empty() && g_toggleCommand[0] != '/')
+                    g_toggleCommand.insert(g_toggleCommand.begin(), '/');
+            }
+            if (UiCheckbox("samp_allow_toggle_key", T(OrcTextId::SampAllowToggleKey), &g_sampAllowActivationKey))
+                RefreshActivationRouting();
+
+            ImGui::Separator();
+            if (ImGui::Button(T(OrcTextId::SaveSettings), ImVec2(-FLT_MIN, 0))) {
+                SaveMainIni();
+                RefreshActivationRouting();
+                OrcLogInfo("UI: saved settings");
+            }
+
             ImGui::EndTabItem();
         }
 

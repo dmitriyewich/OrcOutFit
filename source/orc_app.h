@@ -24,6 +24,9 @@ extern float g_renderAllPedsRadius;
 extern int g_activationVk;
 extern bool g_sampAllowActivationKey;
 extern std::string g_toggleCommand;
+extern bool g_uiAutoScale;
+extern float g_uiScale;
+extern float g_uiFontSize;
 extern bool g_considerWeaponSkills;
 extern bool g_renderCustomObjects;
 

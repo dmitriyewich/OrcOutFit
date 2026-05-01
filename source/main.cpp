@@ -90,6 +90,9 @@ float g_renderAllPedsRadius = 80.0f;
 int  g_activationVk = VK_F7;
 bool g_sampAllowActivationKey = false;
 std::string g_toggleCommand = "/orcoutfit";
+bool g_uiAutoScale = true;
+float g_uiScale = 1.0f;
+float g_uiFontSize = 15.0f;
 bool g_considerWeaponSkills = true;
 bool g_renderCustomObjects = true;
 std::vector<WeaponCfg> g_cfg;
@@ -573,6 +576,24 @@ static bool HasWeaponSection(const char* section, const char* iniPath) {
     return buf[0] != 0;
 }
 
+static float ClampConfigFloat(float value, float minValue, float maxValue, float fallback) {
+    if (!std::isfinite(value))
+        value = fallback;
+    if (value < minValue)
+        return minValue;
+    if (value > maxValue)
+        return maxValue;
+    return value;
+}
+
+static float ReadIniFloat(const char* section, const char* key, float fallback, const char* iniPath) {
+    char buf[64] = {};
+    GetPrivateProfileStringA(section, key, "", buf, sizeof(buf), iniPath);
+    if (!buf[0])
+        return fallback;
+    return static_cast<float>(atof(buf));
+}
+
 int ParseActivationVk(const char* text) {
     if (!text || !text[0]) return VK_F7;
     if (!lstrcmpiA(text, "F1")) return VK_F1;
@@ -655,6 +676,9 @@ void LoadConfig() {
         g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
     }
     g_sampAllowActivationKey = GetPrivateProfileIntA("Main", "SampAllowActivationKey", 0, g_iniPath) != 0;
+    g_uiAutoScale = GetPrivateProfileIntA("Main", "UiAutoScale", 1, g_iniPath) != 0;
+    g_uiScale = ClampConfigFloat(ReadIniFloat("Main", "UiScale", 1.0f, g_iniPath), 0.75f, 1.60f, 1.0f);
+    g_uiFontSize = ClampConfigFloat(ReadIniFloat("Main", "UiFontSize", 15.0f, g_iniPath), 13.0f, 22.0f, 15.0f);
     char languageBuf[16] = {};
     GetPrivateProfileStringA("Main", "Language", "ru", languageBuf, sizeof(languageBuf), g_iniPath);
     g_orcUiLanguage = OrcParseLanguage(languageBuf);
@@ -756,6 +780,9 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniValue(values, "Main", "ActivationKey", VkToString(g_activationVk));
     AddIniValue(values, "Main", "Command", g_toggleCommand.c_str());
     AddIniInt(values, "Main", "SampAllowActivationKey", g_sampAllowActivationKey ? 1 : 0);
+    AddIniInt(values, "Main", "UiAutoScale", g_uiAutoScale ? 1 : 0);
+    AddIniFloat(values, "Main", "UiScale", g_uiScale, "%.2f");
+    AddIniFloat(values, "Main", "UiFontSize", g_uiFontSize, "%.0f");
 
     AddIniInt(values, "Features", "RenderAllPedsWeapons", g_renderAllPedsWeapons ? 1 : 0);
     AddIniInt(values, "Features", "RenderAllPedsObjects", g_renderAllPedsObjects ? 1 : 0);
@@ -792,7 +819,10 @@ static void SaveDefaultConfig() {
           "Language=ru\n"
           "ActivationKey=F7\n"
           "SampAllowActivationKey=0\n"
-          "Command=/orcoutfit\n\n"
+          "Command=/orcoutfit\n"
+          "UiAutoScale=1\n"
+          "UiScale=1.00\n"
+          "UiFontSize=15\n\n"
           "[Features]\n"
           "RenderAllPedsWeapons=0\n"
           "RenderAllPedsObjects=0\n"
@@ -1693,7 +1723,10 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "Language=%s\n", OrcLanguageId(g_orcUiLanguage));
     AppendFormat(out, "ActivationKey=%s\n", VkToString(g_activationVk));
     AppendFormat(out, "SampAllowActivationKey=%d\n", g_sampAllowActivationKey ? 1 : 0);
-    AppendFormat(out, "Command=%s\n\n", g_toggleCommand.c_str());
+    AppendFormat(out, "Command=%s\n", g_toggleCommand.c_str());
+    AppendFormat(out, "UiAutoScale=%d\n", g_uiAutoScale ? 1 : 0);
+    AppendFormat(out, "UiScale=%.2f\n", g_uiScale);
+    AppendFormat(out, "UiFontSize=%.0f\n\n", g_uiFontSize);
 
     out += "[Features]\n";
     AppendFormat(out, "RenderAllPedsWeapons=%d\n", g_renderAllPedsWeapons ? 1 : 0);

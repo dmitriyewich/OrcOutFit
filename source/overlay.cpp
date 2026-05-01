@@ -4,12 +4,15 @@
 #include <d3d9.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <string>
 
 #include "overlay.h"
 
+#include "orc_app.h"
 #include "orc_log.h"
 #include "samp_bridge.h"
 #include "external/MinHook/include/MinHook.h"
@@ -29,7 +32,17 @@ namespace overlay {
 namespace {
 
 constexpr char kDummyWindowClassName[] = "OrcOutFitD3D9DummyWindow";
-constexpr float kUiFontSize = 17.0f;
+constexpr float kUiFontDefaultSize = 15.0f;
+constexpr float kUiFontMinSize = 13.0f;
+constexpr float kUiFontMaxSize = 22.0f;
+constexpr float kUiManualScaleMin = 0.75f;
+constexpr float kUiManualScaleMax = 1.60f;
+constexpr float kUiLayoutScaleMin = 0.70f;
+constexpr float kUiLayoutScaleMax = 1.80f;
+constexpr float kUiAutoScaleMin = 0.85f;
+constexpr float kUiAutoScaleMax = 1.35f;
+constexpr float kUiReferenceWidth = 1366.0f;
+constexpr float kUiReferenceHeight = 768.0f;
 constexpr uintptr_t kGtaWindowHandleAddress = 0x00C8CF88u;
 constexpr uintptr_t kCursorKeyboardCallAddr = 0x541DF5u;
 constexpr uintptr_t kCursorMouseStateCallAddr = 0x53F417u;
@@ -57,6 +70,14 @@ WNDPROC g_origProc       = nullptr;
 DrawFn  g_drawFn         = nullptr;
 int     g_toggleVk       = VK_F7;
 bool    g_hotkeyEnabled  = true;
+float   g_currentUiScale = 1.0f;
+float   g_currentUiAutoScale = 1.0f;
+bool    g_styleApplied = false;
+int     g_styleDisplayW = 0;
+int     g_styleDisplayH = 0;
+bool    g_styleAutoScale = true;
+float   g_styleManualScale = 0.0f;
+float   g_styleFontSize = 0.0f;
 
 void* g_endSceneTarget = nullptr;
 void* g_presentTarget  = nullptr;
@@ -275,6 +296,43 @@ std::string ResolveInstalledFontPath(const FontCandidate& candidate, const std::
     return {};
 }
 
+float ClampFloat(float value, float minValue, float maxValue, float fallback) {
+    if (!std::isfinite(value))
+        value = fallback;
+    if (value < minValue)
+        return minValue;
+    if (value > maxValue)
+        return maxValue;
+    return value;
+}
+
+float ClampUiFontSize(float value) {
+    return ClampFloat(value, kUiFontMinSize, kUiFontMaxSize, kUiFontDefaultSize);
+}
+
+float ComputeAutoUiScale(const ImVec2& displaySize) {
+    if (displaySize.x <= 0.0f || displaySize.y <= 0.0f)
+        return 1.0f;
+
+    const float widthScale = displaySize.x / kUiReferenceWidth;
+    const float heightScale = displaySize.y / kUiReferenceHeight;
+    const float baseScale = std::min(widthScale, heightScale);
+    float autoScale = 1.0f;
+    if (baseScale >= 1.0f)
+        autoScale = 1.0f + (baseScale - 1.0f) * 0.45f;
+    else
+        autoScale = baseScale;
+    return ClampFloat(autoScale, kUiAutoScaleMin, kUiAutoScaleMax, 1.0f);
+}
+
+float ComputeUiLayoutScale(const ImVec2& displaySize) {
+    const float autoScale = g_uiAutoScale ? ComputeAutoUiScale(displaySize) : 1.0f;
+    const float manualScale = ClampFloat(g_uiScale, kUiManualScaleMin, kUiManualScaleMax, 1.0f);
+    g_currentUiAutoScale = autoScale;
+    g_currentUiScale = ClampFloat(autoScale * manualScale, kUiLayoutScaleMin, kUiLayoutScaleMax, 1.0f);
+    return g_currentUiScale;
+}
+
 void LoadUiFont(ImGuiIO& io) {
     static constexpr FontCandidate kFontCandidates[] = {
         { "Arial (TrueType)", "arial.ttf" },
@@ -285,11 +343,12 @@ void LoadUiFont(ImGuiIO& io) {
     const std::string systemFontsDir = GetFontsDirectory();
     const std::string userFontsDir = GetUserFontsDirectory();
     const ImWchar* ranges = io.Fonts->GetGlyphRangesCyrillic();
+    const float fontSize = ClampUiFontSize(g_uiFontSize);
     for (const FontCandidate& candidate : kFontCandidates) {
         const std::string path = ResolveInstalledFontPath(candidate, systemFontsDir, userFontsDir);
         if (path.empty())
             continue;
-        if (ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), kUiFontSize, nullptr, ranges)) {
+        if (ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), fontSize, nullptr, ranges)) {
             io.FontDefault = font;
             OrcLogInfo("overlay: loaded UI font %s from %s", candidate.registryName, path.c_str());
             return;
@@ -297,133 +356,162 @@ void LoadUiFont(ImGuiIO& io) {
     }
 
     ImFontConfig cfg{};
-    cfg.SizePixels = kUiFontSize;
+    cfg.SizePixels = fontSize;
     io.FontDefault = io.Fonts->AddFontDefault(&cfg);
     OrcLogError("overlay: failed to load Cyrillic UI font, using ImGui default");
 }
 
-void ApplyOrcOutfitStyle() {
+void ApplyOrcOutfitStyle(const ImVec2& displaySize) {
+    const int displayW = static_cast<int>(displaySize.x + 0.5f);
+    const int displayH = static_cast<int>(displaySize.y + 0.5f);
+    const bool autoScale = g_uiAutoScale;
+    const float manualScale = ClampFloat(g_uiScale, kUiManualScaleMin, kUiManualScaleMax, 1.0f);
+    const float fontSize = ClampUiFontSize(g_uiFontSize);
+    if (g_styleApplied &&
+        g_styleDisplayW == displayW &&
+        g_styleDisplayH == displayH &&
+        g_styleAutoScale == autoScale &&
+        std::fabs(g_styleManualScale - manualScale) <= 0.001f &&
+        std::fabs(g_styleFontSize - fontSize) <= 0.001f) {
+        return;
+    }
+
     ImGuiStyle& st = ImGui::GetStyle();
+    st = ImGuiStyle();
+    const float layoutScale = ComputeUiLayoutScale(displaySize);
 
     st.Alpha = 1.0f;
-    st.DisabledAlpha = 0.60f;
-    st.FontSizeBase = kUiFontSize;
+    st.DisabledAlpha = 0.52f;
+    st.FontSizeBase = ClampUiFontSize(g_uiFontSize);
     st.FontScaleMain = 1.0f;
-    st.WindowPadding = ImVec2(15.0f, 15.0f);
-    st.WindowRounding = 4.7f;
-    st.WindowBorderSize = 1.7f;
-    st.WindowBorderHoverPadding = 4.0f;
-    st.WindowMinSize = ImVec2(1.5f, 1.5f);
+    st.FontScaleDpi = 1.0f;
+    st.WindowPadding = ImVec2(10.0f, 10.0f);
+    st.WindowRounding = 3.0f;
+    st.WindowBorderSize = 1.0f;
+    st.WindowBorderHoverPadding = 3.0f;
+    st.WindowMinSize = ImVec2(1.0f, 1.0f);
     st.WindowTitleAlign = ImVec2(0.5f, 0.5f);
     st.WindowMenuButtonPosition = ImGuiDir_Left;
-    st.ChildRounding = 4.7f;
+    st.ChildRounding = 3.0f;
     st.ChildBorderSize = 1.0f;
-    st.PopupRounding = 4.7f;
+    st.PopupRounding = 3.0f;
     st.PopupBorderSize = 1.0f;
-    st.FramePadding = ImVec2(5.0f, 5.0f);
-    st.FrameRounding = 4.7f;
+    st.FramePadding = ImVec2(5.0f, 3.0f);
+    st.FrameRounding = 3.0f;
     st.FrameBorderSize = 1.0f;
-    st.ItemSpacing = ImVec2(2.0f, 7.0f);
-    st.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
-    st.CellPadding = ImVec2(5.0f, 4.0f);
+    st.ItemSpacing = ImVec2(4.0f, 4.0f);
+    st.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+    st.CellPadding = ImVec2(4.0f, 3.0f);
     st.TouchExtraPadding = ImVec2(0.0f, 0.0f);
-    st.IndentSpacing = 25.0f;
-    st.ColumnsMinSpacing = 6.0f;
-    st.ScrollbarSize = 9.0f;
-    st.ScrollbarRounding = 4.7f;
+    st.IndentSpacing = 16.0f;
+    st.ColumnsMinSpacing = 5.0f;
+    st.ScrollbarSize = 8.0f;
+    st.ScrollbarRounding = 3.0f;
     st.ScrollbarPadding = 2.0f;
-    st.GrabMinSize = 15.0f;
-    st.GrabRounding = 4.7f;
+    st.GrabMinSize = 10.0f;
+    st.GrabRounding = 3.0f;
     st.LogSliderDeadzone = 4.0f;
-    st.ImageRounding = 4.7f;
+    st.ImageRounding = 3.0f;
     st.ImageBorderSize = 1.0f;
-    st.TabRounding = 4.0f;
+    st.TabRounding = 3.0f;
     st.TabBorderSize = 1.0f;
     st.TabBarBorderSize = 1.0f;
-    st.TabBarOverlineSize = 2.0f;
+    st.TabBarOverlineSize = 1.0f;
     st.TreeLinesSize = 1.0f;
-    st.TreeLinesRounding = 4.7f;
-    st.DragDropTargetRounding = 4.7f;
+    st.TreeLinesRounding = 3.0f;
+    st.DragDropTargetRounding = 3.0f;
     st.DragDropTargetBorderSize = 1.0f;
-    st.DragDropTargetPadding = 3.0f;
-    st.ColorMarkerSize = 8.0f;
+    st.DragDropTargetPadding = 2.0f;
+    st.ColorMarkerSize = 7.0f;
     st.ButtonTextAlign = ImVec2(0.5f, 0.5f);
-    st.SelectableTextAlign = ImVec2(0.5f, 0.5f);
+    st.SelectableTextAlign = ImVec2(0.0f, 0.5f);
     st.SeparatorSize = 1.0f;
     st.SeparatorTextBorderSize = 1.0f;
     st.SeparatorTextAlign = ImVec2(0.5f, 0.5f);
-    st.SeparatorTextPadding = ImVec2(15.0f, 5.0f);
+    st.SeparatorTextPadding = ImVec2(10.0f, 3.0f);
+    st.ScaleAllSizes(layoutScale);
+    st.WindowBorderSize = std::max(1.0f, st.WindowBorderSize);
+    st.PopupBorderSize = std::max(1.0f, st.PopupBorderSize);
+    st.FrameBorderSize = std::max(1.0f, st.FrameBorderSize);
+    st.ChildBorderSize = std::max(1.0f, st.ChildBorderSize);
 
     auto C = [](float r, float g, float b, float a) {
         return ImVec4(r, g, b, a);
     };
     ImVec4* colors = st.Colors;
-    const ImVec4 accent = C(0.33f, 0.67f, 0.86f, 1.00f);
-    const ImVec4 accentSoft = C(0.18f, 0.36f, 0.46f, 1.00f);
-    const ImVec4 control = C(0.06f, 0.07f, 0.08f, 0.96f);
-    const ImVec4 controlHovered = C(0.13f, 0.16f, 0.18f, 0.98f);
-    const ImVec4 controlActive = C(0.18f, 0.23f, 0.26f, 1.00f);
+    const ImVec4 accent = C(0.24f, 0.63f, 0.82f, 1.00f);
+    const ImVec4 accentSoft = C(0.13f, 0.32f, 0.41f, 1.00f);
+    const ImVec4 control = C(0.075f, 0.085f, 0.095f, 0.98f);
+    const ImVec4 controlHovered = C(0.125f, 0.145f, 0.160f, 0.99f);
+    const ImVec4 controlActive = C(0.165f, 0.205f, 0.225f, 1.00f);
 
-    colors[ImGuiCol_Text] = C(0.96f, 0.96f, 0.96f, 1.00f);
-    colors[ImGuiCol_TextDisabled] = C(0.62f, 0.64f, 0.66f, 1.00f);
-    colors[ImGuiCol_WindowBg] = C(0.12f, 0.13f, 0.14f, 1.00f);
-    colors[ImGuiCol_ChildBg] = C(0.10f, 0.11f, 0.12f, 0.42f);
-    colors[ImGuiCol_PopupBg] = C(0.13f, 0.14f, 0.15f, 0.96f);
-    colors[ImGuiCol_Border] = C(0.29f, 0.32f, 0.35f, 0.82f);
+    colors[ImGuiCol_Text] = C(0.92f, 0.93f, 0.94f, 1.00f);
+    colors[ImGuiCol_TextDisabled] = C(0.55f, 0.58f, 0.60f, 1.00f);
+    colors[ImGuiCol_WindowBg] = C(0.095f, 0.105f, 0.115f, 0.98f);
+    colors[ImGuiCol_ChildBg] = C(0.075f, 0.083f, 0.092f, 0.50f);
+    colors[ImGuiCol_PopupBg] = C(0.095f, 0.105f, 0.115f, 0.98f);
+    colors[ImGuiCol_Border] = C(0.24f, 0.26f, 0.28f, 0.74f);
     colors[ImGuiCol_BorderShadow] = C(0.00f, 0.00f, 0.00f, 0.00f);
     colors[ImGuiCol_FrameBg] = control;
     colors[ImGuiCol_FrameBgHovered] = controlHovered;
     colors[ImGuiCol_FrameBgActive] = controlActive;
-    colors[ImGuiCol_TitleBg] = C(0.07f, 0.08f, 0.09f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = C(0.10f, 0.11f, 0.12f, 1.00f);
-    colors[ImGuiCol_TitleBgCollapsed] = C(0.07f, 0.08f, 0.09f, 1.00f);
-    colors[ImGuiCol_MenuBarBg] = C(0.10f, 0.11f, 0.12f, 1.00f);
-    colors[ImGuiCol_ScrollbarBg] = C(0.06f, 0.07f, 0.08f, 0.72f);
-    colors[ImGuiCol_ScrollbarGrab] = C(0.31f, 0.34f, 0.36f, 0.88f);
-    colors[ImGuiCol_ScrollbarGrabHovered] = C(0.41f, 0.46f, 0.49f, 0.94f);
-    colors[ImGuiCol_ScrollbarGrabActive] = C(0.33f, 0.67f, 0.86f, 0.92f);
+    colors[ImGuiCol_TitleBg] = C(0.060f, 0.067f, 0.074f, 1.00f);
+    colors[ImGuiCol_TitleBgActive] = C(0.075f, 0.083f, 0.092f, 1.00f);
+    colors[ImGuiCol_TitleBgCollapsed] = C(0.060f, 0.067f, 0.074f, 1.00f);
+    colors[ImGuiCol_MenuBarBg] = C(0.075f, 0.083f, 0.092f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg] = C(0.055f, 0.060f, 0.066f, 0.70f);
+    colors[ImGuiCol_ScrollbarGrab] = C(0.24f, 0.27f, 0.29f, 0.88f);
+    colors[ImGuiCol_ScrollbarGrabHovered] = C(0.32f, 0.36f, 0.38f, 0.94f);
+    colors[ImGuiCol_ScrollbarGrabActive] = C(0.24f, 0.63f, 0.82f, 0.92f);
     colors[ImGuiCol_CheckMark] = accent;
-    colors[ImGuiCol_SliderGrab] = C(0.27f, 0.52f, 0.66f, 0.95f);
+    colors[ImGuiCol_SliderGrab] = C(0.20f, 0.50f, 0.65f, 0.95f);
     colors[ImGuiCol_SliderGrabActive] = accent;
-    colors[ImGuiCol_Button] = C(0.10f, 0.11f, 0.12f, 1.00f);
-    colors[ImGuiCol_ButtonHovered] = C(0.16f, 0.21f, 0.24f, 1.00f);
-    colors[ImGuiCol_ButtonActive] = C(0.22f, 0.39f, 0.49f, 1.00f);
-    colors[ImGuiCol_Header] = C(0.12f, 0.14f, 0.16f, 0.95f);
-    colors[ImGuiCol_HeaderHovered] = C(0.18f, 0.26f, 0.30f, 0.92f);
-    colors[ImGuiCol_HeaderActive] = C(0.21f, 0.38f, 0.48f, 0.92f);
-    colors[ImGuiCol_Separator] = C(0.34f, 0.37f, 0.40f, 0.44f);
-    colors[ImGuiCol_SeparatorHovered] = C(0.42f, 0.50f, 0.54f, 0.60f);
-    colors[ImGuiCol_SeparatorActive] = C(0.33f, 0.67f, 0.86f, 0.92f);
-    colors[ImGuiCol_ResizeGrip] = C(0.26f, 0.30f, 0.33f, 0.42f);
-    colors[ImGuiCol_ResizeGripHovered] = C(0.33f, 0.67f, 0.86f, 0.55f);
+    colors[ImGuiCol_Button] = C(0.090f, 0.100f, 0.110f, 1.00f);
+    colors[ImGuiCol_ButtonHovered] = C(0.135f, 0.165f, 0.185f, 1.00f);
+    colors[ImGuiCol_ButtonActive] = C(0.170f, 0.305f, 0.370f, 1.00f);
+    colors[ImGuiCol_Header] = C(0.110f, 0.125f, 0.140f, 0.95f);
+    colors[ImGuiCol_HeaderHovered] = C(0.145f, 0.205f, 0.235f, 0.94f);
+    colors[ImGuiCol_HeaderActive] = C(0.175f, 0.315f, 0.385f, 0.94f);
+    colors[ImGuiCol_Separator] = C(0.30f, 0.32f, 0.34f, 0.38f);
+    colors[ImGuiCol_SeparatorHovered] = C(0.38f, 0.44f, 0.48f, 0.56f);
+    colors[ImGuiCol_SeparatorActive] = C(0.24f, 0.63f, 0.82f, 0.90f);
+    colors[ImGuiCol_ResizeGrip] = C(0.24f, 0.27f, 0.29f, 0.36f);
+    colors[ImGuiCol_ResizeGripHovered] = C(0.24f, 0.63f, 0.82f, 0.52f);
     colors[ImGuiCol_ResizeGripActive] = accent;
     colors[ImGuiCol_InputTextCursor] = accent;
-    colors[ImGuiCol_Tab] = C(0.08f, 0.09f, 0.10f, 1.00f);
-    colors[ImGuiCol_TabHovered] = C(0.16f, 0.21f, 0.24f, 1.00f);
-    colors[ImGuiCol_TabSelected] = C(0.17f, 0.19f, 0.21f, 1.00f);
+    colors[ImGuiCol_Tab] = C(0.075f, 0.083f, 0.092f, 1.00f);
+    colors[ImGuiCol_TabHovered] = C(0.125f, 0.165f, 0.185f, 1.00f);
+    colors[ImGuiCol_TabSelected] = C(0.125f, 0.140f, 0.155f, 1.00f);
     colors[ImGuiCol_TabSelectedOverline] = accent;
-    colors[ImGuiCol_TabDimmed] = C(0.07f, 0.08f, 0.09f, 0.88f);
-    colors[ImGuiCol_TabDimmedSelected] = C(0.13f, 0.15f, 0.17f, 0.96f);
-    colors[ImGuiCol_TabDimmedSelectedOverline] = C(0.33f, 0.67f, 0.86f, 0.64f);
+    colors[ImGuiCol_TabDimmed] = C(0.060f, 0.067f, 0.074f, 0.88f);
+    colors[ImGuiCol_TabDimmedSelected] = C(0.105f, 0.120f, 0.135f, 0.96f);
+    colors[ImGuiCol_TabDimmedSelectedOverline] = C(0.24f, 0.63f, 0.82f, 0.60f);
     colors[ImGuiCol_PlotLines] = accent;
-    colors[ImGuiCol_PlotLinesHovered] = C(0.58f, 0.82f, 0.95f, 1.00f);
+    colors[ImGuiCol_PlotLinesHovered] = C(0.52f, 0.78f, 0.90f, 1.00f);
     colors[ImGuiCol_PlotHistogram] = accentSoft;
     colors[ImGuiCol_PlotHistogramHovered] = accent;
-    colors[ImGuiCol_TableHeaderBg] = C(0.13f, 0.15f, 0.17f, 1.00f);
-    colors[ImGuiCol_TableBorderStrong] = C(0.34f, 0.37f, 0.40f, 0.78f);
-    colors[ImGuiCol_TableBorderLight] = C(0.24f, 0.27f, 0.30f, 0.62f);
+    colors[ImGuiCol_TableHeaderBg] = C(0.105f, 0.120f, 0.135f, 1.00f);
+    colors[ImGuiCol_TableBorderStrong] = C(0.28f, 0.31f, 0.33f, 0.76f);
+    colors[ImGuiCol_TableBorderLight] = C(0.20f, 0.23f, 0.25f, 0.58f);
     colors[ImGuiCol_TableRowBg] = C(0.00f, 0.00f, 0.00f, 0.00f);
-    colors[ImGuiCol_TableRowBgAlt] = C(1.00f, 1.00f, 1.00f, 0.04f);
+    colors[ImGuiCol_TableRowBgAlt] = C(1.00f, 1.00f, 1.00f, 0.025f);
     colors[ImGuiCol_TextLink] = accent;
-    colors[ImGuiCol_TextSelectedBg] = C(0.18f, 0.39f, 0.50f, 0.78f);
-    colors[ImGuiCol_TreeLines] = C(0.34f, 0.37f, 0.40f, 0.58f);
+    colors[ImGuiCol_TextSelectedBg] = C(0.16f, 0.36f, 0.46f, 0.74f);
+    colors[ImGuiCol_TreeLines] = C(0.28f, 0.31f, 0.33f, 0.54f);
     colors[ImGuiCol_DragDropTarget] = accent;
-    colors[ImGuiCol_DragDropTargetBg] = C(0.33f, 0.67f, 0.86f, 0.18f);
+    colors[ImGuiCol_DragDropTargetBg] = C(0.24f, 0.63f, 0.82f, 0.16f);
     colors[ImGuiCol_UnsavedMarker] = accent;
     colors[ImGuiCol_NavCursor] = accent;
-    colors[ImGuiCol_NavWindowingHighlight] = C(0.33f, 0.67f, 0.86f, 0.70f);
-    colors[ImGuiCol_NavWindowingDimBg] = C(0.00f, 0.00f, 0.00f, 0.26f);
-    colors[ImGuiCol_ModalWindowDimBg] = C(0.00f, 0.00f, 0.00f, 0.45f);
+    colors[ImGuiCol_NavWindowingHighlight] = C(0.24f, 0.63f, 0.82f, 0.68f);
+    colors[ImGuiCol_NavWindowingDimBg] = C(0.00f, 0.00f, 0.00f, 0.24f);
+    colors[ImGuiCol_ModalWindowDimBg] = C(0.00f, 0.00f, 0.00f, 0.42f);
+
+    g_styleApplied = true;
+    g_styleDisplayW = displayW;
+    g_styleDisplayH = displayH;
+    g_styleAutoScale = autoScale;
+    g_styleManualScale = manualScale;
+    g_styleFontSize = fontSize;
 }
 
 void CaptureCursorPatchSnapshot() {
@@ -932,9 +1020,10 @@ bool InitializeImGuiIfNeeded(IDirect3DDevice9* device) {
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     io.MouseDrawCursor = false;
 
+    ImGui::GetStyle().FontSizeBase = ClampUiFontSize(g_uiFontSize);
     LoadUiFont(io);
 
-    ApplyOrcOutfitStyle();
+    ApplyOrcOutfitStyle(io.DisplaySize);
 
     if (!ImGui_ImplWin32_Init(g_hwnd)) {
         OrcLogError("overlay: ImGui_ImplWin32_Init failed");
@@ -991,6 +1080,7 @@ void RenderImGuiFrame(IDirect3DDevice9* device) {
     ImGui_ImplWin32_NewFrame();
 
     ImGuiIO& io = ImGui::GetIO();
+    ApplyOrcOutfitStyle(io.DisplaySize);
     if (enteredOverlayFromNone)
         io.ClearInputMouse();
     if (g_hwnd) {
@@ -1042,6 +1132,7 @@ void CleanupImGui() {
     g_imguiInited = false;
     g_hwnd = nullptr;
     g_needCreateObj = false;
+    g_styleApplied = false;
 }
 
 void ForceCursorAndControlsOff(IDirect3DDevice9* device) {
@@ -1216,6 +1307,10 @@ void SetToggleVirtualKey(int vk) { g_toggleVk = vk; }
 int GetToggleVirtualKey() { return g_toggleVk; }
 
 void SetHotkeyEnabled(bool enabled) { g_hotkeyEnabled = enabled; }
+
+float GetCurrentUiScale() { return g_currentUiScale; }
+
+float GetCurrentUiAutoScale() { return g_currentUiAutoScale; }
 
 void SetDrawCallback(DrawFn fn) { g_drawFn = fn; }
 
