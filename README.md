@@ -50,6 +50,9 @@
 - Для локального ped в UI доступны только реально найденные уникальные варианты, **Randomize local** и возврат к **Original textures**; PedFuncs-циклы по несуществующим номерам не используются.
 - **Random mode**: `Linked variant` (по умолчанию) выбирает общий remap-index для всего ped, а если у отдельного слота такого индекса нет — берёт случайный реальный вариант этого слота. Повтор того же варианта подряд не запрещается.
 - **Nick binding** для texture remap: текущий набор выбранных текстур можно сохранить для ника SA:MP. Binding имеет приоритет; если для ника binding не найден, используется random.
+- **Auto texture by nickname**: при включённом `SkinTextureRemapAutoNickMode` плагин ищет в TXD текущего стандартного ped текстуры формата **`<original>_<nick>`** (`wmyclot_Walcher_Flett`, `body_Walcher_Flett`). Часть `<original>` выбирает слот базовой текстуры, а `<nick>` ищется внутри SA:MP-ника без учёта регистра и без цвет-кодов `{RRGGBB}`. Если для одного слота подходят несколько текстур, выбирается самое длинное совпадение. Auto-текстуры не попадают в random-пул.
+- Приоритет texture remap по нику: ручной binding → auto texture by nickname → текущий random. Если auto-текстура найдена только для части слотов, остальные слоты продолжают использовать random.
+- Полное имя texture name в RenderWare должно помещаться в **31 ASCII-символ**. Для длинных ников или длинных `<original>` используйте ручной binding через INI.
 - Binding-файлы: **`OrcOutFit\Skins\Textures\<dff>.ini`**. Внутри сохраняются реальные имена original/remap-текстур, а не порядковые номера.
 - Дополнительные `peds1..peds4.txd` кешируются через hook `AssignRemapTxd`, а поиск текстур расширяется hook-ом `RwTexDictionaryFindNamedTexture`, как в логике PedFuncs.
 
@@ -178,6 +181,7 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 | `SkinLocalPreferSelected` | `1` — всегда использовать **выбранный в UI** скин на локальном игроке (если нет скина по нику); `0` — только ник |
 | `SkinTextureRemap` | Включить PedFuncs-style texture remap для стандартных ped TXD (`*_remap`) |
 | `SkinTextureRemapNickMode` | Включить приоритетные texture-remap привязки по нику SA:MP |
+| `SkinTextureRemapAutoNickMode` | Включить автоматические texture-remap привязки по текстурам `<original>_<nick>` в TXD текущего стандартного ped |
 | `SkinTextureRemapRandomMode` | `0` = `Per texture`, `1` = `Linked variant` (дефолт) |
 | `DebugLogLevel` | `0` / `1` (ошибки) / `2` (info+ошибки); см. раздел «Отладочный лог» |
 | `DebugLog` | Legacy: `1` = то же, что **`DebugLogLevel=2`**, если уровень не задан отдельно |

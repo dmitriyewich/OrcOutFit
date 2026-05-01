@@ -65,12 +65,21 @@ static std::string TextureRemapIniPathForDff(const char* dffName, int modelId) {
 // ----------------------------------------------------------------------------
 static constexpr int kTextureRemapLimit = 8;
 
+struct TextureRemapAutoNickCandidate {
+    RwTexture* texture = nullptr;
+    std::string textureName;
+    std::string nickKey;
+    std::string nickKeyLower;
+};
+
 struct TextureRemapSlotState {
     RwTexture* original = nullptr;
     std::string originalName;
     std::vector<RwTexture*> remaps;
     std::vector<std::string> remapNames;
+    std::vector<TextureRemapAutoNickCandidate> autoNickCandidates;
     int selected = -1;
+    int autoNickSelected = -1;
 };
 
 struct TextureRemapBindingSlot {
@@ -96,14 +105,56 @@ static bool TextureRemapNickMatches(const TextureRemapNickBinding& binding, cons
     return false;
 }
 
+static bool TextureRemapIsHexDigit(char c) {
+    return (c >= '0' && c <= '9') ||
+           (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
+}
+
+static std::string TextureRemapNormalizeNickForMatch(const char* nick) {
+    std::string out;
+    if (!nick)
+        return out;
+
+    const std::string src(nick);
+    for (size_t i = 0; i < src.size();) {
+        if (src[i] == '{') {
+            const size_t close = src.find('}', i + 1);
+            const size_t len = (close == std::string::npos) ? 0 : (close - i - 1);
+            if (close != std::string::npos && (len == 6 || len == 8)) {
+                bool allHex = true;
+                for (size_t j = i + 1; j < close; ++j) {
+                    if (!TextureRemapIsHexDigit(src[j])) {
+                        allHex = false;
+                        break;
+                    }
+                }
+                if (allHex) {
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+
+        char c = src[i++];
+        if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+        out.push_back(c);
+    }
+    return out;
+}
+
 struct PedTextureRemapState {
     int modelId = -1;
     int txdIndex = -1;
     bool scanned = false;
     bool nickBindingApplied = false;
     int nickBindingId = -1;
+    bool autoNickApplied = false;
+    int autoNickSlotCount = 0;
+    std::string autoNickLogKey;
     int slotCount = 0;
     int totalRemapTextures = 0;
+    int totalAutoNickTextures = 0;
     std::array<TextureRemapSlotState, kTextureRemapLimit> slots;
 };
 
@@ -276,6 +327,28 @@ static bool SlotHasRemapVariant(const TextureRemapSlotState& slot, RwTexture* te
     return false;
 }
 
+static bool SlotHasAutoNickCandidate(const TextureRemapSlotState& slot, RwTexture* texture, const std::string& name) {
+    for (const auto& candidate : slot.autoNickCandidates) {
+        if (candidate.texture == texture)
+            return true;
+        if (_stricmp(candidate.textureName.c_str(), name.c_str()) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void ClearTextureRemapAutoNickSlotSelections(PedTextureRemapState& state) {
+    for (int i = 0; i < state.slotCount; ++i)
+        state.slots[(size_t)i].autoNickSelected = -1;
+}
+
+static void ClearTextureRemapAutoNickSelections(PedTextureRemapState& state) {
+    ClearTextureRemapAutoNickSlotSelections(state);
+    state.autoNickApplied = false;
+    state.autoNickSlotCount = 0;
+    state.autoNickLogKey.clear();
+}
+
 static bool SetRealRemapSelection(TextureRemapSlotState& slot, int requested) {
     if (requested == -1) {
         slot.selected = -1;
@@ -342,6 +415,7 @@ static void SelectRandomTextureRemaps(PedTextureRemapState& state) {
         SelectRandomTextureRemapsPerTexture(state);
     state.nickBindingApplied = false;
     state.nickBindingId = -1;
+    ClearTextureRemapAutoNickSelections(state);
 }
 
 static void LoadTextureRemapNickBindingsForDff(const char* dffName, int modelId) {
@@ -434,10 +508,101 @@ static bool ApplyTextureRemapNickBindingToState(PedTextureRemapState& state, con
     return any;
 }
 
+static bool TryApplyTextureRemapManualNickBinding(
+    PedTextureRemapState& state,
+    const std::string& nickLower,
+    bool& matchedBinding
+) {
+    matchedBinding = false;
+    if (!g_skinTextureRemapNickMode)
+        return false;
+
+    const char* dff = OrcTryGetPedModelNameById(state.modelId);
+    const std::string key = TextureRemapDffKey(dff, state.modelId);
+    LoadTextureRemapNickBindingsForDff(dff, state.modelId);
+
+    auto it = g_textureRemapNickBindingsByDff.find(key);
+    if (it == g_textureRemapNickBindingsByDff.end())
+        return false;
+
+    const std::vector<TextureRemapNickBinding>& bindings = it->second;
+    for (auto rit = bindings.rbegin(); rit != bindings.rend(); ++rit) {
+        if (!TextureRemapNickMatches(*rit, nickLower))
+            continue;
+
+        matchedBinding = true;
+        if (state.nickBindingApplied && state.nickBindingId != rit->id)
+            SelectRandomTextureRemaps(state);
+
+        if (ApplyTextureRemapNickBindingToState(state, *rit)) {
+            state.nickBindingApplied = true;
+            state.nickBindingId = rit->id;
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+static bool ApplyTextureRemapAutoNickBinding(PedTextureRemapState& state, const char* nick, const std::string& nickLower) {
+    ClearTextureRemapAutoNickSlotSelections(state);
+    state.autoNickApplied = false;
+    state.autoNickSlotCount = 0;
+    if (!g_skinTextureRemapAutoNickMode || nickLower.empty()) {
+        state.autoNickLogKey.clear();
+        return false;
+    }
+
+    int appliedSlots = 0;
+    std::string logKey = nickLower;
+    for (int i = 0; i < state.slotCount; ++i) {
+        TextureRemapSlotState& slot = state.slots[(size_t)i];
+        int best = -1;
+        size_t bestLen = 0;
+        for (int c = 0; c < (int)slot.autoNickCandidates.size(); ++c) {
+            const TextureRemapAutoNickCandidate& candidate = slot.autoNickCandidates[(size_t)c];
+            if (!candidate.texture || candidate.nickKeyLower.empty())
+                continue;
+            if (nickLower.find(candidate.nickKeyLower) == std::string::npos)
+                continue;
+            if (candidate.nickKeyLower.size() > bestLen) {
+                best = c;
+                bestLen = candidate.nickKeyLower.size();
+            }
+        }
+
+        if (best >= 0) {
+            slot.autoNickSelected = best;
+            appliedSlots++;
+            logKey += "|";
+            logKey += slot.originalName;
+            logKey += "=";
+            logKey += slot.autoNickCandidates[(size_t)best].textureName;
+        }
+    }
+
+    if (appliedSlots <= 0) {
+        state.autoNickLogKey.clear();
+        return false;
+    }
+
+    state.autoNickApplied = true;
+    state.autoNickSlotCount = appliedSlots;
+    if (state.autoNickLogKey != logKey) {
+        const char* dff = OrcTryGetPedModelNameById(state.modelId);
+        OrcLogInfo("texture remap auto nick: model=%d dff=%s nick=%s slots=%d",
+                   state.modelId, dff ? dff : "?", nick ? nick : "", appliedSlots);
+        state.autoNickLogKey = logKey;
+    }
+    return true;
+}
+
 static bool ApplyTextureRemapNickBinding(CPed* ped, PedTextureRemapState& state) {
-    if (!g_skinTextureRemapNickMode || !samp_bridge::IsSampBuildKnown()) {
+    if ((!g_skinTextureRemapNickMode && !g_skinTextureRemapAutoNickMode) || !samp_bridge::IsSampBuildKnown()) {
         if (state.nickBindingApplied)
             SelectRandomTextureRemaps(state);
+        else
+            ClearTextureRemapAutoNickSelections(state);
         return false;
     }
 
@@ -446,31 +611,34 @@ static bool ApplyTextureRemapNickBinding(CPed* ped, PedTextureRemapState& state)
     if (!samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocal)) {
         if (state.nickBindingApplied)
             SelectRandomTextureRemaps(state);
+        else
+            ClearTextureRemapAutoNickSelections(state);
         return false;
     }
 
-    const char* dff = OrcTryGetPedModelNameById(state.modelId);
-    const std::string key = TextureRemapDffKey(dff, state.modelId);
-    LoadTextureRemapNickBindingsForDff(dff, state.modelId);
+    const std::string manualNickLower = TextureRemapToLowerAscii(nick);
+    const std::string autoNickLower = TextureRemapNormalizeNickForMatch(nick);
+    bool matchedManualBinding = false;
+    if (TryApplyTextureRemapManualNickBinding(state, manualNickLower, matchedManualBinding)) {
+        ClearTextureRemapAutoNickSelections(state);
+        return true;
+    }
 
-    auto it = g_textureRemapNickBindingsByDff.find(key);
-    if (it != g_textureRemapNickBindingsByDff.end()) {
-        const std::string nickLower = TextureRemapToLowerAscii(nick);
-        const std::vector<TextureRemapNickBinding>& bindings = it->second;
-        for (auto rit = bindings.rbegin(); rit != bindings.rend(); ++rit) {
-            if (!TextureRemapNickMatches(*rit, nickLower))
-                continue;
-            if (ApplyTextureRemapNickBindingToState(state, *rit)) {
-                state.nickBindingApplied = true;
-                state.nickBindingId = rit->id;
-                return true;
-            }
-        }
+    if (matchedManualBinding) {
+        if (state.nickBindingApplied)
+            SelectRandomTextureRemaps(state);
+        state.nickBindingApplied = false;
+        state.nickBindingId = -1;
+        ClearTextureRemapAutoNickSelections(state);
+        return false;
     }
 
     if (state.nickBindingApplied)
         SelectRandomTextureRemaps(state);
-    return false;
+    state.nickBindingApplied = false;
+    state.nickBindingId = -1;
+
+    return ApplyTextureRemapAutoNickBinding(state, nick, autoNickLower);
 }
 
 static int GetOrAddTextureRemapSlot(PedTextureRemapState& state, RwTexDictionary* dict, const std::string& originalName) {
@@ -491,13 +659,27 @@ static int GetOrAddTextureRemapSlot(PedTextureRemapState& state, RwTexDictionary
     slot.originalName = originalName;
     slot.remaps.clear();
     slot.remapNames.clear();
+    slot.autoNickCandidates.clear();
     slot.selected = -1;
+    slot.autoNickSelected = -1;
     return idx;
 }
+
+struct TextureRemapTextureRef {
+    RwTexture* texture = nullptr;
+    std::string name;
+    std::string lowerName;
+};
+
+struct TextureRemapOriginalName {
+    std::string name;
+    std::string lowerName;
+};
 
 struct TextureRemapScanCtx {
     PedTextureRemapState* state = nullptr;
     RwTexDictionary* dict = nullptr;
+    std::vector<TextureRemapTextureRef> textures;
 };
 
 static RwTexture* TextureRemapCollectTextureCB(RwTexture* texture, void* data) {
@@ -506,6 +688,9 @@ static RwTexture* TextureRemapCollectTextureCB(RwTexture* texture, void* data) {
     if (!ctx->state || !ctx->dict) return texture;
 
     const std::string name = texture->name;
+    if (!name.empty())
+        ctx->textures.push_back({ texture, name, TextureRemapToLowerAscii(name) });
+
     const size_t remapPos = TextureRemapToLowerAscii(name).find("_remap");
     if (remapPos == std::string::npos || remapPos == 0)
         return texture;
@@ -531,7 +716,120 @@ static RwTexture* TextureRemapCollectTextureCB(RwTexture* texture, void* data) {
     return texture;
 }
 
-static bool ScanTextureRemapsForModel(int modelId, PedTextureRemapState& out) {
+static bool TextureRemapHasOriginalName(const std::vector<TextureRemapOriginalName>& originals, const std::string& lowerName) {
+    for (const auto& original : originals) {
+        if (original.lowerName == lowerName)
+            return true;
+    }
+    return false;
+}
+
+static void TextureRemapAddOriginalName(std::vector<TextureRemapOriginalName>& originals, const char* name) {
+    if (!name || !name[0])
+        return;
+
+    TextureRemapOriginalName original;
+    original.name = name;
+    original.lowerName = TextureRemapToLowerAscii(original.name);
+    if (original.lowerName.empty() || TextureRemapHasOriginalName(originals, original.lowerName))
+        return;
+    originals.push_back(std::move(original));
+}
+
+struct TextureRemapOriginalScanCtx {
+    std::vector<TextureRemapOriginalName>* originals = nullptr;
+};
+
+static RpMaterial* TextureRemapCollectOriginalMaterialCB(RpMaterial* material, void* data) {
+    if (!material || !material->texture || !data)
+        return material;
+    TextureRemapOriginalScanCtx* ctx = reinterpret_cast<TextureRemapOriginalScanCtx*>(data);
+    if (!ctx->originals)
+        return material;
+    TextureRemapAddOriginalName(*ctx->originals, material->texture->name);
+    return material;
+}
+
+static RpAtomic* TextureRemapCollectOriginalAtomicCB(RpAtomic* atomic, void* data) {
+    if (!atomic || !atomic->geometry)
+        return atomic;
+    RpGeometryForAllMaterials(atomic->geometry, TextureRemapCollectOriginalMaterialCB, data);
+    return atomic;
+}
+
+static void CollectPedMaterialOriginalNames(CPed* ped, std::vector<TextureRemapOriginalName>& originals) {
+    if (!ped || !ped->m_pRwClump)
+        return;
+    TextureRemapOriginalScanCtx ctx;
+    ctx.originals = &originals;
+    __try {
+        RpClumpForAllAtomics(ped->m_pRwClump, TextureRemapCollectOriginalAtomicCB, &ctx);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("texture remap material scan: SEH ex=0x%08X ped=%p", GetExceptionCode(), ped);
+    }
+}
+
+static void CollectAutoNickTextureCandidates(
+    PedTextureRemapState& state,
+    RwTexDictionary* dict,
+    const std::vector<TextureRemapTextureRef>& textures,
+    const std::vector<TextureRemapOriginalName>& materialOriginals
+) {
+    std::vector<TextureRemapOriginalName> originals = materialOriginals;
+    for (int i = 0; i < state.slotCount; ++i)
+        TextureRemapAddOriginalName(originals, state.slots[(size_t)i].originalName.c_str());
+
+    if (originals.empty())
+        return;
+
+    for (const auto& texture : textures) {
+        if (!texture.texture || texture.name.empty())
+            continue;
+        if (texture.lowerName.find("_remap") != std::string::npos)
+            continue;
+
+        const TextureRemapOriginalName* bestOriginal = nullptr;
+        size_t bestLen = 0;
+        for (const auto& original : originals) {
+            const size_t len = original.lowerName.size();
+            if (len == 0 || texture.lowerName.size() <= len + 1)
+                continue;
+            if (texture.lowerName.compare(0, len, original.lowerName) != 0)
+                continue;
+            if (texture.lowerName[len] != '_')
+                continue;
+            if (len > bestLen) {
+                bestOriginal = &original;
+                bestLen = len;
+            }
+        }
+
+        if (!bestOriginal)
+            continue;
+
+        const std::string nickKey = texture.name.substr(bestLen + 1);
+        if (nickKey.empty())
+            continue;
+
+        const int slotIdx = GetOrAddTextureRemapSlot(state, dict, bestOriginal->name);
+        if (slotIdx < 0)
+            continue;
+
+        TextureRemapSlotState& slot = state.slots[(size_t)slotIdx];
+        if (SlotHasAutoNickCandidate(slot, texture.texture, texture.name))
+            continue;
+
+        TextureRemapAutoNickCandidate candidate;
+        candidate.texture = texture.texture;
+        candidate.textureName = texture.name;
+        candidate.nickKey = nickKey;
+        candidate.nickKeyLower = TextureRemapToLowerAscii(nickKey);
+        slot.autoNickCandidates.push_back(std::move(candidate));
+        state.totalAutoNickTextures++;
+    }
+}
+
+static bool ScanTextureRemapsForPed(CPed* ped, int modelId, PedTextureRemapState& out) {
     out = PedTextureRemapState{};
     out.modelId = modelId;
 
@@ -556,11 +854,15 @@ static bool ScanTextureRemapsForModel(int modelId, PedTextureRemapState& out) {
         return false;
     }
 
+    std::vector<TextureRemapOriginalName> materialOriginals;
+    CollectPedMaterialOriginalNames(ped, materialOriginals);
+    CollectAutoNickTextureCandidates(out, dict, ctx.textures, materialOriginals);
+
     out.scanned = true;
-    if (out.totalRemapTextures > 0) {
+    if (out.totalRemapTextures > 0 || out.totalAutoNickTextures > 0) {
         SelectRandomTextureRemaps(out);
-        OrcLogInfo("texture remap scan: model=%d txd=%d slots=%d variants=%d",
-                   modelId, out.txdIndex, out.slotCount, out.totalRemapTextures);
+        OrcLogInfo("texture remap scan: model=%d txd=%d slots=%d variants=%d autoNick=%d",
+                   modelId, out.txdIndex, out.slotCount, out.totalRemapTextures, out.totalAutoNickTextures);
     }
     return true;
 }
@@ -588,7 +890,7 @@ static PedTextureRemapState* EnsurePedTextureRemapState(CPed* ped, bool forceRes
     }
 
     PedTextureRemapState fresh;
-    if (!ScanTextureRemapsForModel((int)ped->m_nModelIndex, fresh)) {
+    if (!ScanTextureRemapsForPed(ped, (int)ped->m_nModelIndex, fresh)) {
         fresh.modelId = (int)ped->m_nModelIndex;
         fresh.scanned = true;
     }
@@ -777,12 +1079,20 @@ static RpMaterial* TextureRemapApplyMaterialCB(RpMaterial* material, void* data)
     PedTextureRemapState* state = reinterpret_cast<PedTextureRemapState*>(data);
     for (int i = 0; i < state->slotCount; ++i) {
         TextureRemapSlotState& slot = state->slots[(size_t)i];
-        if (slot.selected < 0 || slot.selected >= (int)slot.remaps.size())
-            continue;
         if (material->texture != slot.original)
             continue;
+
+        RwTexture* replacement = nullptr;
+        if (slot.autoNickSelected >= 0 && slot.autoNickSelected < (int)slot.autoNickCandidates.size()) {
+            replacement = slot.autoNickCandidates[(size_t)slot.autoNickSelected].texture;
+        } else if (slot.selected >= 0 && slot.selected < (int)slot.remaps.size()) {
+            replacement = slot.remaps[(size_t)slot.selected];
+        }
+        if (!replacement)
+            continue;
+
         g_textureRemapRestoreEntries.push_back({ material, material->texture });
-        material->texture = slot.remaps[(size_t)slot.selected];
+        material->texture = replacement;
         break;
     }
     return material;
@@ -798,7 +1108,7 @@ void OrcTextureRemapApplyBefore(CPed* ped) {
     if (!g_enabled || !g_skinTextureRemapEnabled || !ped || !ped->m_pRwClump)
         return;
     PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
-    if (!state || state->slotCount <= 0 || state->totalRemapTextures <= 0)
+    if (!state || state->slotCount <= 0 || (state->totalRemapTextures <= 0 && state->totalAutoNickTextures <= 0))
         return;
     ApplyTextureRemapNickBinding(ped, *state);
     __try {

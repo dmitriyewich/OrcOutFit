@@ -120,6 +120,7 @@
     X(EnableTextureRemaps, "Включить замену текстур (*_remap)", "Enable texture remaps (*_remap)") \
     X(UnsupportedSampTextureNickBinding, "Неподдерживаемая сборка SA:MP - привязка текстур по нику неактивна.", "Unsupported SA:MP build - texture nick binding inactive.") \
     X(TextureNickBinding, "Привязка текстур по нику (SA:MP)", "Texture nick binding (SA:MP)") \
+    X(TextureAutoNickBinding, "Авто-текстуры по нику (original_nick)", "Auto textures by nickname (original_nick)") \
     X(RandomMode, "Случайный режим", "Random mode") \
     X(RandomModePerTexture, "По каждой текстуре", "Per texture") \
     X(RandomModeLinkedVariant, "Связанный вариант", "Linked variant") \

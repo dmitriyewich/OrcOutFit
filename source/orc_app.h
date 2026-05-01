@@ -55,6 +55,7 @@ extern bool g_skinNickMode;
 extern bool g_skinLocalPreferSelected;
 extern bool g_skinTextureRemapEnabled;
 extern bool g_skinTextureRemapNickMode;
+extern bool g_skinTextureRemapAutoNickMode;
 extern int g_skinTextureRemapRandomMode;
 // SKINS/random/<dffBaseName>/*.dff — случайный вариант на каждого педа с этим model id.
 extern bool g_skinRandomFromPools;

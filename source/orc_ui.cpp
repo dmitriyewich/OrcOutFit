@@ -967,6 +967,7 @@ void OrcUiDraw() {
                         ImGui::TextWrapped("%s", T(OrcTextId::UnsupportedSampTextureNickBinding));
                     ImGui::BeginDisabled(textureNickUiOff);
                     UiCheckbox("texture_nick_binding", T(OrcTextId::TextureNickBinding), &g_skinTextureRemapNickMode);
+                    UiCheckbox("texture_auto_nick_binding", T(OrcTextId::TextureAutoNickBinding), &g_skinTextureRemapAutoNickMode);
                     ImGui::EndDisabled();
                     const OrcTextId randomModeNames[] = { OrcTextId::RandomModePerTexture, OrcTextId::RandomModeLinkedVariant };
                     if (g_skinTextureRemapRandomMode < TEXTURE_REMAP_RANDOM_PER_TEXTURE ||

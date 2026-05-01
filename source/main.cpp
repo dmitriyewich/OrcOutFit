@@ -421,6 +421,7 @@ bool g_skinNickMode = true;
 bool g_skinLocalPreferSelected = false;
 bool g_skinTextureRemapEnabled = false;
 bool g_skinTextureRemapNickMode = true;
+bool g_skinTextureRemapAutoNickMode = true;
 int g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
 bool g_skinRandomFromPools = false;
 int g_skinRandomPoolModels = 0;
@@ -670,6 +671,7 @@ void LoadConfig() {
     g_skinLocalPreferSelected = GetPrivateProfileIntA("Features", "SkinLocalPreferSelected", 0, g_iniPath) != 0;
     g_skinTextureRemapEnabled = GetPrivateProfileIntA("Features", "SkinTextureRemap", 0, g_iniPath) != 0;
     g_skinTextureRemapNickMode = GetPrivateProfileIntA("Features", "SkinTextureRemapNickMode", 1, g_iniPath) != 0;
+    g_skinTextureRemapAutoNickMode = GetPrivateProfileIntA("Features", "SkinTextureRemapAutoNickMode", 1, g_iniPath) != 0;
     g_skinTextureRemapRandomMode = GetPrivateProfileIntA("Features", "SkinTextureRemapRandomMode", TEXTURE_REMAP_RANDOM_LINKED_VARIANT, g_iniPath);
     if (g_skinTextureRemapRandomMode < TEXTURE_REMAP_RANDOM_PER_TEXTURE ||
         g_skinTextureRemapRandomMode > TEXTURE_REMAP_RANDOM_LINKED_VARIANT) {
@@ -766,6 +768,7 @@ static void AppendSkinFeatureIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "SkinLocalPreferSelected", g_skinLocalPreferSelected ? 1 : 0);
     AddIniInt(values, "Features", "SkinTextureRemap", g_skinTextureRemapEnabled ? 1 : 0);
     AddIniInt(values, "Features", "SkinTextureRemapNickMode", g_skinTextureRemapNickMode ? 1 : 0);
+    AddIniInt(values, "Features", "SkinTextureRemapAutoNickMode", g_skinTextureRemapAutoNickMode ? 1 : 0);
     AddIniInt(values, "Features", "SkinTextureRemapRandomMode", g_skinTextureRemapRandomMode);
 }
 
@@ -835,6 +838,7 @@ static void SaveDefaultConfig() {
           "SkinLocalPreferSelected=0\n"
           "SkinTextureRemap=0\n"
           "SkinTextureRemapNickMode=1\n"
+          "SkinTextureRemapAutoNickMode=1\n"
           "SkinTextureRemapRandomMode=1\n"
           "; DebugLogLevel: 0=off, 1=errors only, 2=info (full). Legacy DebugLog=1 equals level 2.\n"
           "DebugLogLevel=0\n"
@@ -1740,6 +1744,7 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "SkinLocalPreferSelected=%d\n", g_skinLocalPreferSelected ? 1 : 0);
     AppendFormat(out, "SkinTextureRemap=%d\n", g_skinTextureRemapEnabled ? 1 : 0);
     AppendFormat(out, "SkinTextureRemapNickMode=%d\n", g_skinTextureRemapNickMode ? 1 : 0);
+    AppendFormat(out, "SkinTextureRemapAutoNickMode=%d\n", g_skinTextureRemapAutoNickMode ? 1 : 0);
     AppendFormat(out, "SkinTextureRemapRandomMode=%d\n", g_skinTextureRemapRandomMode);
     AppendFormat(out, "DebugLogLevel=%d\n", static_cast<int>(g_orcLogLevel));
     AppendFormat(out, "DebugLog=%d\n\n", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
