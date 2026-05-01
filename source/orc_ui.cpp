@@ -58,6 +58,144 @@ static const char* T(OrcTextId id) {
     return OrcText(id);
 }
 
+static float UiControlWidth(float avail) {
+    const float minWidth = 150.0f;
+    const float maxWidth = 260.0f;
+    return std::min(maxWidth, std::max(minWidth, avail * 0.48f));
+}
+
+static bool UiBeginControlRow(const char* id, const char* label) {
+    ImGui::PushID(id);
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float controlW = UiControlWidth(avail);
+    const float labelW = std::max(120.0f, avail - controlW - spacing);
+
+    if (!ImGui::BeginTable("##control_row", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
+        ImGui::PopID();
+        return false;
+    }
+    ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed, labelW);
+    ImGui::TableSetupColumn("##control", ImGuiTableColumnFlags_WidthFixed, controlW);
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + labelW);
+    ImGui::TextUnformatted(label);
+    ImGui::PopTextWrapPos();
+    ImGui::TableSetColumnIndex(1);
+    ImGui::SetNextItemWidth(controlW);
+    return true;
+}
+
+static void UiEndControlRow() {
+    ImGui::EndTable();
+    ImGui::PopID();
+}
+
+static void UiBeginWideControl(const char* id, const char* label) {
+    ImGui::PushID(id);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+    ImGui::TextUnformatted(label);
+    ImGui::PopTextWrapPos();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+}
+
+static void UiEndWideControl() {
+    ImGui::PopID();
+}
+
+static bool UiCheckbox(const char* id, const char* label, bool* value) {
+    if (!UiBeginControlRow(id, label))
+        return false;
+    const bool changed = ImGui::Checkbox("##value", value);
+    UiEndControlRow();
+    return changed;
+}
+
+static bool UiRadioButton(const char* id, const char* label, bool active) {
+    if (!UiBeginControlRow(id, label))
+        return false;
+    const bool changed = ImGui::RadioButton("##value", active);
+    UiEndControlRow();
+    return changed;
+}
+
+static bool UiInputText(const char* id, const char* label, char* buffer, size_t bufferSize, ImGuiInputTextFlags flags = 0) {
+    if (!UiBeginControlRow(id, label))
+        return false;
+    const bool changed = ImGui::InputText("##value", buffer, bufferSize, flags);
+    UiEndControlRow();
+    return changed;
+}
+
+static bool UiInputTextWithHint(const char* id, const char* label, const char* hint, char* buffer, size_t bufferSize, ImGuiInputTextFlags flags = 0) {
+    if (!UiBeginControlRow(id, label))
+        return false;
+    const bool changed = ImGui::InputTextWithHint("##value", hint, buffer, bufferSize, flags);
+    UiEndControlRow();
+    return changed;
+}
+
+static bool UiInputInt(const char* id, const char* label, int* value, int step, int stepFast = 0, ImGuiInputTextFlags flags = 0) {
+    if (!UiBeginControlRow(id, label))
+        return false;
+    const bool changed = ImGui::InputInt("##value", value, step, stepFast, flags);
+    UiEndControlRow();
+    return changed;
+}
+
+static bool UiSliderFloat(const char* id, const char* label, float* value, float minValue, float maxValue, const char* format, ImGuiSliderFlags flags = 0) {
+    UiBeginWideControl(id, label);
+    const bool changed = ImGui::SliderFloat("##value", value, minValue, maxValue, format, flags);
+    UiEndWideControl();
+    return changed;
+}
+
+static bool UiDragFloat(const char* id, const char* label, float* value, float speed, float minValue, float maxValue, const char* format) {
+    UiBeginWideControl(id, label);
+    const bool changed = ImGui::DragFloat("##value", value, speed, minValue, maxValue, format);
+    UiEndWideControl();
+    return changed;
+}
+
+static bool UiDragFloat3(const char* id, const char* label, float* values, float speed, float minValue, float maxValue, const char* format) {
+    UiBeginWideControl(id, label);
+    const bool changed = ImGui::DragFloat3("##value", values, speed, minValue, maxValue, format);
+    UiEndWideControl();
+    return changed;
+}
+
+static bool UiButtonTextFits(const char* label, float width) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f <= width;
+}
+
+static void UiButtonPair(const char* first, const char* second, bool* firstClicked, bool* secondClicked) {
+    *firstClicked = false;
+    *secondClicked = false;
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float spacing = style.ItemSpacing.x;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float halfWidth = (avail - spacing) * 0.5f;
+    const bool fitsInline = UiButtonTextFits(first, halfWidth) && UiButtonTextFits(second, halfWidth);
+
+    if (fitsInline) {
+        if (ImGui::Button(first, ImVec2(halfWidth, 0.0f)))
+            *firstClicked = true;
+        ImGui::SameLine();
+        if (ImGui::Button(second, ImVec2(halfWidth, 0.0f)))
+            *secondClicked = true;
+        return;
+    }
+
+    if (ImGui::Button(first, ImVec2(-FLT_MIN, 0.0f)))
+        *firstClicked = true;
+    if (ImGui::Button(second, ImVec2(-FLT_MIN, 0.0f)))
+        *secondClicked = true;
+}
+
 static std::string LowerAsciiUi(std::string s) {
     for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
     return s;
@@ -92,10 +230,10 @@ static void WeaponFilterEditorParams(CustomObjectSkinParams& obj) {
     ImGui::TextWrapped("%s", T(OrcTextId::WeaponConditionHint));
 
     const bool any = !obj.weaponRequireAll;
-    if (ImGui::RadioButton(T(OrcTextId::AnySelectedWeapon), any)) obj.weaponRequireAll = false;
-    if (ImGui::RadioButton(T(OrcTextId::AllSelectedWeapons), !any)) obj.weaponRequireAll = true;
+    if (UiRadioButton("obj_weapon_any", T(OrcTextId::AnySelectedWeapon), any)) obj.weaponRequireAll = false;
+    if (UiRadioButton("obj_weapon_all", T(OrcTextId::AllSelectedWeapons), !any)) obj.weaponRequireAll = true;
 
-    ImGui::Checkbox(T(OrcTextId::HideSelectedWeapons), &obj.hideSelectedWeapons);
+    UiCheckbox("obj_hide_weapons", T(OrcTextId::HideSelectedWeapons), &obj.hideSelectedWeapons);
 
     const float childH = 150.0f;
     if (ImGui::BeginChild("##obj_weapon_filter_list", ImVec2(-FLT_MIN, childH), true)) {
@@ -105,7 +243,10 @@ static void WeaponFilterEditorParams(CustomObjectSkinParams& obj) {
             bool sel = std::find(obj.weaponTypes.begin(), obj.weaponTypes.end(), wt) != obj.weaponTypes.end();
             char lbl[96];
             _snprintf_s(lbl, _TRUNCATE, "%s [%d]", g_cfg[wt].name, wt);
-            if (ImGui::Checkbox(lbl, &sel)) {
+            ImGui::PushID(wt);
+            const bool changed = UiCheckbox("weapon_filter", lbl, &sel);
+            ImGui::PopID();
+            if (changed) {
                 if (sel) {
                     if (std::find(obj.weaponTypes.begin(), obj.weaponTypes.end(), wt) == obj.weaponTypes.end())
                         obj.weaponTypes.push_back(wt);
@@ -179,37 +320,29 @@ void OrcUiDraw() {
     }
     if (!open) overlay::SetOpen(false);
 
-    auto BtnHalfRow = [](const char* a, const char* b, bool* aClicked, bool* bClicked) {
-        *aClicked = *bClicked = false;
-        const float sp = ImGui::GetStyle().ItemSpacing.x;
-        const float w = (ImGui::GetContentRegionAvail().x - sp) * 0.5f;
-        if (ImGui::Button(a, ImVec2(w, 0))) *aClicked = true;
-        ImGui::SameLine();
-        if (ImGui::Button(b, ImVec2(w, 0))) *bClicked = true;
-    };
-
     if (ImGui::BeginTabBar("OrcOutFitTabs", ImGuiTabBarFlags_None)) {
 
         // ------------------------------------------------------------------
         // Main
         // ------------------------------------------------------------------
         if (ImGui::BeginTabItem(T(OrcTextId::TabMain))) {
-            ImGui::Checkbox(T(OrcTextId::PluginEnabled), &g_enabled);
-            ImGui::TextUnformatted(T(OrcTextId::Language));
+            UiCheckbox("plugin_enabled", T(OrcTextId::PluginEnabled), &g_enabled);
             const OrcUiLanguage languages[] = { OrcUiLanguage::Russian, OrcUiLanguage::English };
-            if (ImGui::BeginCombo("##language", OrcLanguageDisplayName(g_orcUiLanguage))) {
-                for (OrcUiLanguage language : languages) {
-                    const bool selected = language == g_orcUiLanguage;
-                    if (ImGui::Selectable(OrcLanguageDisplayName(language), selected)) {
-                        g_orcUiLanguage = language;
-                        SaveMainIni();
+            if (UiBeginControlRow("language", T(OrcTextId::Language))) {
+                if (ImGui::BeginCombo("##value", OrcLanguageDisplayName(g_orcUiLanguage))) {
+                    for (OrcUiLanguage language : languages) {
+                        const bool selected = language == g_orcUiLanguage;
+                        if (ImGui::Selectable(OrcLanguageDisplayName(language), selected)) {
+                            g_orcUiLanguage = language;
+                            SaveMainIni();
+                        }
+                        if (selected)
+                            ImGui::SetItemDefaultFocus();
                     }
-                    if (selected)
-                        ImGui::SetItemDefaultFocus();
+                    ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
+                UiEndControlRow();
             }
-            ImGui::TextUnformatted(T(OrcTextId::ToggleKey));
             ImGui::PushItemWidth(-FLT_MIN);
             static char actKeyBuf[32] = "F7";
             static bool actKeyBufInited = false;
@@ -217,53 +350,55 @@ void OrcUiDraw() {
                 _snprintf_s(actKeyBuf, _TRUNCATE, "%s", VkToString(g_activationVk));
                 actKeyBufInited = true;
             }
-            if (ImGui::InputText("##actkey", actKeyBuf, sizeof(actKeyBuf), ImGuiInputTextFlags_CharsNoBlank))
+            if (UiInputText("actkey", T(OrcTextId::ToggleKey), actKeyBuf, sizeof(actKeyBuf), ImGuiInputTextFlags_CharsNoBlank))
             {
                 g_activationVk = ParseActivationVk(actKeyBuf);
                 RefreshActivationRouting();
             }
 
-            ImGui::TextUnformatted(T(OrcTextId::ChatCommand));
             static char cmdBuf[96] = {};
             if (cmdBuf[0] == 0) _snprintf_s(cmdBuf, _TRUNCATE, "%s", g_toggleCommand.c_str());
-            if (ImGui::InputText("##cmd", cmdBuf, sizeof(cmdBuf))) {
+            if (UiInputText("cmd", T(OrcTextId::ChatCommand), cmdBuf, sizeof(cmdBuf))) {
                 g_toggleCommand = cmdBuf;
                 if (!g_toggleCommand.empty() && g_toggleCommand[0] != '/') g_toggleCommand.insert(g_toggleCommand.begin(), '/');
             }
-            if (ImGui::Checkbox(T(OrcTextId::SampAllowToggleKey), &g_sampAllowActivationKey))
+            if (UiCheckbox("samp_allow_toggle_key", T(OrcTextId::SampAllowToggleKey), &g_sampAllowActivationKey))
                 RefreshActivationRouting();
 
             ImGui::Separator();
             ImGui::TextUnformatted(T(OrcTextId::Features));
-            ImGui::Checkbox(T(OrcTextId::RenderWeaponsForAllPeds), &g_renderAllPedsWeapons);
-            ImGui::Checkbox(T(OrcTextId::RenderObjectsForAllPeds), &g_renderAllPedsObjects);
+            UiCheckbox("render_all_peds_weapons", T(OrcTextId::RenderWeaponsForAllPeds), &g_renderAllPedsWeapons);
+            UiCheckbox("render_all_peds_objects", T(OrcTextId::RenderObjectsForAllPeds), &g_renderAllPedsObjects);
             if (g_renderAllPedsWeapons || g_renderAllPedsObjects) {
-                ImGui::SliderFloat(T(OrcTextId::AllPedsRadius), &g_renderAllPedsRadius, 5.0f, 500.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+                UiSliderFloat("all_peds_radius", T(OrcTextId::AllPedsRadius), &g_renderAllPedsRadius, 5.0f, 500.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
             }
-            ImGui::Checkbox(T(OrcTextId::ConsiderWeaponSkills), &g_considerWeaponSkills);
-            ImGui::Checkbox(T(OrcTextId::RenderCustomObjects), &g_renderCustomObjects);
-            ImGui::Checkbox(T(OrcTextId::SkinMode), &g_skinModeEnabled);
-            ImGui::Checkbox(T(OrcTextId::SkinHideBasePed), &g_skinHideBasePed);
+            UiCheckbox("consider_weapon_skills", T(OrcTextId::ConsiderWeaponSkills), &g_considerWeaponSkills);
+            UiCheckbox("render_custom_objects", T(OrcTextId::RenderCustomObjects), &g_renderCustomObjects);
+            UiCheckbox("skin_mode", T(OrcTextId::SkinMode), &g_skinModeEnabled);
+            UiCheckbox("skin_hide_base_ped", T(OrcTextId::SkinHideBasePed), &g_skinHideBasePed);
             const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
             if (sampNickUiOff)
                 ImGui::TextWrapped("%s", T(OrcTextId::UnsupportedSampNickBinding));
             ImGui::BeginDisabled(sampNickUiOff);
-            ImGui::Checkbox(T(OrcTextId::SkinNickBinding), &g_skinNickMode);
+            UiCheckbox("skin_nick_binding", T(OrcTextId::SkinNickBinding), &g_skinNickMode);
             ImGui::EndDisabled();
-            ImGui::Checkbox(T(OrcTextId::SkinAlwaysSelectedForMe), &g_skinLocalPreferSelected);
+            UiCheckbox("skin_always_selected", T(OrcTextId::SkinAlwaysSelectedForMe), &g_skinLocalPreferSelected);
             ImGui::TextWrapped("%s", T(OrcTextId::SkinAlwaysSelectedHint));
             int logCombo = static_cast<int>(g_orcLogLevel);
             const OrcTextId logLabels[] = { OrcTextId::LogOff, OrcTextId::LogErrorsOnly, OrcTextId::LogInfoFull };
             if (logCombo < 0) logCombo = 0;
             if (logCombo > 2) logCombo = 2;
-            if (ImGui::BeginCombo(T(OrcTextId::DebugLog), T(logLabels[logCombo]))) {
-                for (int i = 0; i < 3; ++i) {
-                    if (ImGui::Selectable(T(logLabels[i]), logCombo == i)) {
-                        logCombo = i;
-                        g_orcLogLevel = static_cast<OrcLogLevel>(logCombo);
+            if (UiBeginControlRow("debug_log", T(OrcTextId::DebugLog))) {
+                if (ImGui::BeginCombo("##value", T(logLabels[logCombo]))) {
+                    for (int i = 0; i < 3; ++i) {
+                        if (ImGui::Selectable(T(logLabels[i]), logCombo == i)) {
+                            logCombo = i;
+                            g_orcLogLevel = static_cast<OrcLogLevel>(logCombo);
+                        }
                     }
+                    ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
+                UiEndControlRow();
             }
             ImGui::TextDisabled("%s", OrcLogGetPath());
             ImGui::PopItemWidth();
@@ -292,7 +427,7 @@ void OrcUiDraw() {
             }
 
             bool reload = false, rescanObj = false;
-            BtnHalfRow(T(OrcTextId::ReloadIni), T(OrcTextId::RescanObjects), &reload, &rescanObj);
+            UiButtonPair(T(OrcTextId::ReloadIni), T(OrcTextId::RescanObjects), &reload, &rescanObj);
             if (reload) {
                 LoadConfig();
                 DiscoverCustomObjectsAndEnsureIni();
@@ -307,7 +442,6 @@ void OrcUiDraw() {
             ImGui::Separator();
             std::vector<std::pair<std::string, int>> pedSkins;
             OrcCollectPedSkins(pedSkins);
-            ImGui::TextWrapped("%s", T(OrcTextId::PedSkinEditingTarget));
             if (pedSkins.empty()) {
                 ImGui::TextDisabled("%s", T(OrcTextId::NoPedModelsInCacheReconnect));
             } else {
@@ -316,26 +450,29 @@ void OrcUiDraw() {
                 const auto& cur = pedSkins[(size_t)g_uiWeaponSkinListIdx];
                 char comboLbl[192];
                 PedSkinListLabel(comboLbl, sizeof(comboLbl), cur.first.c_str(), cur.second);
-                if (ImGui::BeginCombo("##wskinpick", comboLbl)) {
-                    CPlayerPed* pl = FindPlayerPed(0);
-                    const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
-                    for (int i = 0; i < (int)pedSkins.size(); i++) {
-                        const bool sel = (i == g_uiWeaponSkinListIdx);
-                        const bool onPlayer = !onMe.empty() && LowerAsciiUi(pedSkins[(size_t)i].first) == LowerAsciiUi(onMe);
-                        char rowLbl[192];
-                        PedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
-                        if (ImGui::Selectable(rowLbl, sel)) {
-                            g_uiWeaponSkinListIdx = i;
-                            SyncWeaponUiBuffersFromSkinPick();
+                if (UiBeginControlRow("wskinpick", T(OrcTextId::PedSkinEditingTarget))) {
+                    if (ImGui::BeginCombo("##value", comboLbl)) {
+                        CPlayerPed* pl = FindPlayerPed(0);
+                        const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
+                        for (int i = 0; i < (int)pedSkins.size(); i++) {
+                            const bool sel = (i == g_uiWeaponSkinListIdx);
+                            const bool onPlayer = !onMe.empty() && LowerAsciiUi(pedSkins[(size_t)i].first) == LowerAsciiUi(onMe);
+                            char rowLbl[192];
+                            PedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
+                            if (ImGui::Selectable(rowLbl, sel)) {
+                                g_uiWeaponSkinListIdx = i;
+                                SyncWeaponUiBuffersFromSkinPick();
+                            }
+                            if (onPlayer) {
+                                ImDrawList* dl = ImGui::GetWindowDrawList();
+                                const ImVec2 mn = ImGui::GetItemRectMin();
+                                const ImVec2 mx = ImGui::GetItemRectMax();
+                                dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
+                            }
                         }
-                        if (onPlayer) {
-                            ImDrawList* dl = ImGui::GetWindowDrawList();
-                            const ImVec2 mn = ImGui::GetItemRectMin();
-                            const ImVec2 mx = ImGui::GetItemRectMax();
-                            dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
-                        }
+                        ImGui::EndCombo();
                     }
-                    ImGui::EndCombo();
+                    UiEndControlRow();
                 }
                 if (ImGui::Button(T(OrcTextId::WearThisSkin), ImVec2(-FLT_MIN, 0))) {
                     OrcApplyLocalPlayerModelById(cur.second);
@@ -396,60 +533,61 @@ void OrcUiDraw() {
                          (pc && pc->name) ? pc->name : T(OrcTextId::Weapon),
                          g_uiWeaponSecondary ? " 2" : "",
                          g_uiWeaponIdx, previewModelId);
-            ImGui::TextUnformatted(T(OrcTextId::Weapon));
-            if (ImGui::BeginCombo("##weapon", preview)) {
-                std::vector<char> localHas;
-                localHas.assign(g_cfg.size(), 0);
-                CPlayerPed* ped = FindPlayerPed(0);
-                if (ped) {
-                    for (int s = 0; s < 13; s++) {
-                        auto& w = ped->m_aWeapons[s];
-                        const int wt = (int)w.m_eWeaponType;
-                        if (wt <= 0 || wt >= (int)localHas.size()) continue;
-                        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
-                        const bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
-                        if (needsAmmo && w.m_nAmmoTotal == 0) continue;
-                        localHas[wt] = 1;
+            if (UiBeginControlRow("weapon", T(OrcTextId::Weapon))) {
+                if (ImGui::BeginCombo("##value", preview)) {
+                    std::vector<char> localHas;
+                    localHas.assign(g_cfg.size(), 0);
+                    CPlayerPed* ped = FindPlayerPed(0);
+                    if (ped) {
+                        for (int s = 0; s < 13; s++) {
+                            auto& w = ped->m_aWeapons[s];
+                            const int wt = (int)w.m_eWeaponType;
+                            if (wt <= 0 || wt >= (int)localHas.size()) continue;
+                            CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+                            const bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+                            if (needsAmmo && w.m_nAmmoTotal == 0) continue;
+                            localHas[wt] = 1;
+                        }
                     }
-                }
-                const int maxWtUi = std::min(256, (int)g_cfg.size() - 1);
-                for (int wt = 0; wt <= maxWtUi; wt++) {
-                    const char* baseName = (wt >= 0 && wt < (int)g_cfg.size() && g_cfg[wt].name) ? g_cfg[wt].name : T(OrcTextId::Weapon);
-                    char lbl[128];
-                    const int modelId = (wt > 0 && wt < (int)g_weaponModelId.size()) ? g_weaponModelId[wt] : 0;
-                    _snprintf_s(lbl, _TRUNCATE, "%s [%d][%d]", baseName, wt, modelId);
-                    const bool hasNow = (wt > 0 && wt < (int)localHas.size() && localHas[wt] != 0);
-                    if (ImGui::Selectable(lbl, (wt == g_uiWeaponIdx) && !g_uiWeaponSecondary)) { g_uiWeaponIdx = wt; g_uiWeaponSecondary = false; }
-                    if (hasNow) {
-                        ImDrawList* dl = ImGui::GetWindowDrawList();
-                        const ImVec2 mn = ImGui::GetItemRectMin();
-                        const ImVec2 mx = ImGui::GetItemRectMax();
-                        dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
-                    }
-                    if (g_considerWeaponSkills && IsDualCapable(wt)) {
-                        char lbl2[128];
-                        const int modelId2 = (wt > 0 && wt < (int)g_weaponModelId2.size()) ? g_weaponModelId2[wt] : 0;
-                        _snprintf_s(lbl2, _TRUNCATE, "%s 2 [%d][%d]", baseName, wt, modelId2);
-                        if (ImGui::Selectable(lbl2, (wt == g_uiWeaponIdx) && g_uiWeaponSecondary)) { g_uiWeaponIdx = wt; g_uiWeaponSecondary = true; }
+                    const int maxWtUi = std::min(256, (int)g_cfg.size() - 1);
+                    for (int wt = 0; wt <= maxWtUi; wt++) {
+                        const char* baseName = (wt >= 0 && wt < (int)g_cfg.size() && g_cfg[wt].name) ? g_cfg[wt].name : T(OrcTextId::Weapon);
+                        char lbl[128];
+                        const int modelId = (wt > 0 && wt < (int)g_weaponModelId.size()) ? g_weaponModelId[wt] : 0;
+                        _snprintf_s(lbl, _TRUNCATE, "%s [%d][%d]", baseName, wt, modelId);
+                        const bool hasNow = (wt > 0 && wt < (int)localHas.size() && localHas[wt] != 0);
+                        if (ImGui::Selectable(lbl, (wt == g_uiWeaponIdx) && !g_uiWeaponSecondary)) { g_uiWeaponIdx = wt; g_uiWeaponSecondary = false; }
                         if (hasNow) {
                             ImDrawList* dl = ImGui::GetWindowDrawList();
                             const ImVec2 mn = ImGui::GetItemRectMin();
                             const ImVec2 mx = ImGui::GetItemRectMax();
                             dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
                         }
+                        if (g_considerWeaponSkills && IsDualCapable(wt)) {
+                            char lbl2[128];
+                            const int modelId2 = (wt > 0 && wt < (int)g_weaponModelId2.size()) ? g_weaponModelId2[wt] : 0;
+                            _snprintf_s(lbl2, _TRUNCATE, "%s 2 [%d][%d]", baseName, wt, modelId2);
+                            if (ImGui::Selectable(lbl2, (wt == g_uiWeaponIdx) && g_uiWeaponSecondary)) { g_uiWeaponIdx = wt; g_uiWeaponSecondary = true; }
+                            if (hasNow) {
+                                ImDrawList* dl = ImGui::GetWindowDrawList();
+                                const ImVec2 mn = ImGui::GetItemRectMin();
+                                const ImVec2 mx = ImGui::GetItemRectMax();
+                                dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
+                            }
+                        }
                     }
+                    ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
+                UiEndControlRow();
             }
 
-            ImGui::TextUnformatted(T(OrcTextId::WeaponSlotId));
             int idx = g_uiWeaponIdx;
-            if (ImGui::InputInt("##weaponid", &idx, 1, 1)) {
+            if (UiInputInt("weaponid", T(OrcTextId::WeaponSlotId), &idx, 1, 1)) {
                 if (idx >= 1 && idx < (int)g_cfg.size()) { g_uiWeaponIdx = idx; g_uiWeaponSecondary = false; }
             }
 
             if (g_considerWeaponSkills && IsDualCapable(g_uiWeaponIdx)) {
-                ImGui::Checkbox(T(OrcTextId::EditSecondWeapon), &g_uiWeaponSecondary);
+                UiCheckbox("edit_second_weapon", T(OrcTextId::EditSecondWeapon), &g_uiWeaponSecondary);
             } else {
                 g_uiWeaponSecondary = false;
             }
@@ -463,8 +601,7 @@ void OrcUiDraw() {
                 ImGui::PopItemWidth();
             } else {
                 auto& c = editingArr[g_uiWeaponIdx];
-                ImGui::Checkbox(T(OrcTextId::ShowOnBody), &c.enabled);
-                ImGui::SameLine();
+                UiCheckbox("show_on_body", T(OrcTextId::ShowOnBody), &c.enabled);
                 if (ImGui::SmallButton(T(OrcTextId::Copy))) {
                     g_weaponBuf.valid = true;
                     g_weaponBuf.secondary = g_uiWeaponSecondary;
@@ -484,32 +621,27 @@ void OrcUiDraw() {
 
                 int bi = BoneComboIndex(c.boneId);
                 const char* bonePreview = T(kBones[bi].label);
-                ImGui::TextUnformatted(T(OrcTextId::Bone));
-                if (ImGui::BeginCombo("##wbone", bonePreview)) {
-                    for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
-                        if (ImGui::Selectable(T(kBones[i].label), i == bi))
-                            c.boneId = kBones[i].id;
+                if (UiBeginControlRow("wbone", T(OrcTextId::Bone))) {
+                    if (ImGui::BeginCombo("##value", bonePreview)) {
+                        for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
+                            if (ImGui::Selectable(T(kBones[i].label), i == bi))
+                                c.boneId = kBones[i].id;
+                        }
+                        ImGui::EndCombo();
                     }
-                    ImGui::EndCombo();
+                    UiEndControlRow();
                 }
 
-                ImGui::TextUnformatted(T(OrcTextId::OffsetX));
-                ImGui::DragFloat("##wx", &c.x, 0.005f, -2.0f, 2.0f, "%.3f");
-                ImGui::TextUnformatted(T(OrcTextId::OffsetY));
-                ImGui::DragFloat("##wy", &c.y, 0.005f, -2.0f, 2.0f, "%.3f");
-                ImGui::TextUnformatted(T(OrcTextId::OffsetZ));
-                ImGui::DragFloat("##wz", &c.z, 0.005f, -2.0f, 2.0f, "%.3f");
+                UiDragFloat("wx", T(OrcTextId::OffsetX), &c.x, 0.005f, -2.0f, 2.0f, "%.3f");
+                UiDragFloat("wy", T(OrcTextId::OffsetY), &c.y, 0.005f, -2.0f, 2.0f, "%.3f");
+                UiDragFloat("wz", T(OrcTextId::OffsetZ), &c.z, 0.005f, -2.0f, 2.0f, "%.3f");
 
                 float rxd = c.rx / D2R, ryd = c.ry / D2R, rzd = c.rz / D2R;
-                ImGui::TextUnformatted(T(OrcTextId::RotationX));
-                if (ImGui::DragFloat("##wrx", &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) c.rx = rxd * D2R;
-                ImGui::TextUnformatted(T(OrcTextId::RotationY));
-                if (ImGui::DragFloat("##wry", &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) c.ry = ryd * D2R;
-                ImGui::TextUnformatted(T(OrcTextId::RotationZ));
-                if (ImGui::DragFloat("##wrz", &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) c.rz = rzd * D2R;
+                if (UiDragFloat("wrx", T(OrcTextId::RotationX), &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) c.rx = rxd * D2R;
+                if (UiDragFloat("wry", T(OrcTextId::RotationY), &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) c.ry = ryd * D2R;
+                if (UiDragFloat("wrz", T(OrcTextId::RotationZ), &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) c.rz = rzd * D2R;
 
-                ImGui::TextUnformatted(T(OrcTextId::Scale));
-                ImGui::DragFloat("##wsc", &c.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+                UiDragFloat("wsc", T(OrcTextId::Scale), &c.scale, 0.01f, 0.05f, 10.0f, "%.3f");
                 ImGui::PopItemWidth();
 
                 ImGui::Separator();
@@ -581,20 +713,21 @@ void OrcUiDraw() {
                 ImGui::PushItemWidth(-FLT_MIN);
                 char oprev[160];
                 _snprintf_s(oprev, _TRUNCATE, "%s [%d/%d]", obj.name.c_str(), g_uiCustomIdx + 1, (int)g_customObjects.size());
-                ImGui::TextUnformatted(T(OrcTextId::Object));
-                if (ImGui::BeginCombo("##objpick", oprev)) {
-                    for (int i = 0; i < (int)g_customObjects.size(); i++) {
-                        if (ImGui::Selectable(g_customObjects[i].name.c_str(), i == g_uiCustomIdx)) {
-                            g_uiCustomIdx = i;
-                            g_uiObjParamsLoaded = false;
+                if (UiBeginControlRow("objpick", T(OrcTextId::Object))) {
+                    if (ImGui::BeginCombo("##value", oprev)) {
+                        for (int i = 0; i < (int)g_customObjects.size(); i++) {
+                            if (ImGui::Selectable(g_customObjects[i].name.c_str(), i == g_uiCustomIdx)) {
+                                g_uiCustomIdx = i;
+                                g_uiObjParamsLoaded = false;
+                            }
                         }
+                        ImGui::EndCombo();
                     }
-                    ImGui::EndCombo();
+                    UiEndControlRow();
                 }
 
                 std::vector<std::pair<std::string, int>> pedSkins;
                 OrcCollectPedSkins(pedSkins);
-                ImGui::TextUnformatted(T(OrcTextId::PedSkinDffName));
                 if (pedSkins.empty()) {
                     ImGui::TextDisabled("%s", T(OrcTextId::NoPedModelsInCache));
                 } else {
@@ -612,66 +745,63 @@ void OrcUiDraw() {
                     const auto& curS = pedSkins[(size_t)g_uiObjSkinListIdx];
                     char objSkinCombo[192];
                     PedSkinListLabel(objSkinCombo, sizeof(objSkinCombo), curS.first.c_str(), curS.second);
-                    if (ImGui::BeginCombo("##objskin", objSkinCombo)) {
-                        CPlayerPed* pl = FindPlayerPed(0);
-                        const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
-                        for (int i = 0; i < (int)pedSkins.size(); i++) {
-                            const bool sel = (i == g_uiObjSkinListIdx);
-                            const bool onPlayer = !onMe.empty() && LowerAsciiUi(pedSkins[(size_t)i].first) == LowerAsciiUi(onMe);
-                            char rowLbl[192];
-                            PedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
-                            if (ImGui::Selectable(rowLbl, sel)) {
-                                g_uiObjSkinListIdx = i;
-                                const std::string& sdff = pedSkins[(size_t)i].first;
-                                if (!LoadObjectSkinParamsFromIni(obj.iniPath.c_str(), sdff.c_str(), g_uiObjParams)) {
-                                    g_uiObjParams = CustomObjectSkinParams{};
-                                    g_uiObjParams.enabled = true;
-                                    g_uiObjParams.boneId = BONE_R_THIGH;
+                    if (UiBeginControlRow("objskin", T(OrcTextId::PedSkinDffName))) {
+                        if (ImGui::BeginCombo("##value", objSkinCombo)) {
+                            CPlayerPed* pl = FindPlayerPed(0);
+                            const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
+                            for (int i = 0; i < (int)pedSkins.size(); i++) {
+                                const bool sel = (i == g_uiObjSkinListIdx);
+                                const bool onPlayer = !onMe.empty() && LowerAsciiUi(pedSkins[(size_t)i].first) == LowerAsciiUi(onMe);
+                                char rowLbl[192];
+                                PedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
+                                if (ImGui::Selectable(rowLbl, sel)) {
+                                    g_uiObjSkinListIdx = i;
+                                    const std::string& sdff = pedSkins[(size_t)i].first;
+                                    if (!LoadObjectSkinParamsFromIni(obj.iniPath.c_str(), sdff.c_str(), g_uiObjParams)) {
+                                        g_uiObjParams = CustomObjectSkinParams{};
+                                        g_uiObjParams.enabled = true;
+                                        g_uiObjParams.boneId = BONE_R_THIGH;
+                                    }
+                                }
+                                if (onPlayer) {
+                                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                                    const ImVec2 mn = ImGui::GetItemRectMin();
+                                    const ImVec2 mx = ImGui::GetItemRectMax();
+                                    dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
                                 }
                             }
-                            if (onPlayer) {
-                                ImDrawList* dl = ImGui::GetWindowDrawList();
-                                const ImVec2 mn = ImGui::GetItemRectMin();
-                                const ImVec2 mx = ImGui::GetItemRectMax();
-                                dl->AddRectFilled(mn, ImVec2(mn.x + 4.0f, mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
-                            }
+                            ImGui::EndCombo();
                         }
-                        ImGui::EndCombo();
+                        UiEndControlRow();
                     }
                 }
 
-                ImGui::Checkbox(T(OrcTextId::Show), &g_uiObjParams.enabled);
+                UiCheckbox("obj_show", T(OrcTextId::Show), &g_uiObjParams.enabled);
 
                 int bi = BoneComboIndex(g_uiObjParams.boneId);
                 const char* bonePreview = T(kBones[bi].label);
-                ImGui::TextUnformatted(T(OrcTextId::Bone));
-                if (ImGui::BeginCombo("##objbone", bonePreview)) {
-                    for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
-                        if (ImGui::Selectable(T(kBones[i].label), i == bi))
-                            g_uiObjParams.boneId = kBones[i].id;
+                if (UiBeginControlRow("objbone", T(OrcTextId::Bone))) {
+                    if (ImGui::BeginCombo("##value", bonePreview)) {
+                        for (int i = 0; i < IM_ARRAYSIZE(kBones); i++) {
+                            if (ImGui::Selectable(T(kBones[i].label), i == bi))
+                                g_uiObjParams.boneId = kBones[i].id;
+                        }
+                        ImGui::EndCombo();
                     }
-                    ImGui::EndCombo();
+                    UiEndControlRow();
                 }
 
-                ImGui::TextUnformatted(T(OrcTextId::OffsetX));
-                ImGui::DragFloat("##ox", &g_uiObjParams.x, 0.005f, -2.0f, 2.0f, "%.3f");
-                ImGui::TextUnformatted(T(OrcTextId::OffsetY));
-                ImGui::DragFloat("##oy", &g_uiObjParams.y, 0.005f, -2.0f, 2.0f, "%.3f");
-                ImGui::TextUnformatted(T(OrcTextId::OffsetZ));
-                ImGui::DragFloat("##oz", &g_uiObjParams.z, 0.005f, -2.0f, 2.0f, "%.3f");
+                UiDragFloat("ox", T(OrcTextId::OffsetX), &g_uiObjParams.x, 0.005f, -2.0f, 2.0f, "%.3f");
+                UiDragFloat("oy", T(OrcTextId::OffsetY), &g_uiObjParams.y, 0.005f, -2.0f, 2.0f, "%.3f");
+                UiDragFloat("oz", T(OrcTextId::OffsetZ), &g_uiObjParams.z, 0.005f, -2.0f, 2.0f, "%.3f");
 
                 float rxd = g_uiObjParams.rx / D2R, ryd = g_uiObjParams.ry / D2R, rzd = g_uiObjParams.rz / D2R;
-                ImGui::TextUnformatted(T(OrcTextId::RotationX));
-                if (ImGui::DragFloat("##orx", &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.rx = rxd * D2R;
-                ImGui::TextUnformatted(T(OrcTextId::RotationY));
-                if (ImGui::DragFloat("##ory", &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.ry = ryd * D2R;
-                ImGui::TextUnformatted(T(OrcTextId::RotationZ));
-                if (ImGui::DragFloat("##orz", &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.rz = rzd * D2R;
+                if (UiDragFloat("orx", T(OrcTextId::RotationX), &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.rx = rxd * D2R;
+                if (UiDragFloat("ory", T(OrcTextId::RotationY), &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.ry = ryd * D2R;
+                if (UiDragFloat("orz", T(OrcTextId::RotationZ), &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiObjParams.rz = rzd * D2R;
 
-                ImGui::TextUnformatted(T(OrcTextId::Scale));
-                ImGui::DragFloat("##osc", &g_uiObjParams.scale, 0.01f, 0.05f, 10.0f, "%.3f");
-                ImGui::TextUnformatted(T(OrcTextId::ScaleXyz));
-                ImGui::DragFloat3("##oscxyz", &g_uiObjParams.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
+                UiDragFloat("osc", T(OrcTextId::Scale), &g_uiObjParams.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+                UiDragFloat3("oscxyz", T(OrcTextId::ScaleXyz), &g_uiObjParams.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
                 ImGui::PopItemWidth();
 
                 WeaponFilterEditorParams(g_uiObjParams);
@@ -724,15 +854,17 @@ void OrcUiDraw() {
                         ImGui::PushItemWidth(-FLT_MIN);
                         char previewSkin[160];
                         _snprintf_s(previewSkin, _TRUNCATE, "%s [%d/%d]", g_customSkins[g_uiSkinIdx].name.c_str(), g_uiSkinIdx + 1, (int)g_customSkins.size());
-                        ImGui::TextUnformatted(T(OrcTextId::Skin));
-                        if (ImGui::BeginCombo("##skinpick", previewSkin)) {
-                            for (int i = 0; i < (int)g_customSkins.size(); i++) {
-                                if (ImGui::Selectable(g_customSkins[i].name.c_str(), i == g_uiSkinIdx)) {
-                                    g_uiSkinIdx = i;
-                                    g_skinSelectedName = g_customSkins[i].name;
+                        if (UiBeginControlRow("skinpick", T(OrcTextId::Skin))) {
+                            if (ImGui::BeginCombo("##value", previewSkin)) {
+                                for (int i = 0; i < (int)g_customSkins.size(); i++) {
+                                    if (ImGui::Selectable(g_customSkins[i].name.c_str(), i == g_uiSkinIdx)) {
+                                        g_uiSkinIdx = i;
+                                        g_skinSelectedName = g_customSkins[i].name;
+                                    }
                                 }
+                                ImGui::EndCombo();
                             }
-                            ImGui::EndCombo();
+                            UiEndControlRow();
                         }
 
                         auto& skin = g_customSkins[g_uiSkinIdx];
@@ -740,14 +872,13 @@ void OrcUiDraw() {
                         if (sampNickUiOff)
                             ImGui::TextWrapped("%s", T(OrcTextId::UnsupportedSampNickBinding));
                         ImGui::BeginDisabled(sampNickUiOff);
-                        if (ImGui::Checkbox(T(OrcTextId::BindSkinToNicks), &skin.bindToNick))
+                        if (UiCheckbox("bind_skin_to_nicks", T(OrcTextId::BindSkinToNicks), &skin.bindToNick))
                             InvalidateCustomSkinLookupCache();
                         if (g_uiSkinEditIdx != g_uiSkinIdx) {
                             g_uiSkinEditIdx = g_uiSkinIdx;
                             _snprintf_s(g_uiSkinNickBuf, _TRUNCATE, "%s", skin.nickListCsv.c_str());
                         }
-                        ImGui::TextWrapped("%s", T(OrcTextId::NicksCommaSeparated));
-                        if (ImGui::InputTextWithHint("##skinnicks", T(OrcTextId::NickPlaceholder), g_uiSkinNickBuf, IM_ARRAYSIZE(g_uiSkinNickBuf))) {
+                        if (UiInputTextWithHint("skinnicks", T(OrcTextId::NicksCommaSeparated), T(OrcTextId::NickPlaceholder), g_uiSkinNickBuf, IM_ARRAYSIZE(g_uiSkinNickBuf))) {
                             skin.nickListCsv = g_uiSkinNickBuf;
                             skin.nicknames = ParseNickCsv(skin.nickListCsv);
                             InvalidateCustomSkinLookupCache();
@@ -764,7 +895,7 @@ void OrcUiDraw() {
 
                     ImGui::Separator();
                     bool sm = false, rs = false;
-                    BtnHalfRow(T(OrcTextId::SaveSkinModeSelection), T(OrcTextId::RescanSkins), &sm, &rs);
+                    UiButtonPair(T(OrcTextId::SaveSkinModeSelection), T(OrcTextId::RescanSkins), &sm, &rs);
                     if (sm) SaveSkinModeIni();
                     if (rs) {
                         DiscoverCustomSkins();
@@ -774,12 +905,12 @@ void OrcUiDraw() {
                 }
 
                 if (ImGui::BeginTabItem(T(OrcTextId::TabTexture))) {
-                    ImGui::Checkbox(T(OrcTextId::EnableTextureRemaps), &g_skinTextureRemapEnabled);
+                    UiCheckbox("enable_texture_remaps", T(OrcTextId::EnableTextureRemaps), &g_skinTextureRemapEnabled);
                     const bool textureNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
                     if (textureNickUiOff)
                         ImGui::TextWrapped("%s", T(OrcTextId::UnsupportedSampTextureNickBinding));
                     ImGui::BeginDisabled(textureNickUiOff);
-                    ImGui::Checkbox(T(OrcTextId::TextureNickBinding), &g_skinTextureRemapNickMode);
+                    UiCheckbox("texture_nick_binding", T(OrcTextId::TextureNickBinding), &g_skinTextureRemapNickMode);
                     ImGui::EndDisabled();
                     const OrcTextId randomModeNames[] = { OrcTextId::RandomModePerTexture, OrcTextId::RandomModeLinkedVariant };
                     if (g_skinTextureRemapRandomMode < TEXTURE_REMAP_RANDOM_PER_TEXTURE ||
@@ -787,12 +918,15 @@ void OrcUiDraw() {
                         g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
                     }
                     ImGui::PushItemWidth(-FLT_MIN);
-                    if (ImGui::BeginCombo(T(OrcTextId::RandomMode), T(randomModeNames[g_skinTextureRemapRandomMode]))) {
-                        for (int i = TEXTURE_REMAP_RANDOM_PER_TEXTURE; i <= TEXTURE_REMAP_RANDOM_LINKED_VARIANT; ++i) {
-                            if (ImGui::Selectable(T(randomModeNames[i]), g_skinTextureRemapRandomMode == i))
-                                g_skinTextureRemapRandomMode = i;
+                    if (UiBeginControlRow("texture_random_mode", T(OrcTextId::RandomMode))) {
+                        if (ImGui::BeginCombo("##value", T(randomModeNames[g_skinTextureRemapRandomMode]))) {
+                            for (int i = TEXTURE_REMAP_RANDOM_PER_TEXTURE; i <= TEXTURE_REMAP_RANDOM_LINKED_VARIANT; ++i) {
+                                if (ImGui::Selectable(T(randomModeNames[i]), g_skinTextureRemapRandomMode == i))
+                                    g_skinTextureRemapRandomMode = i;
+                            }
+                            ImGui::EndCombo();
                         }
-                        ImGui::EndCombo();
+                        UiEndControlRow();
                     }
                     ImGui::PopItemWidth();
                     ImGui::TextWrapped("%s", T(OrcTextId::TextureRemapHint));
@@ -809,7 +943,7 @@ void OrcUiDraw() {
                         ImGui::Text("%s", OrcFormat(OrcTextId::TxdSlotFormat, localInfo.txdIndex).c_str());
 
                         bool randomize = false, original = false;
-                        BtnHalfRow(T(OrcTextId::RandomizeLocal), T(OrcTextId::OriginalTextures), &randomize, &original);
+                        UiButtonPair(T(OrcTextId::RandomizeLocal), T(OrcTextId::OriginalTextures), &randomize, &original);
                         if (randomize) {
                             OrcRandomizeLocalPedTextureRemaps();
                             OrcGetLocalPedTextureRemaps(localInfo);
@@ -825,7 +959,6 @@ void OrcUiDraw() {
                             ImGui::PushItemWidth(-FLT_MIN);
                             for (int i = 0; i < (int)localInfo.slots.size(); ++i) {
                                 const TextureRemapSlotInfo& slot = localInfo.slots[(size_t)i];
-                                ImGui::TextUnformatted(slot.originalName.c_str());
 
                                 int selected = slot.selected;
                                 const char* preview = T(OrcTextId::Original);
@@ -834,30 +967,32 @@ void OrcUiDraw() {
 
                                 char comboId[32];
                                 _snprintf_s(comboId, _TRUNCATE, "##texremap%d", i);
-                                if (ImGui::BeginCombo(comboId, preview)) {
-                                    if (ImGui::Selectable(T(OrcTextId::Original), selected == -1)) {
-                                        OrcSetLocalPedTextureRemap(i, -1);
-                                        selected = -1;
-                                    }
-                                    for (int r = 0; r < (int)slot.remapNames.size(); ++r) {
-                                        if (ImGui::Selectable(slot.remapNames[(size_t)r].c_str(), selected == r)) {
-                                            OrcSetLocalPedTextureRemap(i, r);
-                                            selected = r;
+                                if (UiBeginControlRow(comboId, slot.originalName.c_str())) {
+                                    if (ImGui::BeginCombo("##value", preview)) {
+                                        if (ImGui::Selectable(T(OrcTextId::Original), selected == -1)) {
+                                            OrcSetLocalPedTextureRemap(i, -1);
+                                            selected = -1;
                                         }
+                                        for (int r = 0; r < (int)slot.remapNames.size(); ++r) {
+                                            if (ImGui::Selectable(slot.remapNames[(size_t)r].c_str(), selected == r)) {
+                                                OrcSetLocalPedTextureRemap(i, r);
+                                                selected = r;
+                                            }
+                                        }
+                                        ImGui::EndCombo();
                                     }
-                                    ImGui::EndCombo();
+                                    UiEndControlRow();
                                 }
                             }
                             ImGui::PopItemWidth();
                         }
 
                         ImGui::Separator();
-                        ImGui::TextUnformatted(T(OrcTextId::NickBinding));
                         ImGui::PushItemWidth(-FLT_MIN);
-                        ImGui::InputTextWithHint("##texturenicks", T(OrcTextId::NickPlaceholder), g_uiTextureNickBuf, IM_ARRAYSIZE(g_uiTextureNickBuf));
+                        UiInputTextWithHint("texturenicks", T(OrcTextId::NickBinding), T(OrcTextId::NickPlaceholder), g_uiTextureNickBuf, IM_ARRAYSIZE(g_uiTextureNickBuf));
                         ImGui::PopItemWidth();
                         bool saveBind = false, reloadBind = false;
-                        BtnHalfRow(T(OrcTextId::SaveCurrentTextureBinding), T(OrcTextId::ReloadTextureBindings), &saveBind, &reloadBind);
+                        UiButtonPair(T(OrcTextId::SaveCurrentTextureBinding), T(OrcTextId::ReloadTextureBindings), &saveBind, &reloadBind);
                         if (saveBind)
                             OrcSaveLocalPedTextureRemapNickBinding(g_uiTextureNickBuf);
                         if (reloadBind)

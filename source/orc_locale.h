@@ -125,8 +125,8 @@
     X(NoRemapTexturesFound, "В загруженном TXD нет текстур *_remap.", "No *_remap textures found in the loaded TXD.") \
     X(Original, "Оригинал", "Original") \
     X(NickBinding, "Привязка по нику", "Nick binding") \
-    X(SaveCurrentTextureBinding, "Сохранить текущую текстурную привязку", "Save current texture binding") \
-    X(ReloadTextureBindings, "Перезагрузить текстурные привязки", "Reload texture bindings") \
+    X(SaveCurrentTextureBinding, "Сохранить привязку", "Save binding") \
+    X(ReloadTextureBindings, "Обновить привязки", "Reload bindings") \
     X(TextureNickBindingsCountFormat, "Привязок по никам для этого ped: %d", "Nick bindings for this ped: %d") \
     X(TextureBindingRowFormat, "#%d: %s (%d слот(ов))", "#%d: %s (%d slot(s))") \
     X(Delete, "Удалить", "Delete") \

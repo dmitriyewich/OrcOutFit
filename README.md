@@ -1,5 +1,7 @@
 # OrcOutFit
+
 <img width="238" height="408" alt="kHKmcxq" src="https://github.com/user-attachments/assets/44e51b41-9600-4cb8-ae4e-611afc44ed08" />
+
 Нативный **ASI-плагин** для **GTA San Andreas 1.0 US** (x86), в том числе для **SA:MP**. Рисует оружие на теле педа, кастомные объекты и кастомные скины поверх модели, с настройкой через **ImGui**-оверлей и INI-файлы.
 
 **Репозиторий:** [github.com/dmitriyewich/OrcOutFit](https://github.com/dmitriyewich/OrcOutFit) — исходники, `.github/workflows`, профиль сборки Visual Studio и **`README.md`**. `context.md` и `README.txt` считаются локальными заметками по умолчанию и публикуются только по явному запросу; `AGENTS.md`, журнал агента (`.claude/work.md`) и правила Cursor остаются локальными.
@@ -61,7 +63,8 @@
 - Вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**.
 - Внутри **Skins** две подвкладки: **Custom skins** (прежняя логика DFF поверх ped) и **Texture** (`*_remap` для стандартных ped TXD).
 - Интерфейс локализован на русский и английский язык; выбор хранится в **`[Main] Language=ru|en`** и переключается во вкладке **Main**.
-- Кириллица в ImGui поддерживается загрузкой системного шрифта Windows (Segoe UI / Tahoma / Arial); проект компилируется с **`/utf-8`**.
+- Кириллица в ImGui поддерживается через установленный шрифт Windows: основной **Arial**, fallback **Segoe UI / Tahoma / Calibri**. Путь к файлу берётся из реестра Windows Fonts (`HKLM` / `HKCU`) и системных каталогов Fonts, без жёсткой привязки к `C:\Windows\Fonts`; проект компилируется с **`/utf-8`**.
+- Стиль ImGui адаптирован под Dear ImGui 1.92.7 на базе Lua-референса: увеличенный базовый шрифт, разделённые по яркости фоны/кнопки/поля/вкладки, полноширинные слайдеры и адаптивные парные кнопки для длинных русских подписей.
 - Список стандартных ped для редактирования/примерки: **сортировка по model id по возрастанию**, подписи **`Имя [ID]`**.
 - **Wear this skin (local player)** — смена модели локального педа для превью: стриминг (`RequestModel` / `LoadAllRequestedModels`), затем `CPed::SetModelIndex` в начале следующего кадра (безопасно для clump).
 - Во вкладке **Weapons** оставлены только две кнопки сохранения:

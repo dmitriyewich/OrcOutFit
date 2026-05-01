@@ -1,10 +1,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shlobj.h>
 #include <d3d9.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include "overlay.h"
 
@@ -27,6 +29,7 @@ namespace overlay {
 namespace {
 
 constexpr char kDummyWindowClassName[] = "OrcOutFitD3D9DummyWindow";
+constexpr float kUiFontSize = 17.0f;
 constexpr uintptr_t kGtaWindowHandleAddress = 0x00C8CF88u;
 constexpr uintptr_t kCursorKeyboardCallAddr = 0x541DF5u;
 constexpr uintptr_t kCursorMouseStateCallAddr = 0x53F417u;
@@ -138,26 +141,289 @@ void WriteByte(uintptr_t addr, BYTE value) {
     WriteBytes(addr, &value, 1);
 }
 
-void LoadUiFont(ImGuiIO& io) {
-    static constexpr const char* kFontCandidates[] = {
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-        "C:\\Windows\\Fonts\\tahoma.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
+struct FontCandidate {
+    const char* registryName;
+    const char* fallbackFileName;
+};
+
+bool FileExists(const std::string& path) {
+    const DWORD attrs = GetFileAttributesA(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+bool IsAbsolutePath(const std::string& path) {
+    if (path.size() >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/'))
+        return true;
+    return path.size() >= 2 && path[0] == '\\' && path[1] == '\\';
+}
+
+std::string JoinPath(const std::string& dir, const std::string& name) {
+    if (dir.empty())
+        return name;
+    if (dir.back() == '\\' || dir.back() == '/')
+        return dir + name;
+    return dir + "\\" + name;
+}
+
+std::string GetFontsDirectory() {
+    char path[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_FONTS, nullptr, SHGFP_TYPE_CURRENT, path)))
+        return path;
+
+    char windowsDir[MAX_PATH] = {};
+    if (GetWindowsDirectoryA(windowsDir, MAX_PATH) > 0)
+        return JoinPath(windowsDir, "Fonts");
+
+    return {};
+}
+
+std::string GetUserFontsDirectory() {
+    char path[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, path)))
+        return JoinPath(JoinPath(path, "Microsoft"), "Windows\\Fonts");
+
+    char localAppData[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH) > 0)
+        return JoinPath(JoinPath(localAppData, "Microsoft"), "Windows\\Fonts");
+
+    return {};
+}
+
+bool QueryInstalledFontFile(HKEY root, const char* registryName, std::string& fileName) {
+    static constexpr const char* kFontsKey = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts";
+    static constexpr REGSAM kAccessModes[] = {
+        KEY_READ | KEY_WOW64_64KEY,
+        KEY_READ,
     };
-    const ImWchar* ranges = io.Fonts->GetGlyphRangesCyrillic();
-    for (const char* path : kFontCandidates) {
-        if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
+
+    for (REGSAM access : kAccessModes) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExA(root, kFontsKey, 0, access, &key) != ERROR_SUCCESS)
             continue;
-        if (io.Fonts->AddFontFromFileTTF(path, 14.0f, nullptr, ranges)) {
-            OrcLogInfo("overlay: loaded UI font %s", path);
+
+        DWORD type = 0;
+        char value[1024] = {};
+        DWORD valueBytes = sizeof(value);
+        const LONG queryResult = RegQueryValueExA(
+            key,
+            registryName,
+            nullptr,
+            &type,
+            reinterpret_cast<BYTE*>(value),
+            &valueBytes);
+        RegCloseKey(key);
+
+        if (queryResult != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ))
+            continue;
+
+        value[sizeof(value) - 1] = '\0';
+        if (type == REG_EXPAND_SZ) {
+            char expanded[1024] = {};
+            const DWORD expandedLen = ExpandEnvironmentStringsA(value, expanded, sizeof(expanded));
+            if (expandedLen > 0 && expandedLen < sizeof(expanded))
+                fileName = expanded;
+            else
+                fileName = value;
+        } else {
+            fileName = value;
+        }
+        return !fileName.empty();
+    }
+
+    return false;
+}
+
+std::string ResolveFontFilePath(const std::string& fileName, const std::string& preferredDir, const std::string& fallbackDir) {
+    if (fileName.empty())
+        return {};
+    if (IsAbsolutePath(fileName))
+        return FileExists(fileName) ? fileName : std::string{};
+
+    if (!preferredDir.empty()) {
+        const std::string preferredPath = JoinPath(preferredDir, fileName);
+        if (FileExists(preferredPath))
+            return preferredPath;
+    }
+    if (!fallbackDir.empty()) {
+        const std::string fallbackPath = JoinPath(fallbackDir, fileName);
+        if (FileExists(fallbackPath))
+            return fallbackPath;
+    }
+
+    return {};
+}
+
+std::string ResolveInstalledFontPath(const FontCandidate& candidate, const std::string& systemFontsDir, const std::string& userFontsDir) {
+    std::string fileName;
+    if (QueryInstalledFontFile(HKEY_LOCAL_MACHINE, candidate.registryName, fileName)) {
+        const std::string path = ResolveFontFilePath(fileName, systemFontsDir, userFontsDir);
+        if (!path.empty())
+            return path;
+    }
+    if (QueryInstalledFontFile(HKEY_CURRENT_USER, candidate.registryName, fileName)) {
+        const std::string path = ResolveFontFilePath(fileName, userFontsDir, systemFontsDir);
+        if (!path.empty())
+            return path;
+    }
+
+    if (candidate.fallbackFileName) {
+        const std::string path = ResolveFontFilePath(candidate.fallbackFileName, systemFontsDir, userFontsDir);
+        if (!path.empty())
+            return path;
+    }
+
+    return {};
+}
+
+void LoadUiFont(ImGuiIO& io) {
+    static constexpr FontCandidate kFontCandidates[] = {
+        { "Arial (TrueType)", "arial.ttf" },
+        { "Segoe UI (TrueType)", "segoeui.ttf" },
+        { "Tahoma (TrueType)", "tahoma.ttf" },
+        { "Calibri (TrueType)", "calibri.ttf" },
+    };
+    const std::string systemFontsDir = GetFontsDirectory();
+    const std::string userFontsDir = GetUserFontsDirectory();
+    const ImWchar* ranges = io.Fonts->GetGlyphRangesCyrillic();
+    for (const FontCandidate& candidate : kFontCandidates) {
+        const std::string path = ResolveInstalledFontPath(candidate, systemFontsDir, userFontsDir);
+        if (path.empty())
+            continue;
+        if (ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), kUiFontSize, nullptr, ranges)) {
+            io.FontDefault = font;
+            OrcLogInfo("overlay: loaded UI font %s from %s", candidate.registryName, path.c_str());
             return;
         }
     }
 
     ImFontConfig cfg{};
-    cfg.SizePixels = 14.0f;
-    io.Fonts->AddFontDefault(&cfg);
+    cfg.SizePixels = kUiFontSize;
+    io.FontDefault = io.Fonts->AddFontDefault(&cfg);
     OrcLogError("overlay: failed to load Cyrillic UI font, using ImGui default");
+}
+
+void ApplyOrcOutfitStyle() {
+    ImGuiStyle& st = ImGui::GetStyle();
+
+    st.Alpha = 1.0f;
+    st.DisabledAlpha = 0.60f;
+    st.FontSizeBase = kUiFontSize;
+    st.FontScaleMain = 1.0f;
+    st.WindowPadding = ImVec2(15.0f, 15.0f);
+    st.WindowRounding = 4.7f;
+    st.WindowBorderSize = 1.7f;
+    st.WindowBorderHoverPadding = 4.0f;
+    st.WindowMinSize = ImVec2(1.5f, 1.5f);
+    st.WindowTitleAlign = ImVec2(0.5f, 0.5f);
+    st.WindowMenuButtonPosition = ImGuiDir_Left;
+    st.ChildRounding = 4.7f;
+    st.ChildBorderSize = 1.0f;
+    st.PopupRounding = 4.7f;
+    st.PopupBorderSize = 1.0f;
+    st.FramePadding = ImVec2(5.0f, 5.0f);
+    st.FrameRounding = 4.7f;
+    st.FrameBorderSize = 1.0f;
+    st.ItemSpacing = ImVec2(2.0f, 7.0f);
+    st.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+    st.CellPadding = ImVec2(5.0f, 4.0f);
+    st.TouchExtraPadding = ImVec2(0.0f, 0.0f);
+    st.IndentSpacing = 25.0f;
+    st.ColumnsMinSpacing = 6.0f;
+    st.ScrollbarSize = 9.0f;
+    st.ScrollbarRounding = 4.7f;
+    st.ScrollbarPadding = 2.0f;
+    st.GrabMinSize = 15.0f;
+    st.GrabRounding = 4.7f;
+    st.LogSliderDeadzone = 4.0f;
+    st.ImageRounding = 4.7f;
+    st.ImageBorderSize = 1.0f;
+    st.TabRounding = 4.0f;
+    st.TabBorderSize = 1.0f;
+    st.TabBarBorderSize = 1.0f;
+    st.TabBarOverlineSize = 2.0f;
+    st.TreeLinesSize = 1.0f;
+    st.TreeLinesRounding = 4.7f;
+    st.DragDropTargetRounding = 4.7f;
+    st.DragDropTargetBorderSize = 1.0f;
+    st.DragDropTargetPadding = 3.0f;
+    st.ColorMarkerSize = 8.0f;
+    st.ButtonTextAlign = ImVec2(0.5f, 0.5f);
+    st.SelectableTextAlign = ImVec2(0.5f, 0.5f);
+    st.SeparatorSize = 1.0f;
+    st.SeparatorTextBorderSize = 1.0f;
+    st.SeparatorTextAlign = ImVec2(0.5f, 0.5f);
+    st.SeparatorTextPadding = ImVec2(15.0f, 5.0f);
+
+    auto C = [](float r, float g, float b, float a) {
+        return ImVec4(r, g, b, a);
+    };
+    ImVec4* colors = st.Colors;
+    const ImVec4 accent = C(0.33f, 0.67f, 0.86f, 1.00f);
+    const ImVec4 accentSoft = C(0.18f, 0.36f, 0.46f, 1.00f);
+    const ImVec4 control = C(0.06f, 0.07f, 0.08f, 0.96f);
+    const ImVec4 controlHovered = C(0.13f, 0.16f, 0.18f, 0.98f);
+    const ImVec4 controlActive = C(0.18f, 0.23f, 0.26f, 1.00f);
+
+    colors[ImGuiCol_Text] = C(0.96f, 0.96f, 0.96f, 1.00f);
+    colors[ImGuiCol_TextDisabled] = C(0.62f, 0.64f, 0.66f, 1.00f);
+    colors[ImGuiCol_WindowBg] = C(0.12f, 0.13f, 0.14f, 1.00f);
+    colors[ImGuiCol_ChildBg] = C(0.10f, 0.11f, 0.12f, 0.42f);
+    colors[ImGuiCol_PopupBg] = C(0.13f, 0.14f, 0.15f, 0.96f);
+    colors[ImGuiCol_Border] = C(0.29f, 0.32f, 0.35f, 0.82f);
+    colors[ImGuiCol_BorderShadow] = C(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_FrameBg] = control;
+    colors[ImGuiCol_FrameBgHovered] = controlHovered;
+    colors[ImGuiCol_FrameBgActive] = controlActive;
+    colors[ImGuiCol_TitleBg] = C(0.07f, 0.08f, 0.09f, 1.00f);
+    colors[ImGuiCol_TitleBgActive] = C(0.10f, 0.11f, 0.12f, 1.00f);
+    colors[ImGuiCol_TitleBgCollapsed] = C(0.07f, 0.08f, 0.09f, 1.00f);
+    colors[ImGuiCol_MenuBarBg] = C(0.10f, 0.11f, 0.12f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg] = C(0.06f, 0.07f, 0.08f, 0.72f);
+    colors[ImGuiCol_ScrollbarGrab] = C(0.31f, 0.34f, 0.36f, 0.88f);
+    colors[ImGuiCol_ScrollbarGrabHovered] = C(0.41f, 0.46f, 0.49f, 0.94f);
+    colors[ImGuiCol_ScrollbarGrabActive] = C(0.33f, 0.67f, 0.86f, 0.92f);
+    colors[ImGuiCol_CheckMark] = accent;
+    colors[ImGuiCol_SliderGrab] = C(0.27f, 0.52f, 0.66f, 0.95f);
+    colors[ImGuiCol_SliderGrabActive] = accent;
+    colors[ImGuiCol_Button] = C(0.10f, 0.11f, 0.12f, 1.00f);
+    colors[ImGuiCol_ButtonHovered] = C(0.16f, 0.21f, 0.24f, 1.00f);
+    colors[ImGuiCol_ButtonActive] = C(0.22f, 0.39f, 0.49f, 1.00f);
+    colors[ImGuiCol_Header] = C(0.12f, 0.14f, 0.16f, 0.95f);
+    colors[ImGuiCol_HeaderHovered] = C(0.18f, 0.26f, 0.30f, 0.92f);
+    colors[ImGuiCol_HeaderActive] = C(0.21f, 0.38f, 0.48f, 0.92f);
+    colors[ImGuiCol_Separator] = C(0.34f, 0.37f, 0.40f, 0.44f);
+    colors[ImGuiCol_SeparatorHovered] = C(0.42f, 0.50f, 0.54f, 0.60f);
+    colors[ImGuiCol_SeparatorActive] = C(0.33f, 0.67f, 0.86f, 0.92f);
+    colors[ImGuiCol_ResizeGrip] = C(0.26f, 0.30f, 0.33f, 0.42f);
+    colors[ImGuiCol_ResizeGripHovered] = C(0.33f, 0.67f, 0.86f, 0.55f);
+    colors[ImGuiCol_ResizeGripActive] = accent;
+    colors[ImGuiCol_InputTextCursor] = accent;
+    colors[ImGuiCol_Tab] = C(0.08f, 0.09f, 0.10f, 1.00f);
+    colors[ImGuiCol_TabHovered] = C(0.16f, 0.21f, 0.24f, 1.00f);
+    colors[ImGuiCol_TabSelected] = C(0.17f, 0.19f, 0.21f, 1.00f);
+    colors[ImGuiCol_TabSelectedOverline] = accent;
+    colors[ImGuiCol_TabDimmed] = C(0.07f, 0.08f, 0.09f, 0.88f);
+    colors[ImGuiCol_TabDimmedSelected] = C(0.13f, 0.15f, 0.17f, 0.96f);
+    colors[ImGuiCol_TabDimmedSelectedOverline] = C(0.33f, 0.67f, 0.86f, 0.64f);
+    colors[ImGuiCol_PlotLines] = accent;
+    colors[ImGuiCol_PlotLinesHovered] = C(0.58f, 0.82f, 0.95f, 1.00f);
+    colors[ImGuiCol_PlotHistogram] = accentSoft;
+    colors[ImGuiCol_PlotHistogramHovered] = accent;
+    colors[ImGuiCol_TableHeaderBg] = C(0.13f, 0.15f, 0.17f, 1.00f);
+    colors[ImGuiCol_TableBorderStrong] = C(0.34f, 0.37f, 0.40f, 0.78f);
+    colors[ImGuiCol_TableBorderLight] = C(0.24f, 0.27f, 0.30f, 0.62f);
+    colors[ImGuiCol_TableRowBg] = C(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_TableRowBgAlt] = C(1.00f, 1.00f, 1.00f, 0.04f);
+    colors[ImGuiCol_TextLink] = accent;
+    colors[ImGuiCol_TextSelectedBg] = C(0.18f, 0.39f, 0.50f, 0.78f);
+    colors[ImGuiCol_TreeLines] = C(0.34f, 0.37f, 0.40f, 0.58f);
+    colors[ImGuiCol_DragDropTarget] = accent;
+    colors[ImGuiCol_DragDropTargetBg] = C(0.33f, 0.67f, 0.86f, 0.18f);
+    colors[ImGuiCol_UnsavedMarker] = accent;
+    colors[ImGuiCol_NavCursor] = accent;
+    colors[ImGuiCol_NavWindowingHighlight] = C(0.33f, 0.67f, 0.86f, 0.70f);
+    colors[ImGuiCol_NavWindowingDimBg] = C(0.00f, 0.00f, 0.00f, 0.26f);
+    colors[ImGuiCol_ModalWindowDimBg] = C(0.00f, 0.00f, 0.00f, 0.45f);
 }
 
 void CaptureCursorPatchSnapshot() {
@@ -668,11 +934,7 @@ bool InitializeImGuiIfNeeded(IDirect3DDevice9* device) {
 
     LoadUiFont(io);
 
-    ImGui::StyleColorsDark();
-    ImGuiStyle& st = ImGui::GetStyle();
-    st.WindowRounding = 4.0f;
-    st.FrameRounding = 3.0f;
-    st.GrabRounding = 3.0f;
+    ApplyOrcOutfitStyle();
 
     if (!ImGui_ImplWin32_Init(g_hwnd)) {
         OrcLogError("overlay: ImGui_ImplWin32_Init failed");
