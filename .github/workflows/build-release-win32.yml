@@ -1,4 +1,5 @@
 name: Build OrcOutFit Win32
+run-name: ${{ github.event.head_commit.message || github.sha }}
 
 on:
   workflow_dispatch:

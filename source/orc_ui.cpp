@@ -249,36 +249,45 @@ static void UiButtonPair(const char* first, const char* second, bool* firstClick
         *secondClicked = true;
 }
 
-static void ClampCurrentWindowToDisplay() {
-    ImGuiIO& io = ImGui::GetIO();
-    if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f)
+static constexpr float kMainWindowMargin = 12.0f;
+static bool g_mainWindowInitialized = false;
+static ImVec2 g_mainWindowPos(60.0f, 40.0f);
+static ImVec2 g_mainWindowSize(410.0f, 680.0f);
+static float g_mainWindowAppliedScale = 1.0f;
+
+static void GetMainWindowLimits(const ImVec2& displaySize, float scale, ImVec2& minSize, ImVec2& maxSize) {
+    const float margin = kMainWindowMargin * scale;
+    maxSize.x = std::max(1.0f, displaySize.x - margin * 2.0f);
+    maxSize.y = std::max(1.0f, displaySize.y - margin * 2.0f);
+    minSize.x = std::min(340.0f * scale, maxSize.x);
+    minSize.y = std::min(520.0f * scale, maxSize.y);
+}
+
+static void ClampMainWindowRect(const ImVec2& displaySize, ImVec2& position, ImVec2& size, float scale) {
+    if (displaySize.x <= 0.0f || displaySize.y <= 0.0f)
         return;
 
-    const float pad = 0.0f;
-    const ImVec2 maxSize(std::max(1.0f, io.DisplaySize.x), std::max(1.0f, io.DisplaySize.y));
-    const ImVec2 pos = ImGui::GetWindowPos();
-    const ImVec2 size = ImGui::GetWindowSize();
-    const ImVec2 clampedSize(std::min(size.x, maxSize.x), std::min(size.y, maxSize.y));
-    if (std::fabs(clampedSize.x - size.x) > 0.5f || std::fabs(clampedSize.y - size.y) > 0.5f)
-        ImGui::SetWindowSize(clampedSize, ImGuiCond_Always);
+    ImVec2 minSize;
+    ImVec2 maxSize;
+    GetMainWindowLimits(displaySize, scale, minSize, maxSize);
 
-    ImVec2 clamped = pos;
-    if (clampedSize.x + pad * 2.0f <= io.DisplaySize.x) {
-        const float maxX = std::max(pad, io.DisplaySize.x - clampedSize.x - pad);
-        clamped.x = std::min(maxX, std::max(pad, clamped.x));
+    size.x = std::min(maxSize.x, std::max(minSize.x, size.x));
+    size.y = std::min(maxSize.y, std::max(minSize.y, size.y));
+
+    const float margin = kMainWindowMargin * scale;
+    const float maxX = displaySize.x - size.x - margin;
+    if (maxX >= margin) {
+        position.x = std::min(maxX, std::max(margin, position.x));
     } else {
-        clamped.x = pad;
+        position.x = std::max(0.0f, (displaySize.x - size.x) * 0.5f);
     }
 
-    if (clampedSize.y + pad * 2.0f <= io.DisplaySize.y) {
-        const float maxY = std::max(pad, io.DisplaySize.y - clampedSize.y - pad);
-        clamped.y = std::min(maxY, std::max(pad, clamped.y));
+    const float maxY = displaySize.y - size.y - margin;
+    if (maxY >= margin) {
+        position.y = std::min(maxY, std::max(margin, position.y));
     } else {
-        clamped.y = pad;
+        position.y = std::max(0.0f, (displaySize.y - size.y) * 0.5f);
     }
-
-    if (std::fabs(clamped.x - pos.x) > 0.5f || std::fabs(clamped.y - pos.y) > 0.5f)
-        ImGui::SetWindowPos(clamped, ImGuiCond_Always);
 }
 
 static std::string LowerAsciiUi(std::string s) {
@@ -390,29 +399,49 @@ static void TryInitWeaponSkinListToLocalPed() {
 
 void OrcUiDraw() {
     ImGuiIO& io = ImGui::GetIO();
-    const float marginX = UiScaled(16.0f);
-    const float marginY = UiScaled(24.0f);
-    const float maxW = std::max(1.0f, io.DisplaySize.x - marginX);
-    const float maxH = std::max(1.0f, io.DisplaySize.y - marginY);
-    const float winW = std::min(UiScaled(410.0f), maxW);
-    const float winH = std::min(UiScaled(680.0f), maxH);
-    const float minW = std::min(UiScaled(340.0f), maxW);
-    const float minH = std::min(UiScaled(520.0f), maxH);
-    ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(minW, minH), ImVec2(maxW, maxH));
-    ImGui::SetNextWindowPos(
-        ImVec2(std::max(UiScaled(8.0f), io.DisplaySize.x - winW - UiScaled(18.0f)), UiScaled(40.0f)),
-        ImGuiCond_FirstUseEver);
+    const float uiScale = UiLayoutScale();
+    ImVec2 minSize;
+    ImVec2 maxSize;
+    GetMainWindowLimits(io.DisplaySize, uiScale, minSize, maxSize);
+    if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
+        if (!g_mainWindowInitialized) {
+            const float margin = kMainWindowMargin * uiScale;
+            g_mainWindowSize.x = std::min(410.0f * uiScale, maxSize.x);
+            g_mainWindowSize.y = std::min(680.0f * uiScale, maxSize.y);
+            g_mainWindowPos.x = std::max(margin, io.DisplaySize.x - g_mainWindowSize.x - UiScaled(18.0f));
+            g_mainWindowPos.y = std::max(margin, UiScaled(40.0f));
+            g_mainWindowInitialized = true;
+            g_mainWindowAppliedScale = uiScale;
+        } else if (std::fabs(uiScale - g_mainWindowAppliedScale) > 0.001f) {
+            const float ratio = uiScale / std::max(g_mainWindowAppliedScale, 0.001f);
+            g_mainWindowPos.x *= ratio;
+            g_mainWindowPos.y *= ratio;
+            g_mainWindowSize.x *= ratio;
+            g_mainWindowSize.y *= ratio;
+            g_mainWindowAppliedScale = uiScale;
+        }
+
+        ClampMainWindowRect(io.DisplaySize, g_mainWindowPos, g_mainWindowSize, uiScale);
+    }
+
+    ImGui::SetNextWindowPos(g_mainWindowPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(g_mainWindowSize, ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints(minSize, maxSize);
 
     bool open = true;
-    const ImGuiWindowFlags wflags = ImGuiWindowFlags_NoCollapse;
+    const ImGuiWindowFlags wflags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
     if (!ImGui::Begin(T(OrcTextId::WindowTitle), &open, wflags)) {
+        g_mainWindowPos = ImGui::GetWindowPos();
+        g_mainWindowSize = ImGui::GetWindowSize();
+        ClampMainWindowRect(io.DisplaySize, g_mainWindowPos, g_mainWindowSize, uiScale);
         ImGui::End();
         if (!open) overlay::SetOpen(false);
         return;
     }
+    g_mainWindowPos = ImGui::GetWindowPos();
+    g_mainWindowSize = ImGui::GetWindowSize();
+    ClampMainWindowRect(io.DisplaySize, g_mainWindowPos, g_mainWindowSize, uiScale);
     if (!open) overlay::SetOpen(false);
-    ClampCurrentWindowToDisplay();
 
     if (ImGui::BeginTabBar("OrcOutFitTabs", ImGuiTabBarFlags_None)) {
 
