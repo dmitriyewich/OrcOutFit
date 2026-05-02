@@ -1,5 +1,5 @@
 name: Build OrcOutFit Win32
-run-name: ${{ github.event.head_commit.message || github.sha }}
+run-name: ${{ github.event.release.name || github.event.release.tag_name || (github.ref_type == 'tag' && github.ref_name) || github.event.head_commit.message || github.sha }}
 
 on:
   workflow_dispatch:

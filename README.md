@@ -154,7 +154,7 @@
 
 - Workflow: **`.github/workflows/build-release-win32.yml`**.
 - Триггеры: ручной запуск (`workflow_dispatch`) и публикация релиза (`release.published`).
-- Имя workflow run в списке Actions берётся из commit message, если он есть в событии, иначе из SHA последнего коммита выбранного ref (`github.sha`).
+- Имя workflow run в списке Actions берётся из названия релиза, затем из release/tag ref, затем из commit message, иначе из SHA (`github.sha`).
 - Сборка в CI: сначала `source/external/plugin-sdk/plugin_sa/Plugin_SA.vcxproj` (`Release|Win32`, `PlatformToolset=v143`) для `Plugin.lib`, затем `OrcOutFit.sln` (`Release|x86`, `PlatformToolset=v143`). Это намеренно отличается от локального `v145`.
 - Публикация:
   - workflow artifact: `OrcOutFit-Release-Win32`;
