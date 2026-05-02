@@ -29,6 +29,7 @@ extern float g_uiScale;
 extern float g_uiFontSize;
 extern bool g_considerWeaponSkills;
 extern bool g_renderCustomObjects;
+extern bool g_renderStandardObjects;
 
 extern std::vector<WeaponCfg> g_cfg;
 extern std::vector<WeaponCfg> g_cfg2;
@@ -43,11 +44,18 @@ extern std::vector<int> g_weaponModelId;
 extern std::vector<int> g_weaponModelId2;
 
 extern std::vector<CustomObjectCfg> g_customObjects;
+extern std::vector<StandardObjectSlotCfg> g_standardObjects;
 extern std::vector<CustomSkinCfg> g_customSkins;
+extern std::vector<StandardSkinCfg> g_standardSkins;
 extern bool g_livePreviewObjectActive;
 extern std::string g_livePreviewObjectIniPath;
 extern std::string g_livePreviewObjectSkinDff;
 extern CustomObjectSkinParams g_livePreviewObjectParams;
+extern bool g_livePreviewStandardObjectActive;
+extern int g_livePreviewStandardObjectModelId;
+extern int g_livePreviewStandardObjectSlot;
+extern std::string g_livePreviewStandardObjectSkinDff;
+extern CustomObjectSkinParams g_livePreviewStandardObjectParams;
 
 extern bool g_skinModeEnabled;
 extern bool g_skinHideBasePed;
@@ -62,6 +70,8 @@ extern bool g_skinRandomFromPools;
 extern int g_skinRandomPoolModels;
 extern int g_skinRandomPoolVariants;
 extern std::string g_skinSelectedName;
+extern int g_skinSelectedSource;
+extern int g_standardSkinSelectedModelId;
 
 // Shared with orc_ui.cpp (skin list selection)
 extern int g_uiSkinIdx;
@@ -71,17 +81,26 @@ void LoadConfig();
 void RefreshActivationRouting();
 void DiscoverCustomObjectsAndEnsureIni();
 void DiscoverCustomSkins();
+void LoadStandardObjectsFromIni();
+void LoadStandardSkinsFromIni();
+void SaveStandardObjectListToIni();
+bool AddStandardObjectSlot(int modelId);
+void RemoveStandardObjectSlot(size_t index);
+bool IsValidStandardObjectModel(int modelId);
 
 void SaveWeaponSection(int weaponIndex);
 void SaveWeaponSection2(int weaponIndex);
 void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& w1, const std::vector<WeaponCfg>& w2);
 void SaveSkinCfgToIni(const CustomSkinCfg& s);
+void SaveStandardSkinCfgToIni(const StandardSkinCfg& s);
 void SaveSkinModeIni();
 void SaveMainIni();
 
 void InvalidatePerSkinWeaponCache();
 void InvalidateCustomSkinLookupCache();
 void InvalidateObjectSkinParamCache();
+void InvalidateStandardObjectSkinParamCache();
+void InvalidateStandardSkinLookupCache();
 
 void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2);
 
@@ -105,6 +124,9 @@ bool OrcDeleteLocalPedTextureRemapNickBinding(int bindingId);
 
 bool LoadObjectSkinParamsFromIni(const char* iniPath, const char* skinDffName, CustomObjectSkinParams& out);
 void SaveObjectSkinParamsToIni(const char* iniPath, const char* skinDffName, const CustomObjectSkinParams& p);
+bool LoadStandardObjectSkinParamsFromIni(int modelId, int slot, const char* skinDffName, CustomObjectSkinParams& out);
+void SaveStandardObjectSkinParamsToIni(int modelId, int slot, const char* skinDffName, const CustomObjectSkinParams& p);
+StandardSkinCfg* OrcGetStandardSkinCfgByModelId(int modelId, bool createIfMissing);
 
 std::vector<std::string> ParseNickCsv(const std::string& csv);
 const char* VkToString(int vk);

@@ -68,6 +68,26 @@ struct CustomSkinCfg {
     bool txdMissingLogged = false;
 };
 
+struct StandardObjectSlotCfg {
+    int modelId = -1;
+    int slot = 1;
+};
+
+struct StandardSkinCfg {
+    int modelId = -1;
+    std::string dffName;
+    bool bindToNick = false;
+    std::string nickListCsv;
+    std::vector<std::string> nicknames;
+    RwObject* rwObject = nullptr;
+    bool loadFailedLogged = false;
+};
+
+enum SkinSelectedSource {
+    SKIN_SELECTED_CUSTOM = 0,
+    SKIN_SELECTED_STANDARD = 1,
+};
+
 struct TextureRemapSlotInfo {
     std::string originalName;
     std::vector<std::string> remapNames;

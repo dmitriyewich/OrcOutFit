@@ -95,6 +95,7 @@ float g_uiScale = 1.0f;
 float g_uiFontSize = 15.0f;
 bool g_considerWeaponSkills = true;
 bool g_renderCustomObjects = true;
+bool g_renderStandardObjects = true;
 std::vector<WeaponCfg> g_cfg;
 std::vector<WeaponCfg> g_cfg2; // secondary dual-wield placement
 bool g_livePreviewWeaponsActive = false;
@@ -427,11 +428,17 @@ bool g_skinRandomFromPools = false;
 int g_skinRandomPoolModels = 0;
 int g_skinRandomPoolVariants = 0;
 std::string g_skinSelectedName;
+int g_skinSelectedSource = SKIN_SELECTED_CUSTOM;
+int g_standardSkinSelectedModelId = -1;
 static bool g_skinCanAnimate = false;
 static int  g_skinBindCount = 0;
 
 static void DestroyCustomObjectInstance(CustomObjectCfg& o);
+static void DestroyAllStandardObjectInstances();
+static void DestroyStandardObjectInstancesForSlot(int modelId, int slot);
 static CustomSkinCfg* GetSelectedSkin();
+static void DestroyStandardSkinInstance(StandardSkinCfg& s);
+static bool IsValidStandardSkinModel(int modelId);
 
 // Секция INI → индекс оружия. Дефолтные расположения в стиле тактической выкладки.
 // Оси кости (наблюдение): X = вдоль "right", Y = вдоль "up" (spine) / "at" (бедро), Z = "at/up".
@@ -651,6 +658,8 @@ static void ToggleOverlayFromSamp() {
     overlay::Toggle();
 }
 
+static std::string ToLowerAscii(std::string s);
+
 void RefreshActivationRouting() {
     overlay::SetToggleVirtualKey(g_activationVk);
     const bool hotkeyAllowed = !samp_bridge::IsSampBuildKnown() || g_sampAllowActivationKey;
@@ -665,6 +674,7 @@ void LoadConfig() {
     g_renderAllPedsRadius = (float)GetPrivateProfileIntA("Features", "RenderAllPedsRadius", 80, g_iniPath);
     g_considerWeaponSkills = GetPrivateProfileIntA("Features", "ConsiderWeaponSkills", 1, g_iniPath) != 0;
     g_renderCustomObjects = GetPrivateProfileIntA("Features", "CustomObjects", 1, g_iniPath) != 0;
+    g_renderStandardObjects = GetPrivateProfileIntA("Features", "StandardObjects", 1, g_iniPath) != 0;
     g_skinModeEnabled = GetPrivateProfileIntA("Features", "SkinMode", 0, g_iniPath) != 0;
     g_skinHideBasePed = GetPrivateProfileIntA("Features", "SkinHideBasePed", 1, g_iniPath) != 0;
     g_skinNickMode = GetPrivateProfileIntA("Features", "SkinNickMode", 1, g_iniPath) != 0;
@@ -727,9 +737,15 @@ void LoadConfig() {
     char skinName[128] = {};
     GetPrivateProfileStringA("SkinMode", "Selected", "", skinName, sizeof(skinName), g_iniPath);
     g_skinSelectedName = skinName;
+    char selectedSource[32] = {};
+    GetPrivateProfileStringA("SkinMode", "SelectedSource", "custom", selectedSource, sizeof(selectedSource), g_iniPath);
+    g_skinSelectedSource = (ToLowerAscii(selectedSource) == "standard") ? SKIN_SELECTED_STANDARD : SKIN_SELECTED_CUSTOM;
+    g_standardSkinSelectedModelId = GetPrivateProfileIntA("SkinMode", "StandardSelected", -1, g_iniPath);
     RefreshActivationRouting();
     InvalidatePerSkinWeaponCache();
     InvalidateObjectSkinParamCache();
+    InvalidateStandardObjectSkinParamCache();
+    InvalidateStandardSkinLookupCache();
     OrcLogReloadFromIni(g_iniPath);
     OrcLogInfo("LoadConfig: %s", g_iniPath);
     // Weapon types are discovered in SetupDefaults (InitWeaponTypesAndStorage).
@@ -774,6 +790,8 @@ static void AppendSkinFeatureIniValues(std::vector<OrcIniValue>& values) {
 
 static void AppendSkinModeIniValues(std::vector<OrcIniValue>& values) {
     AddIniValue(values, "SkinMode", "Selected", g_skinSelectedName.c_str());
+    AddIniValue(values, "SkinMode", "SelectedSource", g_skinSelectedSource == SKIN_SELECTED_STANDARD ? "standard" : "custom");
+    AddIniInt(values, "SkinMode", "StandardSelected", g_standardSkinSelectedModelId);
     AddIniInt(values, "SkinMode", "RandomFromPools", g_skinRandomFromPools ? 1 : 0);
 }
 
@@ -792,6 +810,7 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniFloat0(values, "Features", "RenderAllPedsRadius", g_renderAllPedsRadius);
     AddIniInt(values, "Features", "ConsiderWeaponSkills", g_considerWeaponSkills ? 1 : 0);
     AddIniInt(values, "Features", "CustomObjects", g_renderCustomObjects ? 1 : 0);
+    AddIniInt(values, "Features", "StandardObjects", g_renderStandardObjects ? 1 : 0);
     AppendSkinFeatureIniValues(values);
     AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
     AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
@@ -832,6 +851,7 @@ static void SaveDefaultConfig() {
           "RenderAllPedsRadius=80\n"
           "ConsiderWeaponSkills=1\n"
           "CustomObjects=1\n"
+          "StandardObjects=1\n"
           "SkinMode=0\n"
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
@@ -842,7 +862,12 @@ static void SaveDefaultConfig() {
           "SkinTextureRemapRandomMode=1\n"
           "; DebugLogLevel: 0=off, 1=errors only, 2=info (full). Legacy DebugLog=1 equals level 2.\n"
           "DebugLogLevel=0\n"
-          "DebugLog=0\n\n", f);
+          "DebugLog=0\n\n"
+          "[SkinMode]\n"
+          "Selected=\n"
+          "SelectedSource=custom\n"
+          "StandardSelected=-1\n"
+          "RandomFromPools=0\n\n", f);
     for (int wt : g_availableWeaponTypes) {
         if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
         const auto& c = g_cfg[wt];
@@ -871,7 +896,9 @@ void SaveMainIni() {
 // Custom objects discovery (game folder) + per-object INI
 // ----------------------------------------------------------------------------
 std::vector<CustomObjectCfg> g_customObjects;
+std::vector<StandardObjectSlotCfg> g_standardObjects;
 std::vector<CustomSkinCfg> g_customSkins;
+std::vector<StandardSkinCfg> g_standardSkins;
 
 static bool g_customSkinLookupDirty = true;
 static std::unordered_map<std::string, int> g_customSkinNickLookup;
@@ -1221,6 +1248,254 @@ static bool ResolveObjectSkinParamsCached(const std::string& iniPath, const std:
     return true;
 }
 
+static std::vector<std::string> ParseCsvTokens(const char* csv) {
+    std::vector<std::string> out;
+    if (!csv || !csv[0]) return out;
+    std::string token;
+    auto flush = [&]() {
+        std::string t = TrimAscii(token);
+        token.clear();
+        if (!t.empty()) out.push_back(t);
+    };
+    for (const char* p = csv; *p; ++p) {
+        if (*p == ',' || *p == ';' || *p == '\r' || *p == '\n') {
+            flush();
+        } else {
+            token += *p;
+        }
+    }
+    flush();
+    return out;
+}
+
+static std::string StandardObjectsIniPath() {
+    return JoinPath(std::string(g_gameObjDir), "StandardObjects.ini");
+}
+
+static std::string StandardSkinsIniPath() {
+    return JoinPath(std::string(g_gameSkinDir), "StandardSkins.ini");
+}
+
+static std::string StandardObjectSlotKey(int modelId, int slot) {
+    char buf[40];
+    _snprintf_s(buf, _TRUNCATE, "%d#%d", modelId, slot);
+    return std::string(buf);
+}
+
+static bool ParseStandardObjectSlotKey(const std::string& token, int& modelId, int& slot) {
+    modelId = -1;
+    slot = 1;
+    const std::string t = TrimAscii(token);
+    if (t.empty()) return false;
+    const char* p = t.c_str();
+    char* end = nullptr;
+    const long id = strtol(p, &end, 10);
+    if (end == p || id < 0 || id > 30000) return false;
+    modelId = (int)id;
+    if (*end == '#') {
+        char* slotEnd = nullptr;
+        const long parsedSlot = strtol(end + 1, &slotEnd, 10);
+        if (slotEnd == end + 1 || *slotEnd != '\0' || parsedSlot <= 0 || parsedSlot >= 1000)
+            return false;
+        slot = (int)parsedSlot;
+    } else if (*end != '\0') {
+        return false;
+    }
+    return true;
+}
+
+static std::string StandardObjectSkinIniSection(int modelId, int slot, const char* skinDffName) {
+    return std::string("Object.") + StandardObjectSlotKey(modelId, slot) + ".Skin." + (skinDffName ? skinDffName : "");
+}
+
+bool IsValidStandardObjectModel(int modelId) {
+    if (modelId < 0) return false;
+    CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
+    if (!mi) return false;
+    const eModelInfoType type = mi->GetModelType();
+    return type == MODEL_INFO_ATOMIC ||
+           type == MODEL_INFO_TIME ||
+           type == MODEL_INFO_WEAPON ||
+           type == MODEL_INFO_CLUMP ||
+           type == MODEL_INFO_LOD;
+}
+
+void SaveStandardObjectListToIni() {
+    const std::string path = StandardObjectsIniPath();
+    std::string entries;
+    for (const auto& o : g_standardObjects) {
+        if (!entries.empty()) entries += ",";
+        entries += StandardObjectSlotKey(o.modelId, o.slot);
+    }
+    std::vector<OrcIniValue> values;
+    AddIniValue(values, "Objects", "Entries", entries.c_str());
+    if (!OrcIniWriteValues(path.c_str(), "; OrcOutFit standard game object config.\n\n", values))
+        OrcLogError("SaveStandardObjectListToIni: cannot write %s", path.c_str());
+}
+
+void LoadStandardObjectsFromIni() {
+    g_standardObjects.clear();
+    InvalidateStandardObjectSkinParamCache();
+    const std::string path = StandardObjectsIniPath();
+    if (!FileExistsA(path.c_str())) return;
+
+    char entries[4096] = {};
+    GetPrivateProfileStringA("Objects", "Entries", "", entries, sizeof(entries), path.c_str());
+    std::unordered_set<std::string> seen;
+    for (const std::string& token : ParseCsvTokens(entries)) {
+        int modelId = -1;
+        int slot = 1;
+        if (!ParseStandardObjectSlotKey(token, modelId, slot)) continue;
+        if (!IsValidStandardObjectModel(modelId)) continue;
+        const std::string key = StandardObjectSlotKey(modelId, slot);
+        if (!seen.insert(key).second) continue;
+        StandardObjectSlotCfg cfg;
+        cfg.modelId = modelId;
+        cfg.slot = slot;
+        g_standardObjects.push_back(cfg);
+    }
+    OrcLogInfo("LoadStandardObjectsFromIni: %zu entries from %s", g_standardObjects.size(), path.c_str());
+}
+
+bool AddStandardObjectSlot(int modelId) {
+    if (!IsValidStandardObjectModel(modelId))
+        return false;
+    int nextSlot = 1;
+    for (const auto& o : g_standardObjects) {
+        if (o.modelId == modelId && o.slot >= nextSlot)
+            nextSlot = o.slot + 1;
+    }
+    StandardObjectSlotCfg cfg;
+    cfg.modelId = modelId;
+    cfg.slot = nextSlot;
+    g_standardObjects.push_back(cfg);
+    SaveStandardObjectListToIni();
+    return true;
+}
+
+void RemoveStandardObjectSlot(size_t index) {
+    if (index >= g_standardObjects.size()) return;
+    const int modelId = g_standardObjects[index].modelId;
+    const int slot = g_standardObjects[index].slot;
+    g_standardObjects.erase(g_standardObjects.begin() + static_cast<long>(index));
+    DestroyStandardObjectInstancesForSlot(modelId, slot);
+    SaveStandardObjectListToIni();
+}
+
+static bool StandardObjectSkinIniSectionExists(int modelId, int slot, const char* skinDffName) {
+    const std::string path = StandardObjectsIniPath();
+    const std::string sec = StandardObjectSkinIniSection(modelId, slot, skinDffName);
+    return ObjectSkinIniSectionExists(path.c_str(), sec.c_str());
+}
+
+bool LoadStandardObjectSkinParamsFromIni(int modelId, int slot, const char* skinDffName, CustomObjectSkinParams& out) {
+    if (modelId < 0 || slot <= 0 || !skinDffName || !skinDffName[0]) return false;
+    const std::string path = StandardObjectsIniPath();
+    if (!StandardObjectSkinIniSectionExists(modelId, slot, skinDffName)) return false;
+    const std::string sec = StandardObjectSkinIniSection(modelId, slot, skinDffName);
+
+    char buf[64];
+    auto F = [&](const char* key, float def)->float {
+        GetPrivateProfileStringA(sec.c_str(), key, "", buf, sizeof(buf), path.c_str());
+        if (!buf[0]) return def;
+        return (float)atof(buf);
+    };
+    out.enabled = GetPrivateProfileIntA(sec.c_str(), "Enabled", out.enabled ? 1 : 0, path.c_str()) != 0;
+    out.boneId = GetPrivateProfileIntA(sec.c_str(), "Bone", out.boneId, path.c_str());
+    out.x = F("OffsetX", out.x);
+    out.y = F("OffsetY", out.y);
+    out.z = F("OffsetZ", out.z);
+    out.rx = F("RotationX", out.rx / D2R) * D2R;
+    out.ry = F("RotationY", out.ry / D2R) * D2R;
+    out.rz = F("RotationZ", out.rz / D2R) * D2R;
+    out.scale = F("Scale", out.scale);
+    out.scaleX = F("ScaleX", out.scaleX);
+    out.scaleY = F("ScaleY", out.scaleY);
+    out.scaleZ = F("ScaleZ", out.scaleZ);
+
+    char wcsv[256] = {};
+    GetPrivateProfileStringA(sec.c_str(), "Weapons", "", wcsv, sizeof(wcsv), path.c_str());
+    out.weaponTypes = ParseWeaponTypesCsv(wcsv);
+    char mode[16] = {};
+    GetPrivateProfileStringA(sec.c_str(), "WeaponsMode", "any", mode, sizeof(mode), path.c_str());
+    out.weaponRequireAll = (ToLowerAscii(mode) == "all");
+    out.hideSelectedWeapons = GetPrivateProfileIntA(sec.c_str(), "HideWeapons", out.hideSelectedWeapons ? 1 : 0, path.c_str()) != 0;
+    return true;
+}
+
+struct StandardObjectSkinParamCacheEntry {
+    bool found = false;
+    CustomObjectSkinParams params{};
+};
+
+static std::unordered_map<std::string, StandardObjectSkinParamCacheEntry> g_standardObjectSkinParamCache;
+bool g_livePreviewStandardObjectActive = false;
+int g_livePreviewStandardObjectModelId = -1;
+int g_livePreviewStandardObjectSlot = -1;
+std::string g_livePreviewStandardObjectSkinDff;
+CustomObjectSkinParams g_livePreviewStandardObjectParams{};
+
+void InvalidateStandardObjectSkinParamCache() {
+    g_standardObjectSkinParamCache.clear();
+}
+
+static bool ResolveStandardObjectSkinParamsCached(int modelId, int slot, const std::string& skinDff, CustomObjectSkinParams& out) {
+    if (modelId < 0 || slot <= 0 || skinDff.empty()) return false;
+    if (g_livePreviewStandardObjectActive &&
+        g_livePreviewStandardObjectModelId == modelId &&
+        g_livePreviewStandardObjectSlot == slot &&
+        _stricmp(g_livePreviewStandardObjectSkinDff.c_str(), skinDff.c_str()) == 0) {
+        out = g_livePreviewStandardObjectParams;
+        return true;
+    }
+
+    const std::string key = StandardObjectSlotKey(modelId, slot) + "\x1e" + ToLowerAscii(skinDff);
+    auto it = g_standardObjectSkinParamCache.find(key);
+    if (it != g_standardObjectSkinParamCache.end()) {
+        if (!it->second.found) return false;
+        out = it->second.params;
+        return true;
+    }
+
+    StandardObjectSkinParamCacheEntry entry{};
+    if (!LoadStandardObjectSkinParamsFromIni(modelId, slot, skinDff.c_str(), entry.params)) {
+        g_standardObjectSkinParamCache[key] = entry;
+        return false;
+    }
+
+    entry.found = true;
+    out = entry.params;
+    g_standardObjectSkinParamCache[key] = entry;
+    return true;
+}
+
+void SaveStandardObjectSkinParamsToIni(int modelId, int slot, const char* skinDffName, const CustomObjectSkinParams& p) {
+    if (modelId < 0 || slot <= 0 || !skinDffName || !skinDffName[0]) return;
+    const std::string path = StandardObjectsIniPath();
+    const std::string sec = StandardObjectSkinIniSection(modelId, slot, skinDffName);
+    std::vector<OrcIniValue> values;
+    AddIniInt(values, sec.c_str(), "Enabled", p.enabled ? 1 : 0);
+    AddIniInt(values, sec.c_str(), "Bone", p.boneId);
+    AddIniFloat(values, sec.c_str(), "OffsetX", p.x, "%.3f");
+    AddIniFloat(values, sec.c_str(), "OffsetY", p.y, "%.3f");
+    AddIniFloat(values, sec.c_str(), "OffsetZ", p.z, "%.3f");
+    AddIniFloat(values, sec.c_str(), "RotationX", p.rx / D2R, "%.2f");
+    AddIniFloat(values, sec.c_str(), "RotationY", p.ry / D2R, "%.2f");
+    AddIniFloat(values, sec.c_str(), "RotationZ", p.rz / D2R, "%.2f");
+    AddIniFloat(values, sec.c_str(), "Scale", p.scale, "%.3f");
+    AddIniFloat(values, sec.c_str(), "ScaleX", p.scaleX, "%.3f");
+    AddIniFloat(values, sec.c_str(), "ScaleY", p.scaleY, "%.3f");
+    AddIniFloat(values, sec.c_str(), "ScaleZ", p.scaleZ, "%.3f");
+    char wcsv[256];
+    WeaponTypesToCsv(p.weaponTypes, wcsv, sizeof(wcsv));
+    AddIniValue(values, sec.c_str(), "Weapons", wcsv);
+    AddIniValue(values, sec.c_str(), "WeaponsMode", p.weaponRequireAll ? "all" : "any");
+    AddIniInt(values, sec.c_str(), "HideWeapons", p.hideSelectedWeapons ? 1 : 0);
+    if (!OrcIniWriteValues(path.c_str(), "; OrcOutFit standard game object config.\n\n", values))
+        OrcLogError("SaveStandardObjectSkinParamsToIni: cannot write %s", path.c_str());
+    InvalidateStandardObjectSkinParamCache();
+}
+
 static void DestroyCustomObjectInstance(CustomObjectCfg& o) {
     if (!o.rwObject) return;
     if (o.rwObject->type == rpCLUMP) {
@@ -1235,6 +1510,19 @@ static void DestroyCustomObjectInstance(CustomObjectCfg& o) {
 }
 
 static void DestroyCustomSkinInstance(CustomSkinCfg& s) {
+    if (!s.rwObject) return;
+    if (s.rwObject->type == rpCLUMP) {
+        RpClumpDestroy(reinterpret_cast<RpClump*>(s.rwObject));
+    } else if (s.rwObject->type == rpATOMIC) {
+        auto* a = reinterpret_cast<RpAtomic*>(s.rwObject);
+        RwFrame* f = RpAtomicGetFrame(a);
+        RpAtomicDestroy(a);
+        if (f) RwFrameDestroy(f);
+    }
+    s.rwObject = nullptr;
+}
+
+static void DestroyStandardSkinInstance(StandardSkinCfg& s) {
     if (!s.rwObject) return;
     if (s.rwObject->type == rpCLUMP) {
         RpClumpDestroy(reinterpret_cast<RpClump*>(s.rwObject));
@@ -1377,6 +1665,50 @@ static bool EnsureCustomSkinLoaded(CustomSkinCfg& s) {
     return ok;
 }
 
+static bool EnsureStandardSkinLoaded(StandardSkinCfg& s) {
+    if (s.rwObject) return true;
+    if (!IsValidStandardSkinModel(s.modelId)) {
+        if (!s.loadFailedLogged) {
+            s.loadFailedLogged = true;
+            OrcLogError("standard skin \"%s\" [%d]: invalid ped model", s.dffName.c_str(), s.modelId);
+        }
+        return false;
+    }
+
+    if (!CStreaming::HasModelLoaded(s.modelId)) {
+        CStreaming::RequestModel(s.modelId, 0);
+        for (int i = 0; i < 16 && !CStreaming::HasModelLoaded(s.modelId); ++i)
+            CStreaming::LoadAllRequestedModels(false);
+        if (!CStreaming::HasModelLoaded(s.modelId))
+            return false;
+    }
+
+    CBaseModelInfo* mi = CModelInfo::GetModelInfo(s.modelId);
+    if (!mi || !mi->m_pRwObject)
+        return false;
+
+    RwObject* inst = mi->CreateInstance();
+    if (!inst || inst->type != rpCLUMP) {
+        if (inst && inst->type == rpATOMIC) {
+            auto* a = reinterpret_cast<RpAtomic*>(inst);
+            RwFrame* f = RpAtomicGetFrame(a);
+            RpAtomicDestroy(a);
+            if (f) RwFrameDestroy(f);
+        }
+        if (!s.loadFailedLogged) {
+            s.loadFailedLogged = true;
+            OrcLogError("standard skin \"%s\" [%d]: CreateInstance failed or non-clump", s.dffName.c_str(), s.modelId);
+        }
+        return false;
+    }
+
+    s.rwObject = inst;
+    RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), InitAtomicCB, nullptr);
+    s.loadFailedLogged = false;
+    OrcLogInfo("standard skin \"%s\" [%d]: clump loaded", s.dffName.c_str(), s.modelId);
+    return true;
+}
+
 static void LoadSkinCfgFromIni(CustomSkinCfg& s) {
     if (s.iniPath.empty() || !FileExistsA(s.iniPath.c_str())) {
         s.bindToNick = false;
@@ -1410,6 +1742,127 @@ void SaveSkinCfgToIni(const CustomSkinCfg& s) {
         return;
     }
     InvalidateCustomSkinLookupCache();
+}
+
+static bool g_standardSkinLookupDirty = true;
+static std::unordered_map<std::string, int> g_standardSkinNickLookup;
+
+void InvalidateStandardSkinLookupCache() {
+    g_standardSkinLookupDirty = true;
+    g_standardSkinNickLookup.clear();
+}
+
+static std::string StandardSkinIniSection(const char* dffName) {
+    return std::string("Skin.") + (dffName ? dffName : "");
+}
+
+static bool IsValidStandardSkinModel(int modelId) {
+    if (modelId < 0) return false;
+    CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
+    return mi && mi->GetModelType() == MODEL_INFO_PED;
+}
+
+StandardSkinCfg* OrcGetStandardSkinCfgByModelId(int modelId, bool createIfMissing) {
+    for (auto& s : g_standardSkins) {
+        if (s.modelId == modelId)
+            return &s;
+    }
+    if (!createIfMissing || !IsValidStandardSkinModel(modelId))
+        return nullptr;
+    const char* dff = OrcTryGetPedModelNameById(modelId);
+    if (!dff || !dff[0])
+        return nullptr;
+    StandardSkinCfg s;
+    s.modelId = modelId;
+    s.dffName = dff;
+    g_standardSkins.push_back(std::move(s));
+    return &g_standardSkins.back();
+}
+
+void LoadStandardSkinsFromIni() {
+    for (auto& s : g_standardSkins)
+        DestroyStandardSkinInstance(s);
+    g_standardSkins.clear();
+    InvalidateStandardSkinLookupCache();
+
+    const std::string path = StandardSkinsIniPath();
+    if (!FileExistsA(path.c_str())) return;
+
+    char entries[4096] = {};
+    GetPrivateProfileStringA("StandardSkins", "Entries", "", entries, sizeof(entries), path.c_str());
+    std::unordered_set<std::string> seen;
+    for (const std::string& token : ParseCsvTokens(entries)) {
+        const std::string dff = TrimAscii(token);
+        if (dff.empty()) continue;
+        const std::string dffLower = ToLowerAscii(dff);
+        if (!seen.insert(dffLower).second) continue;
+
+        const std::string sec = StandardSkinIniSection(dff.c_str());
+        const int modelId = GetPrivateProfileIntA(sec.c_str(), "ModelId", -1, path.c_str());
+        if (!IsValidStandardSkinModel(modelId)) continue;
+
+        StandardSkinCfg cfg;
+        cfg.modelId = modelId;
+        cfg.dffName = dff;
+        cfg.bindToNick = GetPrivateProfileIntA(sec.c_str(), "Enabled", 0, path.c_str()) != 0;
+        char nicks[512] = {};
+        GetPrivateProfileStringA(sec.c_str(), "Nicks", "", nicks, sizeof(nicks), path.c_str());
+        cfg.nickListCsv = nicks;
+        cfg.nicknames = ParseNickCsv(cfg.nickListCsv);
+        g_standardSkins.push_back(std::move(cfg));
+    }
+    OrcLogInfo("LoadStandardSkinsFromIni: %zu entries from %s", g_standardSkins.size(), path.c_str());
+}
+
+static void EnsureStandardSkinNickLookup() {
+    if (!g_standardSkinLookupDirty) return;
+    g_standardSkinNickLookup.clear();
+    for (const auto& s : g_standardSkins) {
+        if (!s.bindToNick || s.nicknames.empty()) continue;
+        for (const auto& nick : s.nicknames) {
+            if (!nick.empty())
+                g_standardSkinNickLookup.emplace(nick, s.modelId);
+        }
+    }
+    g_standardSkinLookupDirty = false;
+}
+
+void SaveStandardSkinCfgToIni(const StandardSkinCfg& s) {
+    if (s.modelId < 0 || s.dffName.empty()) return;
+    const std::string path = StandardSkinsIniPath();
+
+    char entriesBuf[4096] = {};
+    GetPrivateProfileStringA("StandardSkins", "Entries", "", entriesBuf, sizeof(entriesBuf), path.c_str());
+    std::vector<std::string> entries = ParseCsvTokens(entriesBuf);
+    const std::string wantLower = ToLowerAscii(s.dffName);
+    bool found = false;
+    for (std::string& entry : entries) {
+        if (ToLowerAscii(TrimAscii(entry)) == wantLower) {
+            entry = s.dffName;
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+        entries.push_back(s.dffName);
+
+    std::string entriesCsv;
+    for (const std::string& entry : entries) {
+        const std::string trimmed = TrimAscii(entry);
+        if (trimmed.empty()) continue;
+        if (!entriesCsv.empty()) entriesCsv += ",";
+        entriesCsv += trimmed;
+    }
+
+    const std::string sec = StandardSkinIniSection(s.dffName.c_str());
+    std::vector<OrcIniValue> values;
+    AddIniValue(values, "StandardSkins", "Entries", entriesCsv.c_str());
+    AddIniInt(values, sec.c_str(), "ModelId", s.modelId);
+    AddIniInt(values, sec.c_str(), "Enabled", s.bindToNick ? 1 : 0);
+    AddIniValue(values, sec.c_str(), "Nicks", s.nickListCsv.c_str());
+    if (!OrcIniWriteValues(path.c_str(), "; OrcOutFit standard game skin config.\n\n", values))
+        OrcLogError("SaveStandardSkinCfgToIni: cannot write %s", path.c_str());
+    InvalidateStandardSkinLookupCache();
 }
 
 void DiscoverCustomObjectsAndEnsureIni() {
@@ -1738,6 +2191,7 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "RenderAllPedsRadius=%.0f\n", g_renderAllPedsRadius);
     AppendFormat(out, "ConsiderWeaponSkills=%d\n", g_considerWeaponSkills ? 1 : 0);
     AppendFormat(out, "CustomObjects=%d\n", g_renderCustomObjects ? 1 : 0);
+    AppendFormat(out, "StandardObjects=%d\n", g_renderStandardObjects ? 1 : 0);
     AppendFormat(out, "SkinMode=%d\n", g_skinModeEnabled ? 1 : 0);
     AppendFormat(out, "SkinHideBasePed=%d\n", g_skinHideBasePed ? 1 : 0);
     AppendFormat(out, "SkinNickMode=%d\n", g_skinNickMode ? 1 : 0);
@@ -1751,6 +2205,8 @@ static void AppendMainIniText(std::string& out) {
 
     out += "[SkinMode]\n";
     AppendFormat(out, "Selected=%s\n", g_skinSelectedName.c_str());
+    AppendFormat(out, "SelectedSource=%s\n", g_skinSelectedSource == SKIN_SELECTED_STANDARD ? "standard" : "custom");
+    AppendFormat(out, "StandardSelected=%d\n", g_standardSkinSelectedModelId);
     AppendFormat(out, "RandomFromPools=%d\n\n", g_skinRandomFromPools ? 1 : 0);
 }
 
@@ -1911,6 +2367,70 @@ static void ClearAll() {
     for (int i = 0; i < kMax; i++) DestroyRendered(g_rendered[i]);
 }
 
+struct RenderedStandardObject {
+    int modelId = -1;
+    int slot = 1;
+    CPed* ped = nullptr;
+    RwObject* rwObject = nullptr;
+    unsigned int lastSeenFrame = 0;
+};
+
+struct StandardObjectRuntimeKey {
+    CPed* ped = nullptr;
+    int modelId = -1;
+    int slot = 1;
+
+    bool operator==(const StandardObjectRuntimeKey& other) const {
+        return ped == other.ped && modelId == other.modelId && slot == other.slot;
+    }
+};
+
+struct StandardObjectRuntimeKeyHash {
+    size_t operator()(const StandardObjectRuntimeKey& key) const {
+        size_t h = reinterpret_cast<size_t>(key.ped) >> 4;
+        h ^= static_cast<size_t>(key.modelId) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        h ^= static_cast<size_t>(key.slot) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+static std::unordered_map<StandardObjectRuntimeKey, RenderedStandardObject, StandardObjectRuntimeKeyHash> g_renderedStandardObjects;
+static std::unordered_map<int, DWORD> g_standardObjectLastRequestTick;
+static unsigned int g_standardObjectRenderFrame = 0;
+
+static void DestroyRenderedStandardObject(RenderedStandardObject& r) {
+    if (!r.rwObject) {
+        r = {};
+        return;
+    }
+    if (r.rwObject->type == rpCLUMP) {
+        RpClumpDestroy(reinterpret_cast<RpClump*>(r.rwObject));
+    } else if (r.rwObject->type == rpATOMIC) {
+        auto* a = reinterpret_cast<RpAtomic*>(r.rwObject);
+        RwFrame* f = RpAtomicGetFrame(a);
+        RpAtomicDestroy(a);
+        if (f) RwFrameDestroy(f);
+    }
+    r = {};
+}
+
+static void DestroyAllStandardObjectInstances() {
+    for (auto& kv : g_renderedStandardObjects)
+        DestroyRenderedStandardObject(kv.second);
+    g_renderedStandardObjects.clear();
+}
+
+static void DestroyStandardObjectInstancesForSlot(int modelId, int slot) {
+    for (auto it = g_renderedStandardObjects.begin(); it != g_renderedStandardObjects.end();) {
+        if (it->second.modelId == modelId && it->second.slot == slot) {
+            DestroyRenderedStandardObject(it->second);
+            it = g_renderedStandardObjects.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 static void ApplyPendingLocalPlayerModel() {
     if (g_pendingLocalPedModelId < 0) return;
     const int modelId = g_pendingLocalPedModelId;
@@ -1943,6 +2463,8 @@ static void ApplyPendingLocalPlayerModel() {
     f(p, modelId);
     InvalidatePerSkinWeaponCache();
     InvalidateObjectSkinParamCache();
+    InvalidateStandardObjectSkinParamCache();
+    DestroyAllStandardObjectInstances();
     OrcLogInfo("ApplyPendingLocalPlayerModel: set local ped model id=%d", modelId);
 }
 
@@ -2232,19 +2754,27 @@ static bool ShouldRenderObjectForPedWithParams(CPed* ped, const CustomObjectSkin
 }
 
 static void ApplyObjectWeaponSuppression(CPed* ped, std::vector<char>* suppress) {
-    if (!ped || !suppress || !g_renderCustomObjects) return;
+    if (!ped || !suppress || (!g_renderCustomObjects && !g_renderStandardObjects)) return;
     const std::string skin = GetPedStdSkinDffName(ped);
     if (skin.empty()) return;
-    for (const auto& o : g_customObjects) {
-        CustomObjectSkinParams p;
-        if (!ResolveObjectSkinParamsCached(o.iniPath, skin, p)) continue;
-        if (!p.hideSelectedWeapons) continue;
-        if (p.weaponTypes.empty()) continue;
-        if (!ShouldRenderObjectForPedWithParams(ped, p)) continue;
+    auto applyParams = [&](const CustomObjectSkinParams& p) {
+        if (!p.hideSelectedWeapons) return;
+        if (p.weaponTypes.empty()) return;
+        if (!ShouldRenderObjectForPedWithParams(ped, p)) return;
         for (int wt : p.weaponTypes) {
             if (wt <= 0 || wt >= (int)suppress->size()) continue;
             (*suppress)[wt] = 1;
         }
+    };
+    if (g_renderCustomObjects) for (const auto& o : g_customObjects) {
+        CustomObjectSkinParams p;
+        if (!ResolveObjectSkinParamsCached(o.iniPath, skin, p)) continue;
+        applyParams(p);
+    }
+    if (g_renderStandardObjects) for (const auto& o : g_standardObjects) {
+        CustomObjectSkinParams p;
+        if (!ResolveStandardObjectSkinParamsCached(o.modelId, o.slot, skin, p)) continue;
+        applyParams(p);
     }
 }
 
@@ -2288,6 +2818,103 @@ static void RenderCustomObject(CPed* ped, CustomObjectCfg& o, const CustomObject
 
     if (o.rwObject->type == rpCLUMP) {
         auto* clump = reinterpret_cast<RpClump*>(o.rwObject);
+        if (!clump) return;
+        RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
+        RpClumpRender(clump);
+    } else {
+        PrepAtomicCB(atomic, nullptr);
+        atomic->renderCallBack(atomic);
+    }
+}
+
+static RenderedStandardObject* EnsureStandardObjectInstance(CPed* ped, const StandardObjectSlotCfg& cfg, const CustomObjectSkinParams& p) {
+    if (!ped || cfg.modelId < 0 || cfg.slot <= 0) return nullptr;
+    RwMatrix* bone = GetBoneMatrix(ped, p.boneId);
+    if (!bone) return nullptr;
+
+    StandardObjectRuntimeKey key;
+    key.ped = ped;
+    key.modelId = cfg.modelId;
+    key.slot = cfg.slot;
+    auto existing = g_renderedStandardObjects.find(key);
+    if (existing != g_renderedStandardObjects.end() && existing->second.rwObject)
+        return &existing->second;
+
+    CBaseModelInfo* mi = CModelInfo::GetModelInfo(cfg.modelId);
+    if (!mi || !IsValidStandardObjectModel(cfg.modelId))
+        return nullptr;
+
+    if (!CStreaming::HasModelLoaded(cfg.modelId) || !mi->m_pRwObject) {
+        const DWORD now = GetTickCount();
+        DWORD& last = g_standardObjectLastRequestTick[cfg.modelId];
+        if (last == 0 || now - last > 1000) {
+            last = now;
+            CStreaming::RequestModel(cfg.modelId, 0);
+            CStreaming::LoadAllRequestedModels(false);
+        }
+        return nullptr;
+    }
+
+    RwMatrix mtx{};
+    std::memcpy(&mtx, bone, sizeof(RwMatrix));
+    RwObject* inst = mi->CreateInstance(&mtx);
+    if (!inst) return nullptr;
+    if (inst->type == rpCLUMP) {
+        RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), InitAttachmentAtomicCB, nullptr);
+    } else if (inst->type == rpATOMIC) {
+        InitAttachmentAtomicCB(reinterpret_cast<RpAtomic*>(inst), nullptr);
+    } else {
+        return nullptr;
+    }
+
+    RenderedStandardObject rendered;
+    rendered.modelId = cfg.modelId;
+    rendered.slot = cfg.slot;
+    rendered.ped = ped;
+    rendered.rwObject = inst;
+    rendered.lastSeenFrame = g_standardObjectRenderFrame;
+    auto inserted = g_renderedStandardObjects.emplace(key, rendered);
+    return &inserted.first->second;
+}
+
+static void RenderStandardObject(CPed* ped, const StandardObjectSlotCfg& cfg, const CustomObjectSkinParams& p) {
+    RenderedStandardObject* rendered = EnsureStandardObjectInstance(ped, cfg, p);
+    if (!rendered || !rendered->rwObject) return;
+
+    RwMatrix* bone = GetBoneMatrix(ped, p.boneId);
+    if (!bone) return;
+
+    RpAtomic* atomic = nullptr;
+    RwFrame* frame = nullptr;
+    if (rendered->rwObject->type == rpATOMIC) {
+        atomic = reinterpret_cast<RpAtomic*>(rendered->rwObject);
+        frame = RpAtomicGetFrame(atomic);
+    } else if (rendered->rwObject->type == rpCLUMP) {
+        frame = RpClumpGetFrame(reinterpret_cast<RpClump*>(rendered->rwObject));
+    }
+    if (!frame) return;
+    rendered->lastSeenFrame = g_standardObjectRenderFrame;
+
+    RwMatrix mtx{};
+    std::memcpy(&mtx, bone, sizeof(RwMatrix));
+    ApplyOffset(&mtx, p.x, p.y, p.z);
+    RotateMatrix(&mtx, p.rx, p.ry, p.rz);
+    std::memcpy(RwFrameGetMatrix(frame), &mtx, sizeof(RwMatrix));
+    RwMatrixUpdate(RwFrameGetMatrix(frame));
+    const float sx = p.scale * p.scaleX;
+    const float sy = p.scale * p.scaleY;
+    const float sz = p.scale * p.scaleZ;
+    if (sx != 1.0f || sy != 1.0f || sz != 1.0f) {
+        RwV3d s = { sx, sy, sz };
+        RwMatrixScale(RwFrameGetMatrix(frame), &s, rwCOMBINEPRECONCAT);
+    }
+    RwFrameUpdateObjects(frame);
+
+    CVector lightPos = { bone->pos.x, bone->pos.y, bone->pos.z };
+    ApplyAttachmentLightingForPed(ped, lightPos);
+
+    if (rendered->rwObject->type == rpCLUMP) {
+        auto* clump = reinterpret_cast<RpClump*>(rendered->rwObject);
         if (!clump) return;
         RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
         RpClumpRender(clump);
@@ -2367,6 +2994,12 @@ static bool SkinMatchesNickname(const CustomSkinCfg& s, const std::string& nickL
     return false;
 }
 
+static bool StandardSkinMatchesNickname(const StandardSkinCfg& s, const std::string& nickLower) {
+    if (!s.bindToNick || s.nicknames.empty()) return false;
+    for (const auto& n : s.nicknames) if (n == nickLower) return true;
+    return false;
+}
+
 static CustomSkinCfg* FindNickSkin(const std::string& nickLower) {
     if (nickLower.empty()) return nullptr;
     EnsureCustomSkinNickLookup();
@@ -2378,10 +3011,39 @@ static CustomSkinCfg* FindNickSkin(const std::string& nickLower) {
     return &g_customSkins[(size_t)idx];
 }
 
-static CustomSkinCfg* ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer, bool* isLocalPedOut) {
-    if (isLocalPedOut) *isLocalPedOut = false;
-    if (!ped || !g_skinModeEnabled) return nullptr;
-    CustomSkinCfg* selected = GetSelectedSkin();
+static StandardSkinCfg* FindNickStandardSkin(const std::string& nickLower) {
+    if (nickLower.empty()) return nullptr;
+    EnsureStandardSkinNickLookup();
+    auto it = g_standardSkinNickLookup.find(nickLower);
+    if (it == g_standardSkinNickLookup.end()) return nullptr;
+    StandardSkinCfg* skin = OrcGetStandardSkinCfgByModelId(it->second, false);
+    if (!skin || !StandardSkinMatchesNickname(*skin, nickLower)) return nullptr;
+    return skin;
+}
+
+static StandardSkinCfg* GetSelectedStandardSkin() {
+    if (g_standardSkinSelectedModelId >= 0) {
+        if (StandardSkinCfg* skin = OrcGetStandardSkinCfgByModelId(g_standardSkinSelectedModelId, true))
+            return skin;
+    }
+    std::vector<std::pair<std::string, int>> skins;
+    OrcCollectPedSkins(skins);
+    if (skins.empty()) return nullptr;
+    g_standardSkinSelectedModelId = skins.front().second;
+    return OrcGetStandardSkinCfgByModelId(g_standardSkinSelectedModelId, true);
+}
+
+struct ResolvedPedSkin {
+    CustomSkinCfg* custom = nullptr;
+    StandardSkinCfg* standard = nullptr;
+    bool isLocalPed = false;
+};
+
+static ResolvedPedSkin ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
+    ResolvedPedSkin result;
+    if (!ped || !g_skinModeEnabled) return result;
+    CustomSkinCfg* selectedCustom = (g_skinSelectedSource == SKIN_SELECTED_CUSTOM) ? GetSelectedSkin() : nullptr;
+    StandardSkinCfg* selectedStandard = (g_skinSelectedSource == SKIN_SELECTED_STANDARD) ? GetSelectedStandardSkin() : nullptr;
     const bool isLocalByPtr = (localPlayer && ped == localPlayer);
 
     if (g_skinNickMode && samp_bridge::IsSampBuildKnown()) {
@@ -2389,26 +3051,38 @@ static CustomSkinCfg* ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer, bool
         bool isLocalBySamp = false;
         if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocalBySamp)) {
             const bool isLocal = isLocalBySamp || isLocalByPtr;
-            if (isLocalPedOut) *isLocalPedOut = isLocal;
+            result.isLocalPed = isLocal;
             CustomSkinCfg* nickSkin = FindNickSkin(ToLowerAscii(nick));
             // Ник всегда выше «выбранного скина» и рандом-пулов.
-            if (nickSkin) return nickSkin;
+            if (nickSkin) {
+                result.custom = nickSkin;
+                return result;
+            }
+            if (StandardSkinCfg* standardNickSkin = FindNickStandardSkin(ToLowerAscii(nick))) {
+                result.standard = standardNickSkin;
+                return result;
+            }
             if (isLocal) {
-                if (g_skinLocalPreferSelected && selected) return selected;
-                return nullptr;
+                if (g_skinLocalPreferSelected) {
+                    result.custom = selectedCustom;
+                    result.standard = selectedStandard;
+                }
+                return result;
             }
         }
     }
 
     // «Always use selected» для локального игрока должно работать и при выключенном nick binding,
     // иначе весь блок выше пропускается и выбранный в Skins скин никогда не применяется.
-    if (isLocalByPtr && g_skinLocalPreferSelected && selected) {
-        if (isLocalPedOut) *isLocalPedOut = true;
-        return selected;
+    if (isLocalByPtr && g_skinLocalPreferSelected) {
+        result.isLocalPed = true;
+        result.custom = selectedCustom;
+        result.standard = selectedStandard;
+        return result;
     }
 
-    if (isLocalByPtr && isLocalPedOut) *isLocalPedOut = true;
-    return nullptr;
+    if (isLocalByPtr) result.isLocalPed = true;
+    return result;
 }
 
 static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
@@ -2447,6 +3121,43 @@ static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
         OrcLogInfo("skin: SetupLighting false, ApplyAttachment only name=%s", sel->name.c_str());
         s_fallbackLogLeft--;
     }
+    ApplyAttachmentLightingForPed(ped, boundCentre, 1.0f);
+    OrcTryRpClumpRender(clump);
+    if (lit)
+        OrcTryPedRemoveLighting(ped);
+}
+
+static void RenderStandardSkinOnPed(CPed* ped, StandardSkinCfg* sel, bool isLocalPed) {
+    if (!ped || !ped->m_pRwClump || !sel) return;
+    RpClump* pedClump = ped->m_pRwClump;
+    if (!EnsureStandardSkinLoaded(*sel)) return;
+    if (!sel->rwObject || sel->rwObject->type != rpCLUMP) return;
+    RpClump* clump = reinterpret_cast<RpClump*>(sel->rwObject);
+    if (!clump) return;
+    RwFrame* srcFrame = RpClumpGetFrame(pedClump);
+    RwFrame* dstFrame = RpClumpGetFrame(clump);
+    if (!srcFrame || !dstFrame) return;
+    std::memcpy(RwFrameGetMatrix(dstFrame), RwFrameGetMatrix(srcFrame), sizeof(RwMatrix));
+    RwMatrixUpdate(RwFrameGetMatrix(dstFrame));
+    RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(pedClump);
+    g_skinBindCount = 0;
+    if (srcH && clump) RpClumpForAllAtomics(clump, BindSkinHierarchyCB, srcH);
+    const bool canAnimate = (srcH && g_skinBindCount > 0);
+    if (isLocalPed) g_skinCanAnimate = canAnimate;
+    if (canAnimate) {
+        if (ped->m_pRwClump != pedClump) return;
+        CopySkinHierarchyPose(ped, clump);
+    }
+    RwFrameUpdateObjects(dstFrame);
+    const bool lit = OrcTryPedSetupLighting(ped);
+    static int s_setupLogLeft = 8;
+    if (g_orcLogLevel >= OrcLogLevel::Info && s_setupLogLeft > 0) {
+        OrcLogInfo("SetupLighting standard skin=%s[%d] -> %d ped=%p",
+            sel->dffName.c_str(), sel->modelId, lit ? 1 : 0, ped);
+        s_setupLogLeft--;
+    }
+    CVector boundCentre{};
+    ped->GetBoundCentre(boundCentre);
     ApplyAttachmentLightingForPed(ped, boundCentre, 1.0f);
     OrcTryRpClumpRender(clump);
     if (lit)
@@ -2515,16 +3226,20 @@ static void RenderSkinsForPeds(CPlayerPed* localPlayer) {
     for (int i = 0; i < CPools::ms_pPedPool->m_nSize; i++) {
         CPed* ped = CPools::ms_pPedPool->GetAt(i);
         if (!ped || !ped->m_pRwClump) continue;
-        bool isLocal = false;
-        CustomSkinCfg* skin = ResolveSkinForPed(ped, localPlayer, &isLocal);
-        if (!skin) continue;
-        RenderSkinOnPed(ped, skin, isLocal);
-        if (isLocal) localDone = true;
+        ResolvedPedSkin skin = ResolveSkinForPed(ped, localPlayer);
+        if (!skin.custom && !skin.standard) continue;
+        if (skin.custom)
+            RenderSkinOnPed(ped, skin.custom, skin.isLocalPed);
+        else
+            RenderStandardSkinOnPed(ped, skin.standard, skin.isLocalPed);
+        if (skin.isLocalPed) localDone = true;
     }
     if (!localDone) {
-        bool isLocal = true;
-        CustomSkinCfg* skin = ResolveSkinForPed(localPlayer, localPlayer, &isLocal);
-        if (skin) RenderSkinOnPed(localPlayer, skin, true);
+        ResolvedPedSkin skin = ResolveSkinForPed(localPlayer, localPlayer);
+        if (skin.custom)
+            RenderSkinOnPed(localPlayer, skin.custom, true);
+        else if (skin.standard)
+            RenderStandardSkinOnPed(localPlayer, skin.standard, true);
     }
 }
 
@@ -2533,7 +3248,9 @@ static void SyncAndRender() {
         ClearAll();
         ClearAllOtherPeds();
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
+        DestroyAllStandardObjectInstances();
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+        for (auto& s : g_standardSkins) DestroyStandardSkinInstance(s);
         DestroyAllRandomPoolSkins();
         OrcTextureRemapClearRuntimeState();
         return;
@@ -2543,7 +3260,9 @@ static void SyncAndRender() {
         ClearAll();
         ClearAllOtherPeds();
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
+        DestroyAllStandardObjectInstances();
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+        for (auto& s : g_standardSkins) DestroyStandardSkinInstance(s);
         DestroyAllRandomPoolSkins();
         OrcTextureRemapClearRuntimeState();
         return;
@@ -2557,6 +3276,9 @@ static void SyncAndRender() {
     suppressPed.assign(g_cfg.size(), 0);
     std::vector<char> objectUsed;
     objectUsed.assign(g_customObjects.size(), 0);
+    ++g_standardObjectRenderFrame;
+    if (g_standardObjectRenderFrame == 0)
+        ++g_standardObjectRenderFrame;
     int active = 0;
     for (int i = 0; i < kMax; i++) if (g_rendered[i].active) active++;
     const std::string plSkin = GetPedStdSkinDffName(player);
@@ -2574,12 +3296,22 @@ static void SyncAndRender() {
         }
     }
     if (g_skinModeEnabled) {
-        if (GetSelectedSkin() != nullptr) active++;
+        if (g_skinSelectedSource == SKIN_SELECTED_STANDARD) {
+            if (GetSelectedStandardSkin() != nullptr) active++;
+        } else if (GetSelectedSkin() != nullptr) {
+            active++;
+        }
     }
-    if (g_skinNickMode && samp_bridge::IsSampBuildKnown() && !g_customSkins.empty())
+    if (g_renderStandardObjects && !g_standardObjects.empty())
+        active++;
+    if (g_skinNickMode && samp_bridge::IsSampBuildKnown() && (!g_customSkins.empty() || !g_standardSkins.empty()))
         active++;
     if ((g_renderAllPedsWeapons || g_renderAllPedsObjects) && CPools::ms_pPedPool) active++;
-    if (!active) return;
+    if (!active) {
+        if (!g_renderStandardObjects || g_standardObjects.empty())
+            DestroyAllStandardObjectInstances();
+        return;
+    }
 
     int oldCull, oldZT, oldZW, oldShade, oldFog;
     RwRenderStateGet(rwRENDERSTATECULLMODE,     &oldCull);
@@ -2609,6 +3341,16 @@ static void SyncAndRender() {
             if (!EnsureCustomInstance(o)) continue;
             RenderCustomObject(player, o, op);
             objectUsed[oi] = 1;
+        }
+    }
+    if (g_renderStandardObjects) {
+        for (const auto& o : g_standardObjects) {
+            CustomObjectSkinParams op;
+            if (plSkin.empty() || !ResolveStandardObjectSkinParamsCached(o.modelId, o.slot, plSkin, op))
+                continue;
+            if (!ShouldRenderObjectForPedWithParams(player, op))
+                continue;
+            RenderStandardObject(player, o, op);
         }
     }
     RenderSkinsForPeds(player);
@@ -2651,6 +3393,19 @@ static void SyncAndRender() {
                     }
                 }
             }
+            if (g_renderAllPedsObjects && g_renderStandardObjects) {
+                const std::string pedSkin = GetPedStdSkinDffName(ped);
+                if (!pedSkin.empty()) {
+                    for (const auto& o : g_standardObjects) {
+                        CustomObjectSkinParams op;
+                        if (!ResolveStandardObjectSkinParamsCached(o.modelId, o.slot, pedSkin, op))
+                            continue;
+                        if (!ShouldRenderObjectForPedWithParams(ped, op))
+                            continue;
+                        RenderStandardObject(ped, o, op);
+                    }
+                }
+            }
         }
         if (g_renderAllPedsWeapons) {
             for (auto it = g_otherPedsRendered.begin(); it != g_otherPedsRendered.end();) {
@@ -2671,6 +3426,18 @@ static void SyncAndRender() {
         }
     } else {
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
+    }
+    if (g_renderStandardObjects) {
+        for (auto it = g_renderedStandardObjects.begin(); it != g_renderedStandardObjects.end();) {
+            if (it->second.lastSeenFrame != g_standardObjectRenderFrame) {
+                DestroyRenderedStandardObject(it->second);
+                it = g_renderedStandardObjects.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } else {
+        DestroyAllStandardObjectInstances();
     }
 
     RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(oldCull));
@@ -2702,7 +3469,9 @@ static void OnDrawingEvent() {
             OrcLogInfo("session start: skin path SetupLighting+ApplyAttachment+RemoveLighting");
             OrcLogInfo("paths logfile=%s inifile=%s", OrcLogGetPath(), g_iniPath);
             DiscoverCustomObjectsAndEnsureIni();
+            LoadStandardObjectsFromIni();
             DiscoverCustomSkins();
+            LoadStandardSkinsFromIni();
             overlay::SetDrawCallback(&OrcUiDraw);
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -2728,10 +3497,13 @@ static void OnPedRenderBefore(CPed* ped) {
     if (!g_skinModeEnabled || !g_skinHideBasePed) return;
     CPlayerPed* player = FindPlayerPed(0);
     if (!ped || !ped->m_pRwClump) return;
-    bool isLocal = false;
-    CustomSkinCfg* skin = ResolveSkinForPed(ped, player, &isLocal);
-    if (!skin) return;
-    if (!EnsureCustomSkinLoaded(*skin)) return;
+    ResolvedPedSkin skin = ResolveSkinForPed(ped, player);
+    if (!skin.custom && !skin.standard) return;
+    if (skin.custom) {
+        if (!EnsureCustomSkinLoaded(*skin.custom)) return;
+    } else {
+        if (!EnsureStandardSkinLoaded(*skin.standard)) return;
+    }
     g_hiddenPed = ped;
     g_hiddenClump = ped->m_pRwClump;
     __try {
@@ -2778,10 +3550,13 @@ static void OnShutdownRw() {
         DestroyCustomObjectInstance(o);
         o.txdSlot = -1;
     }
+    DestroyAllStandardObjectInstances();
     for (auto& s : g_customSkins) {
         DestroyCustomSkinInstance(s);
         s.txdSlot = -1;
     }
+    for (auto& s : g_standardSkins)
+        DestroyStandardSkinInstance(s);
     DestroyAllRandomPoolSkins();
     OrcTextureRemapClearRuntimeState();
     // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.

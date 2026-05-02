@@ -354,6 +354,16 @@ static bool g_uiWeaponBuffersReady = false;
 static int g_uiObjSkinListIdx = 0;
 static CustomObjectSkinParams g_uiObjParams{};
 static bool g_uiObjParamsLoaded = false;
+static int g_uiStdObjectModelId = 0;
+static int g_uiStdObjectIdx = 0;
+static int g_uiStdObjectSkinListIdx = 0;
+static CustomObjectSkinParams g_uiStdObjParams{};
+static bool g_uiStdObjParamsLoaded = false;
+static bool g_uiStdObjectAddFailed = false;
+
+static int g_uiStdSkinListIdx = 0;
+static int g_uiStdSkinEditModelId = -1;
+static char g_uiStdSkinNickBuf[512] = {};
 
 static int BoneComboIndex(int boneId) {
     for (int i = 0; i < IM_ARRAYSIZE(kBones); i++)
@@ -520,6 +530,7 @@ void OrcUiDraw() {
             }
             UiCheckbox("consider_weapon_skills", T(OrcTextId::ConsiderWeaponSkills), &g_considerWeaponSkills);
             UiCheckbox("render_custom_objects", T(OrcTextId::RenderCustomObjects), &g_renderCustomObjects);
+            UiCheckbox("render_standard_objects", T(OrcTextId::RenderStandardObjects), &g_renderStandardObjects);
             UiCheckbox("skin_mode", T(OrcTextId::SkinMode), &g_skinModeEnabled);
             UiCheckbox("skin_hide_base_ped", T(OrcTextId::SkinHideBasePed), &g_skinHideBasePed);
             const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
@@ -576,11 +587,14 @@ void OrcUiDraw() {
             if (reload) {
                 LoadConfig();
                 DiscoverCustomObjectsAndEnsureIni();
+                LoadStandardObjectsFromIni();
                 DiscoverCustomSkins();
+                LoadStandardSkinsFromIni();
                 SyncWeaponUiBuffersFromSkinPick();
             }
             if (rescanObj) {
                 DiscoverCustomObjectsAndEnsureIni();
+                LoadStandardObjectsFromIni();
                 if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
             }
 
@@ -618,10 +632,6 @@ void OrcUiDraw() {
                         ImGui::EndCombo();
                     }
                     UiEndControlRow();
-                }
-                if (UiButtonFullWidth(T(OrcTextId::WearThisSkin))) {
-                    OrcApplyLocalPlayerModelById(cur.second);
-                    SyncWeaponUiBuffersFromSkinPick();
                 }
             }
             if (!pedSkins.empty() &&
@@ -838,8 +848,10 @@ void OrcUiDraw() {
         // Objects
         // ------------------------------------------------------------------
         if (ImGui::BeginTabItem(T(OrcTextId::TabObjects))) {
-            ImGui::TextWrapped("%s", g_gameObjDir);
-            ImGui::Separator();
+            if (ImGui::BeginTabBar("OrcOutFitObjectSubTabs", ImGuiTabBarFlags_None)) {
+                if (ImGui::BeginTabItem(T(OrcTextId::TabCustomObjects))) {
+                    ImGui::TextWrapped("%s", g_gameObjDir);
+                    ImGui::Separator();
 
             if (g_customObjects.empty()) {
                 g_livePreviewObjectActive = false;
@@ -974,6 +986,156 @@ void OrcUiDraw() {
                 }
             }
 
+                    ImGui::EndTabItem();
+                }
+
+                if (ImGui::BeginTabItem(T(OrcTextId::TabStandardObjects))) {
+                    UiInputInt("std_object_id", T(OrcTextId::StandardObjectModelId), &g_uiStdObjectModelId, 1, 10, ImGuiInputTextFlags_CharsDecimal);
+                    if (UiButtonFullWidth(T(OrcTextId::AddStandardObject))) {
+                        g_uiStdObjectAddFailed = !AddStandardObjectSlot(g_uiStdObjectModelId);
+                        if (!g_uiStdObjectAddFailed) {
+                            g_uiStdObjectIdx = (int)g_standardObjects.size() - 1;
+                            g_uiStdObjParamsLoaded = false;
+                        }
+                    }
+                    if (g_uiStdObjectAddFailed)
+                        ImGui::TextDisabled("%s", T(OrcTextId::InvalidStandardObjectModel));
+
+                    ImGui::Separator();
+                    std::vector<std::pair<std::string, int>> pedSkins;
+                    OrcCollectPedSkins(pedSkins);
+                    if (g_standardObjects.empty()) {
+                        g_livePreviewStandardObjectActive = false;
+                        ImGui::TextDisabled("%s", T(OrcTextId::StandardObjectListEmpty));
+                    } else {
+                        if (g_uiStdObjectIdx < 0 || g_uiStdObjectIdx >= (int)g_standardObjects.size())
+                            g_uiStdObjectIdx = 0;
+                        const StandardObjectSlotCfg& obj = g_standardObjects[(size_t)g_uiStdObjectIdx];
+                        char preview[80];
+                        _snprintf_s(preview, _TRUNCATE, "%d#%d [%d/%d]",
+                            obj.modelId, obj.slot, g_uiStdObjectIdx + 1, (int)g_standardObjects.size());
+                        if (UiBeginControlRow("std_obj_pick", T(OrcTextId::Object))) {
+                            if (ImGui::BeginCombo("##value", preview)) {
+                                for (int i = 0; i < (int)g_standardObjects.size(); ++i) {
+                                    const StandardObjectSlotCfg& row = g_standardObjects[(size_t)i];
+                                    char rowLabel[64];
+                                    _snprintf_s(rowLabel, _TRUNCATE, "%d#%d", row.modelId, row.slot);
+                                    if (ImGui::Selectable(rowLabel, i == g_uiStdObjectIdx)) {
+                                        g_uiStdObjectIdx = i;
+                                        g_uiStdObjParamsLoaded = false;
+                                    }
+                                }
+                                ImGui::EndCombo();
+                            }
+                            UiEndControlRow();
+                        }
+
+                        if (pedSkins.empty()) {
+                            g_livePreviewStandardObjectActive = false;
+                            ImGui::TextDisabled("%s", T(OrcTextId::NoPedModelsInCache));
+                        } else {
+                            if (g_uiStdObjectSkinListIdx < 0 || g_uiStdObjectSkinListIdx >= (int)pedSkins.size())
+                                g_uiStdObjectSkinListIdx = 0;
+                            if (!g_uiStdObjParamsLoaded) {
+                                const std::string& sdff = pedSkins[(size_t)g_uiStdObjectSkinListIdx].first;
+                                if (!LoadStandardObjectSkinParamsFromIni(obj.modelId, obj.slot, sdff.c_str(), g_uiStdObjParams)) {
+                                    g_uiStdObjParams = CustomObjectSkinParams{};
+                                    g_uiStdObjParams.enabled = true;
+                                    g_uiStdObjParams.boneId = BONE_R_THIGH;
+                                }
+                                g_uiStdObjParamsLoaded = true;
+                            }
+                            const auto& curS = pedSkins[(size_t)g_uiStdObjectSkinListIdx];
+                            char objSkinCombo[192];
+                            PedSkinListLabel(objSkinCombo, sizeof(objSkinCombo), curS.first.c_str(), curS.second);
+                            if (UiBeginControlRow("std_obj_skin", T(OrcTextId::PedSkinDffName))) {
+                                if (ImGui::BeginCombo("##value", objSkinCombo)) {
+                                    CPlayerPed* pl = FindPlayerPed(0);
+                                    const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
+                                    for (int i = 0; i < (int)pedSkins.size(); ++i) {
+                                        const bool sel = (i == g_uiStdObjectSkinListIdx);
+                                        const bool onPlayer = !onMe.empty() && LowerAsciiUi(pedSkins[(size_t)i].first) == LowerAsciiUi(onMe);
+                                        char rowLbl[192];
+                                        PedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
+                                        if (ImGui::Selectable(rowLbl, sel)) {
+                                            g_uiStdObjectSkinListIdx = i;
+                                            const std::string& sdff = pedSkins[(size_t)i].first;
+                                            if (!LoadStandardObjectSkinParamsFromIni(obj.modelId, obj.slot, sdff.c_str(), g_uiStdObjParams)) {
+                                                g_uiStdObjParams = CustomObjectSkinParams{};
+                                                g_uiStdObjParams.enabled = true;
+                                                g_uiStdObjParams.boneId = BONE_R_THIGH;
+                                            }
+                                        }
+                                        if (onPlayer) {
+                                            ImDrawList* dl = ImGui::GetWindowDrawList();
+                                            const ImVec2 mn = ImGui::GetItemRectMin();
+                                            const ImVec2 mx = ImGui::GetItemRectMax();
+                                            dl->AddRectFilled(mn, ImVec2(mn.x + UiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
+                                        }
+                                    }
+                                    ImGui::EndCombo();
+                                }
+                                UiEndControlRow();
+                            }
+
+                            UiCheckbox("std_obj_show", T(OrcTextId::Show), &g_uiStdObjParams.enabled);
+                            int bi = BoneComboIndex(g_uiStdObjParams.boneId);
+                            const char* bonePreview = T(kBones[bi].label);
+                            if (UiBeginControlRow("std_obj_bone", T(OrcTextId::Bone))) {
+                                if (ImGui::BeginCombo("##value", bonePreview)) {
+                                    for (int i = 0; i < IM_ARRAYSIZE(kBones); ++i) {
+                                        if (ImGui::Selectable(T(kBones[i].label), i == bi))
+                                            g_uiStdObjParams.boneId = kBones[i].id;
+                                    }
+                                    ImGui::EndCombo();
+                                }
+                                UiEndControlRow();
+                            }
+
+                            UiDragFloat("std_ox", T(OrcTextId::OffsetX), &g_uiStdObjParams.x, 0.005f, -2.0f, 2.0f, "%.3f");
+                            UiDragFloat("std_oy", T(OrcTextId::OffsetY), &g_uiStdObjParams.y, 0.005f, -2.0f, 2.0f, "%.3f");
+                            UiDragFloat("std_oz", T(OrcTextId::OffsetZ), &g_uiStdObjParams.z, 0.005f, -2.0f, 2.0f, "%.3f");
+
+                            float rxd = g_uiStdObjParams.rx / D2R, ryd = g_uiStdObjParams.ry / D2R, rzd = g_uiStdObjParams.rz / D2R;
+                            if (UiDragFloat("std_orx", T(OrcTextId::RotationX), &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiStdObjParams.rx = rxd * D2R;
+                            if (UiDragFloat("std_ory", T(OrcTextId::RotationY), &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiStdObjParams.ry = ryd * D2R;
+                            if (UiDragFloat("std_orz", T(OrcTextId::RotationZ), &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) g_uiStdObjParams.rz = rzd * D2R;
+
+                            UiDragFloat("std_osc", T(OrcTextId::Scale), &g_uiStdObjParams.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+                            UiDragFloat3("std_oscxyz", T(OrcTextId::ScaleXyz), &g_uiStdObjParams.scaleX, 0.01f, 0.05f, 10.0f, "%.3f");
+
+                            WeaponFilterEditorParams(g_uiStdObjParams);
+
+                            ImGui::Separator();
+                            if (UiButtonFullWidth(T(OrcTextId::SaveStandardObjectSkinSection))) {
+                                SaveStandardObjectSkinParamsToIni(obj.modelId, obj.slot, pedSkins[(size_t)g_uiStdObjectSkinListIdx].first.c_str(), g_uiStdObjParams);
+                                g_livePreviewStandardObjectActive = false;
+                            }
+                            if (UiButtonFullWidth(T(OrcTextId::RemoveFromList))) {
+                                RemoveStandardObjectSlot((size_t)g_uiStdObjectIdx);
+                                if (g_uiStdObjectIdx >= (int)g_standardObjects.size())
+                                    g_uiStdObjectIdx = (int)g_standardObjects.size() - 1;
+                                g_uiStdObjParamsLoaded = false;
+                                if (g_standardObjects.empty())
+                                    g_livePreviewStandardObjectActive = false;
+                            }
+
+                            if (!g_standardObjects.empty()) {
+                                const StandardObjectSlotCfg& liveObj = g_standardObjects[(size_t)std::max(0, g_uiStdObjectIdx)];
+                                g_livePreviewStandardObjectActive = true;
+                                g_livePreviewStandardObjectModelId = liveObj.modelId;
+                                g_livePreviewStandardObjectSlot = liveObj.slot;
+                                g_livePreviewStandardObjectSkinDff = pedSkins[(size_t)g_uiStdObjectSkinListIdx].first;
+                                g_livePreviewStandardObjectParams = g_uiStdObjParams;
+                            }
+                        }
+                    }
+
+                    ImGui::EndTabItem();
+                }
+
+                ImGui::EndTabBar();
+            }
             ImGui::EndTabItem();
         }
 
@@ -999,6 +1161,7 @@ void OrcUiDraw() {
                                     if (ImGui::Selectable(g_customSkins[i].name.c_str(), i == g_uiSkinIdx)) {
                                         g_uiSkinIdx = i;
                                         g_skinSelectedName = g_customSkins[i].name;
+                                        g_skinSelectedSource = SKIN_SELECTED_CUSTOM;
                                     }
                                 }
                                 ImGui::EndCombo();
@@ -1038,6 +1201,114 @@ void OrcUiDraw() {
                     if (rs) {
                         DiscoverCustomSkins();
                         if (g_uiSkinIdx < (int)g_customSkins.size()) g_skinSelectedName = g_customSkins[g_uiSkinIdx].name;
+                    }
+                    ImGui::EndTabItem();
+                }
+
+                if (ImGui::BeginTabItem(T(OrcTextId::TabStandardSkins))) {
+                    ImGui::TextWrapped("%s", T(OrcTextId::StandardSkinsHint));
+                    ImGui::Separator();
+
+                    std::vector<std::pair<std::string, int>> pedSkins;
+                    OrcCollectPedSkins(pedSkins);
+                    if (pedSkins.empty()) {
+                        ImGui::TextDisabled("%s", T(OrcTextId::NoPedModelsInCacheReconnect));
+                    } else {
+                        if (g_standardSkinSelectedModelId >= 0) {
+                            for (int i = 0; i < (int)pedSkins.size(); ++i) {
+                                if (pedSkins[(size_t)i].second == g_standardSkinSelectedModelId) {
+                                    g_uiStdSkinListIdx = i;
+                                    break;
+                                }
+                            }
+                        }
+                        if (g_uiStdSkinListIdx < 0 || g_uiStdSkinListIdx >= (int)pedSkins.size())
+                            g_uiStdSkinListIdx = 0;
+
+                        const auto& cur = pedSkins[(size_t)g_uiStdSkinListIdx];
+                        char comboLbl[192];
+                        PedSkinListLabel(comboLbl, sizeof(comboLbl), cur.first.c_str(), cur.second);
+                        if (UiBeginControlRow("std_skin_pick", T(OrcTextId::Skin))) {
+                            if (ImGui::BeginCombo("##value", comboLbl)) {
+                                CPlayerPed* pl = FindPlayerPed(0);
+                                const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
+                                for (int i = 0; i < (int)pedSkins.size(); ++i) {
+                                    const bool sel = (i == g_uiStdSkinListIdx);
+                                    const bool onPlayer = !onMe.empty() && LowerAsciiUi(pedSkins[(size_t)i].first) == LowerAsciiUi(onMe);
+                                    char rowLbl[192];
+                                    PedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
+                                    if (ImGui::Selectable(rowLbl, sel)) {
+                                        g_uiStdSkinListIdx = i;
+                                        g_standardSkinSelectedModelId = pedSkins[(size_t)i].second;
+                                        g_skinSelectedSource = SKIN_SELECTED_STANDARD;
+                                        g_uiStdSkinEditModelId = -1;
+                                    }
+                                    if (onPlayer) {
+                                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                                        const ImVec2 mn = ImGui::GetItemRectMin();
+                                        const ImVec2 mx = ImGui::GetItemRectMax();
+                                        dl->AddRectFilled(mn, ImVec2(mn.x + UiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
+                                    }
+                                }
+                                ImGui::EndCombo();
+                            }
+                            UiEndControlRow();
+                        }
+
+                        const OrcTextId sourceLabels[] = { OrcTextId::SelectedCustomSkin, OrcTextId::SelectedStandardSkin };
+                        if (g_skinSelectedSource != SKIN_SELECTED_STANDARD && g_skinSelectedSource != SKIN_SELECTED_CUSTOM)
+                            g_skinSelectedSource = SKIN_SELECTED_CUSTOM;
+                        if (UiBeginControlRow("skin_selected_source", T(OrcTextId::SelectedSkinSource))) {
+                            if (ImGui::BeginCombo("##value", T(sourceLabels[g_skinSelectedSource]))) {
+                                if (ImGui::Selectable(T(OrcTextId::SelectedCustomSkin), g_skinSelectedSource == SKIN_SELECTED_CUSTOM))
+                                    g_skinSelectedSource = SKIN_SELECTED_CUSTOM;
+                                if (ImGui::Selectable(T(OrcTextId::SelectedStandardSkin), g_skinSelectedSource == SKIN_SELECTED_STANDARD)) {
+                                    g_skinSelectedSource = SKIN_SELECTED_STANDARD;
+                                    g_standardSkinSelectedModelId = cur.second;
+                                }
+                                ImGui::EndCombo();
+                            }
+                            UiEndControlRow();
+                        }
+
+                        g_standardSkinSelectedModelId = cur.second;
+                        StandardSkinCfg* skin = OrcGetStandardSkinCfgByModelId(cur.second, true);
+                        if (skin) {
+                            const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
+                            if (sampNickUiOff)
+                                ImGui::TextWrapped("%s", T(OrcTextId::UnsupportedSampNickBinding));
+                            ImGui::BeginDisabled(sampNickUiOff);
+                            if (UiCheckbox("bind_std_skin_to_nicks", T(OrcTextId::BindSkinToNicks), &skin->bindToNick))
+                                InvalidateStandardSkinLookupCache();
+                            if (g_uiStdSkinEditModelId != cur.second) {
+                                g_uiStdSkinEditModelId = cur.second;
+                                _snprintf_s(g_uiStdSkinNickBuf, _TRUNCATE, "%s", skin->nickListCsv.c_str());
+                            }
+                            if (UiInputTextWithHint("stdskinnicks", T(OrcTextId::NicksCommaSeparated), T(OrcTextId::NickPlaceholder), g_uiStdSkinNickBuf, IM_ARRAYSIZE(g_uiStdSkinNickBuf))) {
+                                skin->nickListCsv = g_uiStdSkinNickBuf;
+                                skin->nicknames = ParseNickCsv(skin->nickListCsv);
+                                InvalidateStandardSkinLookupCache();
+                            }
+                            ImGui::EndDisabled();
+
+                            if (UiButtonFullWidth(T(OrcTextId::WearThisSkin))) {
+                                OrcApplyLocalPlayerModelById(cur.second);
+                            }
+                            if (UiButtonFullWidth(T(OrcTextId::SaveSkinIni))) {
+                                skin->nickListCsv = g_uiStdSkinNickBuf;
+                                skin->nicknames = ParseNickCsv(skin->nickListCsv);
+                                SaveStandardSkinCfgToIni(*skin);
+                            }
+                        }
+                    }
+
+                    ImGui::Separator();
+                    bool sm = false, rs = false;
+                    UiButtonPair(T(OrcTextId::SaveSkinModeSelection), T(OrcTextId::RescanSkins), &sm, &rs);
+                    if (sm) SaveSkinModeIni();
+                    if (rs) {
+                        LoadStandardSkinsFromIni();
+                        g_uiStdSkinEditModelId = -1;
                     }
                     ImGui::EndTabItem();
                 }

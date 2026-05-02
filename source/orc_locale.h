@@ -18,7 +18,10 @@
     X(TabObjects, "Объекты", "Objects") \
     X(TabSkins, "Скины", "Skins") \
     X(TabSettings, "Настройки", "Settings") \
+    X(TabCustomObjects, "Кастомные объекты", "Custom objects") \
+    X(TabStandardObjects, "Стандартные объекты", "Standard objects") \
     X(TabCustomSkins, "Кастомные скины", "Custom skins") \
+    X(TabStandardSkins, "Стандартные скины", "Standard skins") \
     X(TabTexture, "Текстуры", "Texture") \
     X(BoneNone, "(нет)", "(none)") \
     X(BoneRoot, "Корень", "Root") \
@@ -58,7 +61,8 @@
     X(AllPedsRadius, "Радиус всех ped (м)", "All peds radius (m)") \
     X(ConsiderWeaponSkills, "Учитывать навыки оружия (dual wield)", "Consider weapon skills (dual wield)") \
     X(RenderCustomObjects, "Показывать кастомные объекты (папка Objects)", "Render custom objects (Objects folder)") \
-    X(SkinMode, "Режим кастомных скинов", "Skin mode (custom Skins)") \
+    X(RenderStandardObjects, "Показывать стандартные объекты (ID игры)", "Render standard objects (game IDs)") \
+    X(SkinMode, "Режим overlay-скинов", "Overlay skin mode") \
     X(SkinHideBasePed, "Скин: скрывать базового ped", "Skin: hide base ped") \
     X(UnsupportedSampNickBinding, "Неподдерживаемая сборка SA:MP - привязка по нику неактивна (режим SP).", "Unsupported SA:MP build - nick binding inactive (SP mode).") \
     X(SkinNickBinding, "Скин: привязка по нику (SA:MP)", "Skin: nick binding (SA:MP)") \
@@ -104,11 +108,21 @@
     X(NoDffObjectsFolder, "В папке Objects нет *.dff.", "No *.dff in Objects folder.") \
     X(Rescan, "Пересканировать", "Rescan") \
     X(Object, "Объект", "Object") \
+    X(StandardObjectModelId, "ID стандартного объекта", "Standard object ID") \
+    X(AddStandardObject, "Добавить в список на рендер", "Add to render list") \
+    X(RemoveFromList, "Удалить из списка", "Remove from list") \
+    X(StandardObjectListEmpty, "Список стандартных объектов пуст.", "Standard object list is empty.") \
+    X(InvalidStandardObjectModel, "ID не найден или не является объектной моделью.", "ID was not found or is not an object model.") \
+    X(SaveStandardObjectSkinSection, "Сохранить [Object.ID#N.Skin.*]", "Save [Object.ID#N.Skin.*]") \
     X(PedSkinDffName, "Скин ped (имя DFF)", "Ped skin (DFF name)") \
     X(Show, "Показывать", "Show") \
     X(SaveSkinSectionToObjectIni, "Сохранить [Skin.*] в INI объекта", "Save [Skin.*] to object .ini") \
     X(RescanObjectsFolder, "Пересканировать папку Objects", "Rescan Objects folder") \
     X(CustomSkinsHint, "Кастомные скины - DFF/TXD в папке Skins. Пулы случайного выбора в интерфейсе отключены до реализации.", "Custom skins - DFF/TXD in Skins folder. Random pools UI is disabled until implemented.") \
+    X(StandardSkinsHint, "Стандартные скины используют модели ped из игры: overlay поверх ped или примерка через SetModelIndex.", "Standard skins use game ped models: overlay on ped or preview via SetModelIndex.") \
+    X(SelectedSkinSource, "Источник выбранного overlay-скина", "Selected overlay skin source") \
+    X(SelectedCustomSkin, "Кастомный скин", "Custom skin") \
+    X(SelectedStandardSkin, "Стандартный скин", "Standard skin") \
     X(NoDffSkinsFolder, "В папке Skins нет *.dff.", "No *.dff in Skins folder.") \
     X(Skin, "Скин", "Skin") \
     X(BindSkinToNicks, "Привязать этот скин к никам", "Bind this skin to nick(s)") \
