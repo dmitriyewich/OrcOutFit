@@ -317,7 +317,13 @@ static bool HeldWeaponRwObjectIsReplacementClone(CPed* ped, RwObject* obj) {
 // vanilla held weapon, so the engine paints stock on top. Queue the stock pointer and write it in
 // `OrcFlushDeferredHeldWeaponSlotRestore` (D3D EndScene = after the scene is submitted for the frame).
 // Same timing applies to Guns TXD RwMaterial swaps: they are queued in a held defer list and restored at flush.
-static std::unordered_map<int, RwObject*> g_deferredHeldWeaponStockRestore;
+// Deferred restore stores stock + clone: blind overwrite with stock can clash if weapon changed/was cleared
+// between pedRender.after and flush → refcount corruption (`CBaseModelInfo::RemoveRef`).
+struct DeferredHeldWeaponSlotRestore {
+    RwObject* stock = nullptr;
+    RwObject* clone = nullptr;
+};
+static std::unordered_map<int, DeferredHeldWeaponSlotRestore> g_deferredHeldWeaponStockRestore;
 
 void OrcFlushDeferredHeldWeaponSlotRestore() {
     /// `pedRenderEvent.after` fires before GTA draws held `m_pWeaponObject`; restores here (EndScene/Present).
@@ -330,8 +336,11 @@ void OrcFlushDeferredHeldWeaponSlotRestore() {
     }
     for (const auto& kv : g_deferredHeldWeaponStockRestore) {
         CPed* ped = CPools::GetPed(kv.first);
-        if (ped && kv.second)
-            ped->m_pWeaponObject = kv.second;
+        if (!ped)
+            continue;
+        const DeferredHeldWeaponSlotRestore& r = kv.second;
+        if (r.stock && r.clone && ped->m_pWeaponObject == r.clone)
+            ped->m_pWeaponObject = r.stock;
     }
     g_deferredHeldWeaponStockRestore.clear();
 }
@@ -762,8 +771,12 @@ void OrcRestoreHeldWeaponReplacementAfter(CPed* ped) {
     state.captureActive = false;
     state.hideBaseMode = false;
 
-    if (pedRef > 0 && stock)
-        g_deferredHeldWeaponStockRestore[pedRef] = stock;
+    if (pedRef > 0 && stock && state.rwObject) {
+        DeferredHeldWeaponSlotRestore defer{};
+        defer.stock = stock;
+        defer.clone = state.rwObject;
+        g_deferredHeldWeaponStockRestore[pedRef] = defer;
+    }
 }
 
 static bool ModelIdMatchesWeaponType(int modelId, int wt) {
@@ -857,7 +870,7 @@ static void __fastcall RemoveWeaponModel_Hook(CPed* ped, void* /*edx*/, int mode
                 if (!stock && pedRef > 0) {
                     auto d = g_deferredHeldWeaponStockRestore.find(pedRef);
                     if (d != g_deferredHeldWeaponStockRestore.end())
-                        stock = d->second;
+                        stock = d->second.stock;
                 }
                 if (stock)
                     ped->m_pWeaponObject = stock;
