@@ -84,10 +84,10 @@ static bool SelectCurrentPedSkinIndex(const std::vector<std::pair<std::string, i
     return false;
 }
 
-static bool UiPedSkinComboWithMySkin(const char* id,
-                                     const char* label,
-                                     const std::vector<std::pair<std::string, int>>& pedSkins,
-                                     int* index) {
+bool OrcUiPedSkinPickerRowWithMySkin(const char* id,
+    const char* labelText,
+    const std::vector<std::pair<std::string, int>>& pedSkins,
+    int* index) {
     if (!index || pedSkins.empty())
         return false;
     if (*index < 0 || *index >= (int)pedSkins.size())
@@ -98,7 +98,9 @@ static bool UiPedSkinComboWithMySkin(const char* id,
     const ImGuiStyle& style = ImGui::GetStyle();
     const float avail = UiContentWidth();
     const float spacing = style.ItemSpacing.x;
-    const float buttonIdealW = std::min(OrcUiScaled(92.0f), std::max(OrcUiScaled(72.0f), ImGui::CalcTextSize(T(OrcTextId::MySkin)).x + style.FramePadding.x * 2.0f));
+    const char* mySkinLbl = OrcText(OrcTextId::MySkin);
+    const float buttonIdealW =
+        std::min(OrcUiScaled(92.0f), std::max(OrcUiScaled(72.0f), ImGui::CalcTextSize(mySkinLbl).x + style.FramePadding.x * 2.0f));
     float comboW = UiControlWidth(avail);
     float buttonW = buttonIdealW;
     float labelW = std::max(1.0f, avail - comboW - buttonW - spacing * 2.0f);
@@ -117,11 +119,11 @@ static bool UiPedSkinComboWithMySkin(const char* id,
         ImGui::TableSetColumnIndex(0);
         ImGui::AlignTextToFramePadding();
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
-        ImGui::TextUnformatted(label);
+        ImGui::TextUnformatted(labelText);
         ImGui::PopTextWrapPos();
 
         ImGui::TableSetColumnIndex(1);
-        if (ImGui::Button(T(OrcTextId::MySkin), ImVec2(std::max(1.0f, ImGui::GetContentRegionAvail().x), 0.0f)))
+        if (ImGui::Button(mySkinLbl, ImVec2(std::max(1.0f, ImGui::GetContentRegionAvail().x), 0.0f)))
             changed = SelectCurrentPedSkinIndex(pedSkins, index) || changed;
 
         ImGui::TableSetColumnIndex(2);
@@ -156,6 +158,13 @@ static bool UiPedSkinComboWithMySkin(const char* id,
     }
     ImGui::PopID();
     return changed;
+}
+
+static bool UiPedSkinComboWithMySkin(const char* id,
+    const char* label,
+    const std::vector<std::pair<std::string, int>>& pedSkins,
+    int* index) {
+    return OrcUiPedSkinPickerRowWithMySkin(id, label, pedSkins, index);
 }
 
 static bool OrcUiBeginControlRowEx(const char* id, const char* label, float* outControlWidth = nullptr) {
@@ -607,6 +616,14 @@ void OrcUiDraw() {
         // Objects
         // ------------------------------------------------------------------
         if (ImGui::BeginTabItem(T(OrcTextId::TabObjects))) {
+            if (OrcUiButtonFullWidth(T(OrcTextId::RescanObjects))) {
+                DiscoverCustomObjectsAndEnsureIni();
+                LoadStandardObjectsFromIni();
+                if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
+                g_uiObjParamsLoaded = false;
+                g_uiStdObjParamsLoaded = false;
+            }
+            ImGui::Separator();
             if (ImGui::BeginTabBar("OrcOutFitObjectSubTabs", ImGuiTabBarFlags_None)) {
                 if (ImGui::BeginTabItem(T(OrcTextId::TabCustomObjects))) {
                     ImGui::TextWrapped("%s", g_gameObjDir);
@@ -702,11 +719,6 @@ void OrcUiDraw() {
                         g_livePreviewObjectIniPath.clear();
                         g_livePreviewObjectSkinDff.clear();
                     }
-                }
-                if (OrcUiButtonFullWidth(T(OrcTextId::RescanObjectsFolder))) {
-                    DiscoverCustomObjectsAndEnsureIni();
-                    if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
-                    g_uiObjParamsLoaded = false;
                 }
                 if (!pedSkins.empty() &&
                     g_uiObjSkinListIdx >= 0 &&

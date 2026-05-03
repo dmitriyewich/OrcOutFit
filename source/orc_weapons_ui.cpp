@@ -83,20 +83,13 @@ void OrcWeaponsUiDrawWeaponsTab() {
                 SyncWeaponUiBuffersFromSkinPick();
             }
 
-            bool reload = false, rescanObj = false;
-            OrcUiButtonPair(WT(OrcTextId::ReloadIni), WT(OrcTextId::RescanObjects), &reload, &rescanObj);
-            if (reload) {
+            if (OrcUiButtonFullWidth(WT(OrcTextId::ReloadIni))) {
                 LoadConfig();
                 DiscoverCustomObjectsAndEnsureIni();
                 LoadStandardObjectsFromIni();
                 DiscoverCustomSkins();
                 LoadStandardSkinsFromIni();
                 SyncWeaponUiBuffersFromSkinPick();
-            }
-            if (rescanObj) {
-                DiscoverCustomObjectsAndEnsureIni();
-                LoadStandardObjectsFromIni();
-                if (g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
             }
 
             ImGui::Separator();
@@ -107,33 +100,8 @@ void OrcWeaponsUiDrawWeaponsTab() {
             } else {
                 if (g_uiWeaponSkinListIdx < 0 || g_uiWeaponSkinListIdx >= (int)pedSkins.size())
                     g_uiWeaponSkinListIdx = 0;
-                const auto& cur = pedSkins[(size_t)g_uiWeaponSkinListIdx];
-                char comboLbl[192];
-                OrcUiPedSkinListLabel(comboLbl, sizeof(comboLbl), cur.first.c_str(), cur.second);
-                if (OrcUiBeginControlRow("wskinpick", WT(OrcTextId::PedSkinEditingTarget))) {
-                    if (ImGui::BeginCombo("##value", comboLbl)) {
-                        CPlayerPed* pl = FindPlayerPed(0);
-                        const std::string onMe = pl ? GetPedStdSkinDffName(pl) : std::string{};
-                        for (int i = 0; i < (int)pedSkins.size(); i++) {
-                            const bool sel = (i == g_uiWeaponSkinListIdx);
-                            const bool onPlayer = !onMe.empty() && OrcUiLowerAscii(pedSkins[(size_t)i].first) == OrcUiLowerAscii(onMe);
-                            char rowLbl[192];
-                            OrcUiPedSkinListLabel(rowLbl, sizeof(rowLbl), pedSkins[(size_t)i].first.c_str(), pedSkins[(size_t)i].second);
-                            if (ImGui::Selectable(rowLbl, sel)) {
-                                g_uiWeaponSkinListIdx = i;
-                                SyncWeaponUiBuffersFromSkinPick();
-                            }
-                            if (onPlayer) {
-                                ImDrawList* dl = ImGui::GetWindowDrawList();
-                                const ImVec2 mn = ImGui::GetItemRectMin();
-                                const ImVec2 mx = ImGui::GetItemRectMax();
-                                dl->AddRectFilled(mn, ImVec2(mn.x + OrcUiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 200), 0.0f);
-                            }
-                        }
-                        ImGui::EndCombo();
-                    }
-                    OrcUiEndControlRow();
-                }
+                if (OrcUiPedSkinPickerRowWithMySkin("wskinpick", WT(OrcTextId::PedSkinEditingTarget), pedSkins, &g_uiWeaponSkinListIdx))
+                    SyncWeaponUiBuffersFromSkinPick();
             }
             if (!pedSkins.empty() &&
                 g_uiWeaponSkinListIdx >= 0 &&

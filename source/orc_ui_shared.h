@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <string>
+#include <utility>
+#include <vector>
 
 // Shared ImGui row helpers (implemented in orc_ui.cpp, used by orc_weapons_ui.cpp).
 bool OrcUiButtonFullWidth(const char* label);
@@ -14,3 +16,8 @@ bool OrcUiDragFloat(const char* id, const char* label, float* value, float speed
 void OrcUiPedSkinListLabel(char* buf, size_t bufChars, const char* dffName, int modelId);
 std::string OrcUiLowerAscii(std::string s);
 float OrcUiScaled(float value);
+/// Label + "My skin" button + ped skin combo (returns true if selection index changed).
+bool OrcUiPedSkinPickerRowWithMySkin(const char* id,
+    const char* labelText,
+    const std::vector<std::pair<std::string, int>>& pedSkins,
+    int* index);

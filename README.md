@@ -114,7 +114,7 @@
 ### Интерфейс
 - Вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**, **Settings**.
 - Внутри **Weapons** три подвкладки: **Weapon render** (крепление оружия на теле), **Weapon replacement** (замена моделей оружия по скину/random/нику) и **Textures** (`*_remap` из TXD модели, кастомные TXD из Guns/GunsNick).
-- Внутри **Objects** две подвкладки: **Custom objects** (DFF из папки `Objects`) и **Standard objects** (модели игры по ID).
+- Внутри **Objects**: сверху (над подвкладками) кнопка **«Пересканировать объекты»** — заново собирается список `*.dff` из `OrcOutFit\Objects` и перечитывается `StandardObjects.ini`. Далее подвкладки **Custom objects** и **Standard objects**.
 - Внутри **Skins** пять подвкладок: **Custom skins** (DFF поверх ped), **Standard skins** (ped-модели игры overlay / примерка), **Skin preview**, **Random skins** и **Texture** (`*_remap` для ped и overlay-скинов).
 - Интерфейс локализован на русский и английский язык; выбор хранится в **`[Main] Language=ru|en`** и переключается во вкладке **Settings**.
 - Кириллица в ImGui поддерживается через установленный шрифт Windows: основной **Arial**, fallback **Segoe UI / Tahoma / Calibri**. Путь к файлу берётся из реестра Windows Fonts (`HKLM` / `HKCU`) и системных каталогов Fonts, без жёсткой привязки к `C:\Windows\Fonts`; проект компилируется с **`/utf-8`**.
@@ -125,7 +125,8 @@
 - Во вкладке **Settings** рядом с полем **ActivationKey** есть серый маркер **`(?)`** с подсказкой по допустимым значениям клавиши.
 - Список стандартных ped для редактирования/примерки: **сортировка по model id по возрастанию**, подписи **`Имя [ID]`**.
 - **Wear this skin (local player)** находится в **Skins → Standard skins** и меняет модель локального педа для превью: стриминг (`RequestModel` / `LoadAllRequestedModels`), затем `CPed::SetModelIndex` в начале следующего кадра (безопасно для clump).
-- В **Weapons → Weapon render** оставлены только две кнопки сохранения:
+- В **Weapons → Рендер оружия** сверху — **«Перезагрузить INI»** (полная перезагрузка конфига, скан папки `Objects`, `StandardObjects.ini`, скинов). Выбор скина для пресета `Weapons\<dff>.ini`: строка **подпись — «Мой скин» — комбо**; **«Мой скин»** выставляет DFF **текущего локального** педа (как в списке кеша `LoadPedObject`).
+- В **Weapons → Рендер оружия** оставлены только две кнопки **сохранения**:
   - **Save to Global (`OrcOutFit.ini`)** — сохраняет весь набор оружия (primary + secondary) в глобальный INI.
   - **Save to skin (`OrcOutFit\Weapons`)** — сохраняет весь набор оружия (primary + secondary) в `Weapons\<dff>.ini`.
 - Сохранение INI выполняется пакетно: плагин собирает изменения в памяти и пишет файл одним проходом, чтобы не стопорить игру серией WinAPI INI-записей.
@@ -354,7 +355,7 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 | `source/orc_texture_remap.cpp`, `source/orc_texture_remap.h` | Texture remap стандартных ped TXD (`*_remap`) |
 | `source/orc_locale.cpp`, `source/orc_locale.h` | Ключи и строки локализации интерфейса (`ru` / `en`) |
 | `source/orc_log.cpp`, `source/orc_log.h` | Лог в файл, уровни Info/Error |
-| `source/orc_ui.cpp` | ImGui (кроме вынесенного UI оружия) |
+| `source/orc_ui.cpp`, `source/orc_ui_shared.h` | ImGui: вкладки Main/Objects/Skins/Settings, реализация общих контролов; строка выбора ped skin с кнопкой **«Мой скин»** (`OrcUiPedSkinPickerRowWithMySkin`) |
 | `source/overlay.cpp` | D3D9 hooks + ввод/курсор |
 | `source/samp_bridge.cpp` | SA:MP |
 | `tools/fix_mojibake.py` | Опционально: исправление случайно испорченной UTF-8 в исходниках (см. «Кодировка исходников») |
