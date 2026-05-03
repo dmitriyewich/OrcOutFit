@@ -99,6 +99,16 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />
+    <ClCompile Include="source\orc_objects.cpp" />
+    <ClCompile Include="source\orc_skins.cpp" />
+    <ClCompile Include="source\orc_attach.cpp" />
+    <ClCompile Include="source\orc_path.cpp" />
+    <ClCompile Include="source\orc_weapon_assets.cpp" />
+    <ClCompile Include="source\orc_weapon_runtime.cpp" />
+    <ClCompile Include="source\orc_render.cpp" />
+    <ClCompile Include="source\orc_ui_bones.cpp" />
+    <ClCompile Include="source\orc_weapons.cpp" />
+    <ClCompile Include="source\orc_weapons_ui.cpp" />
     <ClCompile Include="source\orc_ini.cpp" />
     <ClCompile Include="source\orc_locale.cpp" />
     <ClCompile Include="source\orc_log.cpp" />

@@ -16,3 +16,5 @@ const char* OrcLogGetPath();
 
 void OrcLogError(const char* fmt, ...);
 void OrcLogInfo(const char* fmt, ...);
+// Rate-limited Info (slot 0..31); used for diagnostics without spamming OrcOutFit.log per frame.
+void OrcLogInfoThrottled(int slot, unsigned intervalMs, const char* fmt, ...);

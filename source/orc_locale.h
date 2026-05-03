@@ -154,6 +154,8 @@
     X(EnableWeaponReplacement, "Включить замену оружия", "Enable weapon replacement") \
     X(ReplaceWeaponsOnBody, "Заменять оружие на теле", "Replace weapons on body") \
     X(ReplaceWeaponsInHands, "Заменять оружие в руках", "Replace weapons in hands") \
+    X(HideBaseHeldWeapon, "Скрыть штатное оружие в руках, рисовать замену после", "Hide stock held weapon, draw replacement after") \
+    X(HideBaseHeldWeaponHint, "Полезно в SA:MP, когда m_pWeaponObject ненадёжен. Освещение клона как у оружия на теле (без CPed::SetupLighting).", "Helps in SA:MP when m_pWeaponObject is unreliable. Clone lit like on-body weapons (no CPed::SetupLighting).") \
     X(WeaponReplacementStatsFormat, "Guns: %d уникальных, %d random. GunsNick: %d.", "Guns: %d unique, %d random. GunsNick: %d.") \
     X(RescanWeaponReplacement, "Пересканировать замену оружия", "Rescan weapon replacement") \
     X(EnableWeaponTextures, "Включить текстуры оружия", "Enable weapon textures") \

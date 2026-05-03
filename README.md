@@ -30,6 +30,9 @@
 - Замена по скину хранится в **`OrcOutFit\Weapons\Guns\<weapon>\<dff>.dff`**; random-варианты — в **`OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.dff`**.
 - Имя `<weapon>` берётся из `weapon.dat` / `LoadWeaponObject` и сравнивается без учёта регистра (`m4`, `ak47`, `desert_eagle` и т.п.).
 - Random-вариант закрепляется за ped/оружием/скином и выбирается через shuffle-bag, без файловых сканов в per-frame пути.
+- Оружие в руках при **Weapon replacement**: подмена `m_pWeaponObject` на кадр рендера ped и хуки **`CPed::AddWeaponModel`** / **`CPed::RemoveWeaponModel`** (SA 1.0 US: `0x5E5ED0` / `0x5E3990`): сразу после того как движок подцепил штатную модель к ped, в слот подставляется клон замены; при снятии модели указатель возвращается движку, клон уничтожается. На каждом кадре матрица клона по-прежнему копируется со штатного меша (после прошлого кадра в слоте снова штатный объект), чтобы IK не «плавал». Атомики клона на стандартном RW-пути (`renderCallBack` штатного оружия не копируется — иначе `RenderWeaponCB` падает без данных плагина). Альфа вспышки для материалов вроде `gunflash`, `muzzleflash`, `muzzle_texture*` синхронизируется с `m_nWeaponGunflashAlphaMP1`. Для выбора пресета замены в руках используется тип оружия в **активном слоте** без требования «есть патроны» на клиенте; если слот в фазе рендера «пустой» (часто в SA:MP), дополнительно берётся **`CPed::m_nWeaponModelId`** и обратный поиск по `CWeaponInfo` / `weapon.dat`, затем сопоставление слотов инвентаря с этой моделью.
+- Опция **«Скрыть штатное оружие в руках, рисовать замену после»** / INI `[Features] WeaponReplacementHideBaseHeld=1`: на время `CPed::Render` в `m_pWeaponObject` подставляется `nullptr` (штатный клан не рисуется), кастомный клон дорисовывается в `pedRenderEvent.after` с **тем же** освещением, что оружие на теле: `ApplyAttachmentLightingForPed` (и при необходимости TXD на клоне), **без** `CPed::SetupLighting` / `RemoveLighting`, чтобы не ломать глобальные уличные/сценовые света. Поза клона берётся из той же секции оружия в OrcOutFit, что и для отображения на теле (кость `Bone`, смещения); если секция выключена или кость не задана, используется запасной узел **правая рука** (`Bone=24` в терминах RpHAnim node id в плагине).
+- Если слот `m_pWeaponObject` в фазе рендера ped пуст (в частности при **выключенной** опции выше), подмена в руках выполняется дорисовыванием после внутреннего вызова в `CPed::Render` (поза от кости). Указатель на штатный клан для слота возвращается в конце кадра (после сцены), иначе оставшаяся часть `CPed::Render` снова нарисует ванильное оружие поверх замены.
 
 ### Текстуры оружия
 - Подвкладка **Weapons → Textures** управляет отдельной TXD-подменой оружия без замены DFF-модели.
@@ -191,7 +194,7 @@
 
 - Workflow: **`.github/workflows/build-release-win32.yml`**.
 - Триггеры: ручной запуск (`workflow_dispatch`) и публикация релиза (`release.published`).
-- Имя workflow run в списке Actions берётся из названия релиза, затем из release/tag ref, затем из commit message, иначе из SHA (`github.sha`).
+- Имя workflow run в списке Actions: для **release** — название релиза или тег; для **workflow_dispatch** и прочих событий — **`ветка (#номер_run)`** (например `main (#42)`), чтобы не отображался только короткий SHA.
 - Сборка в CI: сначала `source/external/plugin-sdk/plugin_sa/Plugin_SA.vcxproj` (`Release|Win32`, `PlatformToolset=v143`) для `Plugin.lib`, затем `OrcOutFit.sln` (`Release|x86`, `PlatformToolset=v143`). Это намеренно отличается от локального `v145`.
 - Публикация:
   - workflow artifact: `OrcOutFit-Release-Win32`;
@@ -323,12 +326,22 @@ TXD должен содержать текстуры с теми же имена
 
 | Путь | Назначение |
 |------|------------|
-| `source/main.cpp` | Рендер, конфиг, основные хуки, streaming, скины |
+| `source/main.cpp` | Точка входа, конфиг, weapon.dat / ped.dat хуки, `SyncAndRender`, сохранение INI |
+| `source/orc_app.h`, `source/orc_types.h` | Состояние плагина, типы, объявления модулей |
+| `source/orc_weapons.cpp`, `source/orc_weapons.h` | Хук `LoadWeaponObject`, weapon.dat |
+| `source/orc_weapon_runtime.cpp`, `source/orc_weapon_runtime.h` | Оружие на теле, held replacement, `OrcSyncPedWeapons` / `OrcRenderPedWeapons` |
+| `source/orc_weapon_assets.cpp`, `source/orc_weapon_assets.h` | Скан Guns/GunsNick/Textures, замена DFF/TXD |
+| `source/orc_path.cpp`, `source/orc_path.h` | Пути, `OrcToLowerAscii`, поиск TXD |
+| `source/orc_attach.cpp`, `source/orc_attach.h` | Подготовка atomic/clump для вложений |
+| `source/orc_render.cpp`, `source/orc_render.h` | Кости, смещение матрицы, `OrcApplyAttachmentLightingForPed` |
+| `source/orc_objects.cpp` | Кастомные/стандартные объекты, `Objects\`, `StandardObjects.ini`, рендер вложений |
+| `source/orc_skins.cpp` | Кастомные/стандартные/random скины, превью, overlay |
+| `source/orc_weapons_ui.cpp` | ImGui-вкладка Weapons |
+| `source/orc_ui_bones.cpp`, `source/orc_ui_bones.h` | Список костей для UI |
 | `source/orc_texture_remap.cpp`, `source/orc_texture_remap.h` | Texture remap стандартных ped TXD (`*_remap`) |
 | `source/orc_locale.cpp`, `source/orc_locale.h` | Ключи и строки локализации интерфейса (`ru` / `en`) |
 | `source/orc_log.cpp`, `source/orc_log.h` | Лог в файл, уровни Info/Error |
-| `source/orc_app.h`, `source/orc_types.h` | Состояние плагина, типы |
-| `source/orc_ui.cpp` | ImGui |
+| `source/orc_ui.cpp` | ImGui (кроме вынесенного UI оружия) |
 | `source/overlay.cpp` | D3D9 hooks + ввод/курсор |
 | `source/samp_bridge.cpp` | SA:MP |
 

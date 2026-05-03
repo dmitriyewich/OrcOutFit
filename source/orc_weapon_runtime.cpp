@@ -1,0 +1,962 @@
+﻿#include "plugin.h"
+
+#include "CPlayerPed.h"
+#include "CPed.h"
+#include "CPools.h"
+#include "CStreaming.h"
+#include "CWeaponInfo.h"
+#include "CModelInfo.h"
+#include "RenderWare.h"
+#include "eWeaponType.h"
+
+#include <algorithm>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include <windows.h>
+
+#include "external/MinHook/include/MinHook.h"
+
+#include "orc_app.h"
+#include "orc_attach.h"
+#include "orc_log.h"
+#include "orc_path.h"
+#include "orc_render.h"
+#include "orc_types.h"
+#include "orc_weapon_assets.h"
+#include "orc_weapon_runtime.h"
+
+#include "samp_bridge.h"
+
+using namespace plugin;
+
+static void SyncWeaponReplacementMuzzleFlashAlpha(CPed* ped, RwObject* obj);
+
+static bool g_pedWeaponModelHooksInstalled = false;
+using AddWeaponModel_t = void(__thiscall*)(CPed*, int);
+using RemoveWeaponModel_t = void(__thiscall*)(CPed*, int);
+static AddWeaponModel_t g_AddWeaponModel_Orig = nullptr;
+static RemoveWeaponModel_t g_RemoveWeaponModel_Orig = nullptr;
+RenderedWeapon g_rendered[OrcWeaponSlotMax] = {};
+using PedWeaponCache = std::array<RenderedWeapon, OrcWeaponSlotMax>;
+std::unordered_map<int, PedWeaponCache> g_otherPedsRendered;
+
+static int FindSlotByType(RenderedWeapon* arr, int wt, bool secondary) {
+    for (int i = 0; i < OrcWeaponSlotMax; i++)
+        if (arr[i].active && arr[i].weaponType == wt && arr[i].secondary == secondary) return i;
+    return -1;
+}
+static int FindFree(RenderedWeapon* arr) {
+    for (int i = 0; i < OrcWeaponSlotMax; i++) if (!arr[i].active) return i;
+    return -1;
+}
+
+void OrcDestroyRenderedWeapon(RenderedWeapon& r) {
+    if (!r.rwObject) {
+        r = {};
+        return;
+    }
+    OrcDestroyRwObjectInstance(r.rwObject);
+    r = {};
+}
+
+void OrcWeaponClearLocalRendered() {
+    for (int i = 0; i < OrcWeaponSlotMax; i++) OrcDestroyRenderedWeapon(g_rendered[i]);
+}
+
+
+void OrcWeaponClearOtherPedsRendered() {
+    for (auto& kv : g_otherPedsRendered) {
+        for (int i = 0; i < OrcWeaponSlotMax; i++) OrcDestroyRenderedWeapon(kv.second[i]);
+    }
+    g_otherPedsRendered.clear();
+}
+
+static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, int slot, CPed* ped) {
+    if (wt <= 0) return false;
+    if (secondary) {
+        if (g_cfg2.empty() || wt >= (int)g_cfg2.size()) return false;
+    } else {
+        if (g_cfg.empty() || wt >= (int)g_cfg.size()) return false;
+    }
+    const WeaponCfg& wc = secondary ? GetWeaponCfg2ForPed(ped, wt) : GetWeaponCfgForPed(ped, wt);
+    if (!wc.enabled || wc.boneId == 0) return false;
+    if (FindSlotByType(arr, wt, secondary) >= 0) return true;
+
+    CWeaponInfo* info = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+    if (!info) return false;
+    int mid = info->m_nModelId;
+    if (mid <= 0) return false;
+
+    RwMatrix* bone = OrcGetBoneMatrix(ped, wc.boneId);
+    if (!bone) return false;
+
+    RwMatrix mtx{};
+    std::memcpy(&mtx, bone, sizeof(RwMatrix));
+
+    std::string replacementKey;
+    RwObject* inst = nullptr;
+    if (g_weaponReplacementEnabled && g_weaponReplacementOnBody) {
+        if (WeaponReplacementAsset* asset = OrcResolveUsableWeaponReplacementAssetForPed(ped, wt, true)) {
+            inst = OrcCloneWeaponReplacementObject(*asset);
+            if (inst)
+                replacementKey = asset->key;
+        }
+    }
+
+    if (!inst) {
+        auto* mi = CModelInfo::GetModelInfo(mid);
+        if (!mi || !mi->m_pRwObject) {
+            // Auto-request weapon model streaming (supports modded weapon.dat setups).
+            if (mid > 0 && !CStreaming::HasModelLoaded(mid)) {
+                static std::unordered_set<int> requested;
+                if (requested.insert(mid).second) {
+                    CStreaming::RequestModel(mid, 0);
+                    CStreaming::LoadAllRequestedModels(false);
+                }
+            }
+            return false;
+        }
+        inst = mi->CreateInstance(&mtx);
+    }
+    if (!inst) return false;
+
+    // РЎР±СЂРѕСЃ render-callback РЅР° РґРµС„РѕР»С‚РЅС‹Р№ RW + leak РјР°С‚РµСЂРёР°Р»РѕРІ (СЃРј. InitAtomicCB).
+    if (inst->type == rpCLUMP) {
+        RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), OrcInitAttachmentAtomicCB, nullptr);
+    } else if (inst->type == rpATOMIC) {
+        OrcInitAttachmentAtomicCB(reinterpret_cast<RpAtomic*>(inst), nullptr);
+    } else {
+        OrcDestroyRwObjectInstance(inst);
+        return false;
+    }
+
+    int fi = FindFree(arr);
+    if (fi < 0) {
+        OrcLogError("CreateWeaponInstance: no free slot (weapon type %d)", wt);
+        OrcDestroyRwObjectInstance(inst);
+        return false;
+    }
+    arr[fi] = { true, wt, secondary, mid, slot, inst, replacementKey };
+
+    static std::unordered_set<int> logged;
+    if (!secondary && logged.insert(wt).second) {
+    }
+    return true;
+}
+
+static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
+    if (!r.rwObject) return;
+
+    const WeaponCfg& wc = r.secondary ? GetWeaponCfg2ForPed(ped, r.weaponType) : GetWeaponCfgForPed(ped, r.weaponType);
+    RwMatrix* bone = OrcGetBoneMatrix(ped, wc.boneId);
+    if (!bone) return;
+
+    RpAtomic* atomic = nullptr;
+    RwFrame*  frame  = nullptr;
+    if (r.rwObject->type == rpATOMIC) {
+        atomic = reinterpret_cast<RpAtomic*>(r.rwObject);
+        frame  = RpAtomicGetFrame(atomic);
+    } else if (r.rwObject->type == rpCLUMP) {
+        frame = RpClumpGetFrame(reinterpret_cast<RpClump*>(r.rwObject));
+    }
+    if (!frame) return;
+
+    RwMatrix mtx{};
+    std::memcpy(&mtx, bone, sizeof(RwMatrix));
+    OrcApplyAttachmentOffset(&mtx, wc.x, wc.y, wc.z);
+    OrcRotateAttachmentMatrix(&mtx, wc.rx, wc.ry, wc.rz);
+
+    std::memcpy(RwFrameGetMatrix(frame), &mtx, sizeof(RwMatrix));
+    RwMatrixUpdate(RwFrameGetMatrix(frame));
+    if (wc.scale != 1.0f) {
+        RwV3d s = { wc.scale, wc.scale, wc.scale };
+        RwMatrixScale(RwFrameGetMatrix(frame), &s, rwCOMBINEPRECONCAT);
+    }
+    RwFrameUpdateObjects(frame);
+
+    CVector lightPos = { bone->pos.x, bone->pos.y, bone->pos.z };
+    OrcApplyAttachmentLightingForPed(ped, lightPos);
+    WeaponTextureAsset* textureAsset = OrcResolveUsableWeaponTextureAssetForPed(ped, r.weaponType, true);
+    OrcApplyWeaponTextureToRwObject(r.rwObject, textureAsset);
+    if (!r.replacementKey.empty())
+        SyncWeaponReplacementMuzzleFlashAlpha(ped, r.rwObject);
+
+    if (r.rwObject->type == rpCLUMP) {
+        auto* clump = reinterpret_cast<RpClump*>(r.rwObject);
+        if (!clump) {
+            OrcRestoreWeaponTextureOverrides();
+            return;
+        }
+        RpClumpForAllAtomics(clump, OrcPrepAtomicCB, nullptr);
+        RpClumpRender(clump);
+    } else {
+        OrcPrepAtomicCB(atomic, nullptr);
+        atomic->renderCallBack(atomic);
+    }
+    OrcRestoreWeaponTextureOverrides();
+}
+
+static RwFrame* GetRwObjectRootFrame(RwObject* object) {
+    if (!object)
+        return nullptr;
+    if (object->type == rpATOMIC)
+        return RpAtomicGetFrame(reinterpret_cast<RpAtomic*>(object));
+    if (object->type == rpCLUMP)
+        return RpClumpGetFrame(reinterpret_cast<RpClump*>(object));
+    return nullptr;
+}
+
+// Align replacement clone root to stock weapon pose before handing it to CPed as m_pWeaponObject,
+// so the engine continues IK from the same basis as vanilla (reduces вЂњfloatingвЂќ vs hand).
+static void CopyRwObjectRootMatrix(RwObject* src, RwObject* dst) {
+    if (!src || !dst)
+        return;
+    RwFrame* sf = GetRwObjectRootFrame(src);
+    RwFrame* df = GetRwObjectRootFrame(dst);
+    if (!sf || !df)
+        return;
+    __try {
+        std::memcpy(RwFrameGetMatrix(df), RwFrameGetMatrix(sf), sizeof(RwMatrix));
+        RwMatrixUpdate(RwFrameGetMatrix(df));
+        RwFrameUpdateObjects(df);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("CopyRwObjectRootMatrix: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+// Replacement DFFs often include a muzzle-flash mesh with the same texture names as vanilla.
+// The game drives visibility via CPed::m_nWeaponGunflashAlphaMP1 (and MP2) during held render;
+// our InitAttachmentAtomicCB forces material alpha to 255, so sync flash materials each frame.
+static bool IsWeaponMuzzleFlashTextureName(const char* name) {
+    if (!name || !name[0])
+        return false;
+    const std::string s = OrcToLowerAscii(name);
+    if (s.find("gunflash") != std::string::npos)
+        return true;
+    if (s.find("muzzleflash") != std::string::npos)
+        return true;
+    if (s.find("muzzle_flash") != std::string::npos)
+        return true;
+    if (s.find("muzzle_texture") != std::string::npos)
+        return true;
+    return false;
+}
+
+static RpMaterial* SyncHeldReplacementMuzzleFlashMatCB(RpMaterial* m, void* data) {
+    const int* alpha = reinterpret_cast<int*>(data);
+    if (!m || !alpha)
+        return m;
+    if (!m->texture || !IsWeaponMuzzleFlashTextureName(m->texture->name))
+        return m;
+    int a = *alpha;
+    if (a < 0)
+        a = 0;
+    if (a > 255)
+        a = 255;
+    m->color.alpha = static_cast<RwUInt8>(a);
+    return m;
+}
+
+static RpAtomic* SyncHeldReplacementMuzzleFlashAtomicCB(RpAtomic* atomic, void* data) {
+    if (!atomic || !atomic->geometry)
+        return atomic;
+    RpGeometryForAllMaterials(atomic->geometry, SyncHeldReplacementMuzzleFlashMatCB, data);
+    return atomic;
+}
+
+static void SyncWeaponReplacementMuzzleFlashAlpha(CPed* ped, RwObject* obj) {
+    if (!ped || !obj)
+        return;
+    int a = static_cast<int>(ped->m_nWeaponGunflashAlphaMP1);
+    __try {
+        if (obj->type == rpCLUMP)
+            RpClumpForAllAtomics(reinterpret_cast<RpClump*>(obj), SyncHeldReplacementMuzzleFlashAtomicCB, &a);
+        else if (obj->type == rpATOMIC)
+            SyncHeldReplacementMuzzleFlashAtomicCB(reinterpret_cast<RpAtomic*>(obj), &a);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("SyncWeaponReplacementMuzzleFlashAlpha: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+struct HeldWeaponReplacementState {
+    int weaponType = 0;
+    std::string replacementKey;
+    RwObject* rwObject = nullptr;
+    RwObject* originalObject = nullptr;
+    bool captureActive = false;
+    bool hideBaseMode = false;
+};
+
+static std::unordered_map<int, HeldWeaponReplacementState> g_heldWeaponReplacements;
+
+// `Events::pedRenderEvent` wraps an inner CALL inside `CPed::Render`, not the whole function. Restoring the
+// stock `m_pWeaponObject` in the event's "after" callback runs *before* the rest of `CPed::Render` draws the
+// vanilla held weapon, so the engine paints stock on top. Queue the stock pointer and write it in
+// `OrcFlushDeferredHeldWeaponSlotRestore` (D3D EndScene = after the scene is submitted for the frame).
+static std::unordered_map<int, RwObject*> g_deferredHeldWeaponStockRestore;
+
+void OrcFlushDeferredHeldWeaponSlotRestore() {
+    if (g_deferredHeldWeaponStockRestore.empty())
+        return;
+    if (!CPools::ms_pPedPool) {
+        g_deferredHeldWeaponStockRestore.clear();
+        return;
+    }
+    for (const auto& kv : g_deferredHeldWeaponStockRestore) {
+        CPed* ped = CPools::GetPed(kv.first);
+        if (ped && kv.second)
+            ped->m_pWeaponObject = kv.second;
+    }
+    g_deferredHeldWeaponStockRestore.clear();
+}
+
+static int GetPedCurrentWeaponType(CPed* ped) {
+    if (!ped)
+        return 0;
+    const unsigned char slot = ped->m_nSelectedWepSlot;
+    if (slot >= 13)
+        return 0;
+    const int wt = (int)ped->m_aWeapons[slot].m_eWeaponType;
+    if (wt <= 0)
+        return 0;
+    CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+    const bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+    if (needsAmmo && ped->m_aWeapons[slot].m_nAmmoTotal == 0)
+        return 0;
+    return wt;
+}
+
+// Selected-slot weapon type without ammo filtering. Used for held visual replacement / textures:
+// SA:MP (and similar) may leave m_nAmmoTotal at 0 on the client while the pistol model is still held.
+static int GetPedSelectedWeaponTypeForReplace(CPed* ped) {
+    if (!ped)
+        return 0;
+    const unsigned char slot = ped->m_nSelectedWepSlot;
+    if (slot >= 13)
+        return 0;
+    const int wt = (int)ped->m_aWeapons[slot].m_eWeaponType;
+    if (wt <= 0)
+        return 0;
+    return wt;
+}
+
+static int WeaponTypeFromModelId(int modelId) {
+    if (modelId <= 0)
+        return 0;
+    // Covers vanilla + typical weapon.dat extensions (LoadWeaponObject cache).
+    for (int wt = 1; wt < 96; ++wt) {
+        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+        if (wi && wi->m_nModelId == modelId)
+            return wt;
+    }
+    return 0;
+}
+
+// Resolve visible held weapon for replacement: slot-based first, then CPed::m_nWeaponModelId and slot scan.
+// pedRenderEvent.before often runs when m_aWeapons/m_nSelectedWepSlot are cleared or stale but m_nWeaponModelId
+// still matches the weapon being drawn (common in SA:MP).
+static int ResolveWeaponTypeForHeldReplacement(CPed* ped) {
+    if (!ped)
+        return 0;
+    int wt = GetPedSelectedWeaponTypeForReplace(ped);
+    if (wt > 0)
+        return wt;
+
+    const int mid = ped->m_nWeaponModelId;
+    wt = WeaponTypeFromModelId(mid);
+    if (wt > 0)
+        return wt;
+
+    for (int s = 0; s < 13; ++s) {
+        const int t = (int)ped->m_aWeapons[s].m_eWeaponType;
+        if (t <= 0)
+            continue;
+        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(t), 1);
+        if (wi && wi->m_nModelId == mid && mid > 0)
+            return t;
+    }
+
+    int singleWt = 0;
+    int nonZeroSlots = 0;
+    for (int s = 0; s < 13; ++s) {
+        const int t = (int)ped->m_aWeapons[s].m_eWeaponType;
+        if (t <= 0)
+            continue;
+        ++nonZeroSlots;
+        singleWt = t;
+    }
+    if (nonZeroSlots == 1)
+        return singleWt;
+
+    if ((int)ped->m_nSavedWeapon > (int)WEAPONTYPE_UNARMED)
+        return (int)ped->m_nSavedWeapon;
+
+    return 0;
+}
+
+static bool ShouldReplaceHeldWeaponForPed(CPed* ped) {
+    if (!g_enabled || !g_weaponReplacementEnabled || !g_weaponReplacementInHands || !ped)
+        return false;
+    CPlayerPed* player = FindPlayerPed(0);
+    if (player && ped == player)
+        return true;
+    if (!g_renderAllPedsWeapons || !player)
+        return false;
+    const CVector& pp = player->GetPosition();
+    const CVector& p = ped->GetPosition();
+    const float dx = p.x - pp.x;
+    const float dy = p.y - pp.y;
+    const float dz = p.z - pp.z;
+    return (dx * dx + dy * dy + dz * dz) <= (g_renderAllPedsRadius * g_renderAllPedsRadius);
+}
+
+static bool ShouldTextureHeldWeaponForPed(CPed* ped) {
+    if (!g_enabled || !g_weaponTexturesEnabled || !ped)
+        return false;
+    CPlayerPed* player = FindPlayerPed(0);
+    if (player && ped == player)
+        return true;
+    if (!g_renderAllPedsWeapons || !player)
+        return false;
+    const CVector& pp = player->GetPosition();
+    const CVector& p = ped->GetPosition();
+    const float dx = p.x - pp.x;
+    const float dy = p.y - pp.y;
+    const float dz = p.z - pp.z;
+    return (dx * dx + dy * dy + dz * dz) <= (g_renderAllPedsRadius * g_renderAllPedsRadius);
+}
+
+void OrcPrepareHeldWeaponTextureBefore(CPed* ped) {
+    if (!ShouldTextureHeldWeaponForPed(ped) || !ped->m_pWeaponObject)
+        return;
+    const int wt = ResolveWeaponTypeForHeldReplacement(ped);
+    if (wt <= 0)
+        return;
+    WeaponTextureAsset* asset = OrcResolveUsableWeaponTextureAssetForPed(ped, wt, true);
+    OrcApplyWeaponTextureToRwObject(ped->m_pWeaponObject, asset);
+}
+
+void OrcDestroyAllHeldWeaponReplacementInstances() {
+    OrcFlushDeferredHeldWeaponSlotRestore();
+    for (auto& kv : g_heldWeaponReplacements) {
+        HeldWeaponReplacementState& st = kv.second;
+        if (st.captureActive) {
+            CPed* ped = CPools::GetPed(kv.first);
+            if (ped) {
+                if (st.hideBaseMode && st.originalObject)
+                    ped->m_pWeaponObject = st.originalObject;
+                else if (st.rwObject && ped->m_pWeaponObject == st.rwObject && st.originalObject)
+                    ped->m_pWeaponObject = st.originalObject;
+            }
+        }
+        st.captureActive = false;
+        st.hideBaseMode = false;
+        st.originalObject = nullptr;
+        OrcDestroyRwObjectInstance(st.rwObject);
+    }
+    g_heldWeaponReplacements.clear();
+    g_deferredHeldWeaponStockRestore.clear();
+}
+
+void OrcPruneHeldWeaponReplacementInstances() {
+    if (!CPools::ms_pPedPool) {
+        OrcDestroyAllHeldWeaponReplacementInstances();
+        return;
+    }
+    std::unordered_set<int> alive;
+    for (int i = 0; i < CPools::ms_pPedPool->m_nSize; ++i) {
+        CPed* ped = CPools::ms_pPedPool->GetAt(i);
+        if (ped)
+            alive.insert(CPools::GetPedRef(ped));
+    }
+    for (auto it = g_heldWeaponReplacements.begin(); it != g_heldWeaponReplacements.end();) {
+        if (alive.find(it->first) == alive.end()) {
+            g_deferredHeldWeaponStockRestore.erase(it->first);
+            OrcDestroyRwObjectInstance(it->second.rwObject);
+            it = g_heldWeaponReplacements.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// R_Hand (RpHAnim node id) вЂ” fallback when weapon has no enabled body slot in OrcOutFit.ini.
+static constexpr int kHeldReplacementFallbackBoneId = 24;
+
+// Same placement math as RenderOneWeapon / body attachments (no SetupLighting вЂ” avoids breaking scene lights).
+// If [weapon] is disabled or Bone=0 in INI, uses kHeldReplacementFallbackBoneId so hide-base still draws.
+static bool PositionHeldReplacementLikeBodyWeapon(CPed* ped, int wt, RwObject* rwObject) {
+    if (!ped || !rwObject || wt <= 0 || wt >= (int)g_cfg.size())
+        return false;
+    const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
+    const bool useIni = wc.enabled && wc.boneId != 0;
+    const int boneId = useIni ? wc.boneId : kHeldReplacementFallbackBoneId;
+    RwMatrix* bone = OrcGetBoneMatrix(ped, boneId);
+    if (!bone)
+        return false;
+
+    RwFrame* frame = nullptr;
+    if (rwObject->type == rpATOMIC) {
+        frame = RpAtomicGetFrame(reinterpret_cast<RpAtomic*>(rwObject));
+    } else if (rwObject->type == rpCLUMP) {
+        frame = RpClumpGetFrame(reinterpret_cast<RpClump*>(rwObject));
+    }
+    if (!frame)
+        return false;
+
+    RwMatrix mtx{};
+    std::memcpy(&mtx, bone, sizeof(RwMatrix));
+    if (useIni) {
+        OrcApplyAttachmentOffset(&mtx, wc.x, wc.y, wc.z);
+        OrcRotateAttachmentMatrix(&mtx, wc.rx, wc.ry, wc.rz);
+    }
+    std::memcpy(RwFrameGetMatrix(frame), &mtx, sizeof(RwMatrix));
+    RwMatrixUpdate(RwFrameGetMatrix(frame));
+    if (useIni && wc.scale != 1.0f) {
+        RwV3d s = { wc.scale, wc.scale, wc.scale };
+        RwMatrixScale(RwFrameGetMatrix(frame), &s, rwCOMBINEPRECONCAT);
+    }
+    RwFrameUpdateObjects(frame);
+    return true;
+}
+
+static void RenderHeldReplacementHideBaseForPed(CPed* ped, HeldWeaponReplacementState& state) {
+    if (!ped || !state.rwObject || state.weaponType <= 0)
+        return;
+    const int wt = state.weaponType;
+    if (!PositionHeldReplacementLikeBodyWeapon(ped, wt, state.rwObject)) {
+        OrcLogInfoThrottled(29, 4000u,
+            "held wr hide-base: position failed pedRef=%d wt=%d (bone/skeleton?)",
+            CPools::GetPedRef(ped), wt);
+        return;
+    }
+
+    const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
+    const bool useIni = wc.enabled && wc.boneId != 0;
+    const int boneId = useIni ? wc.boneId : kHeldReplacementFallbackBoneId;
+    RwMatrix* bone = OrcGetBoneMatrix(ped, boneId);
+    CVector lightPos{};
+    if (bone)
+        lightPos = CVector(bone->pos.x, bone->pos.y, bone->pos.z);
+    else {
+        CVector bc{};
+        ped->GetBoundCentre(bc);
+        lightPos = bc;
+    }
+
+    if (g_weaponTexturesEnabled) {
+        WeaponTextureAsset* tex = OrcResolveUsableWeaponTextureAssetForPed(ped, wt, true);
+        OrcApplyWeaponTextureToRwObject(state.rwObject, tex);
+    }
+    SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+    OrcApplyAttachmentLightingForPed(ped, lightPos, 0.5f);
+
+    if (state.rwObject->type == rpCLUMP) {
+        RpClump* clump = reinterpret_cast<RpClump*>(state.rwObject);
+        RpClumpForAllAtomics(clump, OrcPrepAtomicCB, nullptr);
+        OrcTryRpClumpRender(clump);
+    } else {
+        RpAtomic* atomic = reinterpret_cast<RpAtomic*>(state.rwObject);
+        OrcPrepAtomicCB(atomic, nullptr);
+        if (atomic->renderCallBack)
+            atomic->renderCallBack(atomic);
+    }
+    OrcRestoreWeaponTextureOverrides();
+}
+
+void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
+    const int pedRefEarly = ped ? CPools::GetPedRef(ped) : 0;
+
+    if (!ShouldReplaceHeldWeaponForPed(ped)) {
+        OrcLogInfoThrottled(20, 3000u,
+            "held wr: gated pedRef=%d en=%d wrEn=%d inHands=%d allPeds=%d r=%.1f",
+            pedRefEarly, g_enabled ? 1 : 0, g_weaponReplacementEnabled ? 1 : 0,
+            g_weaponReplacementInHands ? 1 : 0, g_renderAllPedsWeapons ? 1 : 0, g_renderAllPedsRadius);
+        return;
+    }
+
+    const bool hideBase = g_weaponReplacementHideBaseHeld;
+    const int wt = ResolveWeaponTypeForHeldReplacement(ped);
+    if (wt <= 0) {
+        OrcLogInfoThrottled(22, 1200u, "held wr: wtRes<=0 pedRef=%d mid=%d", pedRefEarly, ped ? ped->m_nWeaponModelId : -1);
+        return;
+    }
+
+    WeaponReplacementAsset* asset = OrcResolveUsableWeaponReplacementAssetForPed(ped, wt, true);
+    if (!asset) {
+        WeaponReplacementAsset* resolvedOnly = OrcResolveWeaponReplacementAssetForPed(ped, wt, true);
+        const std::string wLower = OrcGetWeaponModelBaseNameLower(wt);
+        const std::string skinRaw = GetPedStdSkinDffName(ped);
+        char nick[64] = {};
+        bool isLocal = false;
+        const bool gotNick = samp_bridge::IsSampBuildKnown() &&
+            samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocal);
+        if (resolvedOnly) {
+            OrcLogInfoThrottled(24, 2500u,
+                "held wr: mapping present but unusable (load?) pedRef=%d wt=%d key=%s weapon=%s skin=\"%s\"",
+                pedRefEarly, wt, resolvedOnly->key.c_str(), wLower.c_str(), skinRaw.c_str());
+        } else {
+            OrcLogInfoThrottled(23, 2500u,
+                "held wr: no mapping pedRef=%d wt=%d weapon=%s skin=\"%s\" sampKnown=%d nick=%d nick=\"%.48s\" skinKeys=%zu nickKeys=%zu randomPools=%zu",
+                pedRefEarly, wt, wLower.c_str(), skinRaw.c_str(),
+                samp_bridge::IsSampBuildKnown() ? 1 : 0, gotNick ? 1 : 0, nick,
+                OrcWeaponAssetsDbgReplacementSkinKeys(), OrcWeaponAssetsDbgReplacementNickKeys(),
+                OrcWeaponAssetsDbgRandomReplacementPools());
+        }
+        return;
+    }
+
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0) {
+        OrcLogInfoThrottled(27, 4000u, "held wr: pedRef<=0 wt=%d key=%s", wt, asset->key.c_str());
+        return;
+    }
+    HeldWeaponReplacementState& state = g_heldWeaponReplacements[pedRef];
+    if (!state.rwObject || state.weaponType != wt || state.replacementKey != asset->key) {
+        OrcDestroyRwObjectInstance(state.rwObject);
+        state.rwObject = OrcCloneWeaponReplacementObject(*asset);
+        state.weaponType = wt;
+        state.replacementKey = asset->key;
+        if (!state.rwObject) {
+            OrcLogError("held wr: CloneWeaponReplacementObject failed pedRef=%d wt=%d key=%s",
+                pedRef, wt, asset->key.c_str());
+            return;
+        }
+        OrcLogInfo("held wr: clone ok pedRef=%d wt=%d key=%s skin=%s",
+            pedRef, wt, asset->key.c_str(), GetPedStdSkinDffName(ped).c_str());
+    }
+    if (!state.rwObject)
+        return;
+
+    // After CPed::Render ends we restore the stock mesh into the slot; next frame `m_pWeaponObject` is stock again.
+    // Same-frame AddWeaponModel hook may leave the clone in the slot вЂ” sync pose from stock either way.
+    if (hideBase) {
+        if (state.captureActive && state.hideBaseMode && state.weaponType == wt && state.replacementKey == asset->key &&
+            state.rwObject)
+            return;
+    } else if (state.rwObject && state.originalObject && state.weaponType == wt && state.replacementKey == asset->key) {
+        if (ped->m_pWeaponObject == state.originalObject) {
+            CopyRwObjectRootMatrix(state.originalObject, state.rwObject);
+            SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+            state.hideBaseMode = false;
+            state.captureActive = true;
+            ped->m_pWeaponObject = state.rwObject;
+            return;
+        }
+        if (ped->m_pWeaponObject == state.rwObject) {
+            CopyRwObjectRootMatrix(state.originalObject, state.rwObject);
+            SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+            return;
+        }
+    }
+
+    // INI may request swap-in-slot, but SA:MP often leaves m_pWeaponObject null during ped render while wt still resolves.
+    // Re-use hide-base draw path (clone in pedRenderEvent.after) until a stock clump exists.
+    if (!hideBase && state.hideBaseMode && !state.originalObject && state.rwObject && state.weaponType == wt &&
+        state.replacementKey == asset->key) {
+        if (!ped->m_pWeaponObject) {
+            state.captureActive = true;
+            return;
+        }
+        state.hideBaseMode = false;
+    }
+
+    if (hideBase) {
+        state.originalObject = ped->m_pWeaponObject;
+        state.hideBaseMode = true;
+        state.captureActive = true;
+        ped->m_pWeaponObject = nullptr;
+        OrcLogInfoThrottled(28, 3000u,
+            "held wr: hide-base clear slot pedRef=%d wt=%d stockWasNonNull=%d",
+            pedRefEarly, wt, state.originalObject ? 1 : 0);
+        return;
+    }
+
+    if (!ped->m_pWeaponObject) {
+        const int wtStrict = GetPedCurrentWeaponType(ped);
+        const int wtRel = GetPedSelectedWeaponTypeForReplace(ped);
+        const int mid = ped->m_nWeaponModelId;
+        const int wtMid = WeaponTypeFromModelId(mid);
+        const int wtRes = ResolveWeaponTypeForHeldReplacement(ped);
+        OrcLogInfoThrottled(21, 1200u,
+            "held wr: m_pWeaponObject=null pedRef=%d hideBase=%d wt=%d wtRel=%d mid=%d wtMid=%d wtRes=%d",
+            pedRefEarly, g_weaponReplacementHideBaseHeld ? 1 : 0, wtStrict, wtRel, mid, wtMid, wtRes);
+        // After-draw on bone (same as hide-base render); no stock clump to copy pose from.
+        state.originalObject = nullptr;
+        state.hideBaseMode = true;
+        state.captureActive = true;
+        OrcLogInfoThrottled(30, 5000u,
+            "held wr: empty held slot -> after-draw pedRef=%d wt=%d key=%s",
+            pedRefEarly, wt, asset->key.c_str());
+        return;
+    }
+
+    // Do not assign stock weapon renderCallBack onto the clone: CVisibilityPlugins::RenderWeaponCB
+    // expects weapon visibility-plugin data on each RpAtomic; replacement clones don't have it в†’ AV (+0x18).
+    // InitAttachmentAtomicCB clears callbacks so RpClumpRender uses the default atomic path.
+    CopyRwObjectRootMatrix(ped->m_pWeaponObject, state.rwObject);
+    SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+    state.originalObject = ped->m_pWeaponObject;
+    state.hideBaseMode = false;
+    state.captureActive = true;
+    ped->m_pWeaponObject = state.rwObject;
+}
+
+void OrcRestoreHeldWeaponReplacementAfter(CPed* ped) {
+    if (!ped)
+        return;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return;
+    auto it = g_heldWeaponReplacements.find(pedRef);
+    if (it == g_heldWeaponReplacements.end() || !it->second.captureActive)
+        return;
+
+    HeldWeaponReplacementState& state = it->second;
+    if (state.hideBaseMode && state.rwObject)
+        RenderHeldReplacementHideBaseForPed(ped, state);
+
+    RwObject* stock = state.originalObject;
+    state.originalObject = nullptr;
+    state.captureActive = false;
+    state.hideBaseMode = false;
+
+    if (pedRef > 0 && stock)
+        g_deferredHeldWeaponStockRestore[pedRef] = stock;
+}
+
+static bool ModelIdMatchesWeaponType(int modelId, int wt) {
+    if (!modelId || wt <= 0)
+        return false;
+    for (int skill = 1; skill <= 2; ++skill) {
+        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), skill);
+        if (!wi)
+            continue;
+        if (wi->m_nModelId == modelId || wi->m_nModelId2 == modelId)
+            return true;
+    }
+    return false;
+}
+
+// Runs immediately after the engine attached `m_pWeaponObject` (stock) so replacement wins over late rebuilds of the slot.
+static void OrcApplyHeldWeaponReplacementAfterAddWeaponModel(CPed* ped, int modelIndex) {
+    if (!ped || modelIndex <= 0)
+        return;
+    if (!ShouldReplaceHeldWeaponForPed(ped))
+        return;
+
+    int wt = WeaponTypeFromModelId(modelIndex);
+    if (wt <= 0)
+        wt = ResolveWeaponTypeForHeldReplacement(ped);
+    if (wt <= 0)
+        return;
+
+    WeaponReplacementAsset* asset = OrcResolveUsableWeaponReplacementAssetForPed(ped, wt, true);
+    if (!asset)
+        return;
+
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return;
+
+    HeldWeaponReplacementState& state = g_heldWeaponReplacements[pedRef];
+    if (!state.rwObject || state.weaponType != wt || state.replacementKey != asset->key) {
+        OrcDestroyRwObjectInstance(state.rwObject);
+        state.rwObject = nullptr;
+        state.originalObject = nullptr;
+        state.captureActive = false;
+        state.hideBaseMode = false;
+        state.rwObject = OrcCloneWeaponReplacementObject(*asset);
+        state.weaponType = wt;
+        state.replacementKey = asset->key;
+        if (!state.rwObject)
+            return;
+    }
+
+    const bool hideBase = g_weaponReplacementHideBaseHeld;
+
+    if (hideBase) {
+        state.originalObject = ped->m_pWeaponObject;
+        state.hideBaseMode = true;
+        state.captureActive = true;
+        ped->m_pWeaponObject = nullptr;
+        return;
+    }
+
+    if (!ped->m_pWeaponObject) {
+        state.originalObject = nullptr;
+        state.hideBaseMode = true;
+        state.captureActive = true;
+        return;
+    }
+
+    CopyRwObjectRootMatrix(ped->m_pWeaponObject, state.rwObject);
+    SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+    state.originalObject = ped->m_pWeaponObject;
+    state.hideBaseMode = false;
+    state.captureActive = true;
+    ped->m_pWeaponObject = state.rwObject;
+}
+
+// `__thiscall` cannot be used on static free functions in MSVC; `__fastcall` matches the register ABI
+// (this in ECX) and matches the pattern used in `samp_bridge.cpp` for thiscall detours.
+static void __fastcall AddWeaponModel_Hook(CPed* ped, void* /*edx*/, int modelIndex) {
+    if (g_AddWeaponModel_Orig)
+        g_AddWeaponModel_Orig(ped, modelIndex);
+    __try {
+        OrcApplyHeldWeaponReplacementAfterAddWeaponModel(ped, modelIndex);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("AddWeaponModel hook: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+static void __fastcall RemoveWeaponModel_Hook(CPed* ped, void* /*edx*/, int modelIndex) {
+    if (!ped) {
+        if (g_RemoveWeaponModel_Orig)
+            g_RemoveWeaponModel_Orig(ped, modelIndex);
+        return;
+    }
+    const int pedRef = CPools::GetPedRef(ped);
+    auto it = (pedRef > 0) ? g_heldWeaponReplacements.find(pedRef) : g_heldWeaponReplacements.end();
+    if (it != g_heldWeaponReplacements.end()) {
+        HeldWeaponReplacementState& st = it->second;
+        if (st.captureActive && st.weaponType > 0 && ModelIdMatchesWeaponType(modelIndex, st.weaponType)) {
+            if (!st.hideBaseMode && st.rwObject && ped->m_pWeaponObject == st.rwObject) {
+                RwObject* stock = st.originalObject;
+                if (!stock && pedRef > 0) {
+                    auto d = g_deferredHeldWeaponStockRestore.find(pedRef);
+                    if (d != g_deferredHeldWeaponStockRestore.end())
+                        stock = d->second;
+                }
+                if (stock)
+                    ped->m_pWeaponObject = stock;
+            }
+        }
+    }
+
+    if (g_RemoveWeaponModel_Orig)
+        g_RemoveWeaponModel_Orig(ped, modelIndex);
+
+    it = (pedRef > 0) ? g_heldWeaponReplacements.find(pedRef) : g_heldWeaponReplacements.end();
+    if (it == g_heldWeaponReplacements.end())
+        return;
+    HeldWeaponReplacementState& st = it->second;
+    if (!st.captureActive || !ModelIdMatchesWeaponType(modelIndex, st.weaponType))
+        return;
+
+    if (pedRef > 0)
+        g_deferredHeldWeaponStockRestore.erase(pedRef);
+    st.originalObject = nullptr;
+    OrcDestroyRwObjectInstance(st.rwObject);
+    st.rwObject = nullptr;
+    st.captureActive = false;
+    st.hideBaseMode = false;
+    st.weaponType = 0;
+    st.replacementKey.clear();
+}
+
+void OrcWeaponEnsurePedModelHooksInstalled() {
+    if (g_pedWeaponModelHooksInstalled)
+        return;
+    g_pedWeaponModelHooksInstalled = true;
+
+    MH_STATUS st = MH_Initialize();
+    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
+        OrcLogError("PedWeaponModel hooks: MH_Initialize -> %s", MH_StatusToString(st));
+        return;
+    }
+    if (MH_CreateHook(reinterpret_cast<void*>(0x5E5ED0),
+            reinterpret_cast<void*>(&AddWeaponModel_Hook),
+            reinterpret_cast<void**>(&g_AddWeaponModel_Orig)) != MH_OK) {
+        OrcLogError("AddWeaponModel hook: MH_CreateHook failed");
+        return;
+    }
+    if (MH_CreateHook(reinterpret_cast<void*>(0x5E3990),
+            reinterpret_cast<void*>(&RemoveWeaponModel_Hook),
+            reinterpret_cast<void**>(&g_RemoveWeaponModel_Orig)) != MH_OK) {
+        OrcLogError("RemoveWeaponModel hook: MH_CreateHook failed");
+        return;
+    }
+    st = MH_EnableHook(reinterpret_cast<void*>(0x5E5ED0));
+    if (st != MH_OK)
+        OrcLogError("AddWeaponModel hook: MH_EnableHook -> %s", MH_StatusToString(st));
+    else
+        OrcLogInfo("AddWeaponModel hook installed (0x5E5ED0)");
+    st = MH_EnableHook(reinterpret_cast<void*>(0x5E3990));
+    if (st != MH_OK)
+        OrcLogError("RemoveWeaponModel hook: MH_EnableHook -> %s", MH_StatusToString(st));
+    else
+        OrcLogInfo("RemoveWeaponModel hook installed (0x5E3990)");
+}
+
+void OrcClearAllWeaponReplacementInstances() {
+    OrcWeaponClearLocalRendered();
+    OrcWeaponClearOtherPedsRendered();
+    OrcDestroyAllHeldWeaponReplacementInstances();
+}
+
+void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* suppress) {
+    if (!ped) return;
+    unsigned char curSlot = ped->m_nSelectedWepSlot;
+    int curType = 0;
+    if (curSlot < 13) curType = (int)ped->m_aWeapons[curSlot].m_eWeaponType;
+    if (g_cfg.empty()) return;
+    const int maxWt = (int)g_cfg.size();
+    std::vector<char> want(maxWt, 0);
+    std::vector<char> want2(maxWt, 0);
+    for (int s = 0; s < 13; s++) {
+        auto& w = ped->m_aWeapons[s];
+        int wt = (int)w.m_eWeaponType;
+        if (wt <= 0 || wt >= maxWt) continue;
+        if (suppress && wt < (int)suppress->size() && (*suppress)[wt]) continue;
+        if (wt == curType) continue;
+        const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
+        if (!wc.enabled || wc.boneId == 0) continue;
+        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+        bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+        if (needsAmmo && w.m_nAmmoTotal == 0) continue;
+        want[wt] = true;
+
+        CWeaponInfo* twinInfo = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 2);
+        if (!twinInfo) twinInfo = wi;
+        if (g_considerWeaponSkills && twinInfo && twinInfo->m_nFlags.bTwinPistol) {
+            const char skill = ped->GetWeaponSkill(static_cast<eWeaponType>(wt));
+            if (skill == WEAPSKILL_PRO) {
+                const WeaponCfg& wc2 = GetWeaponCfg2ForPed(ped, wt);
+                if (wc2.enabled && wc2.boneId != 0) want2[wt] = true;
+            }
+        }
+    }
+    for (int i = 0; i < OrcWeaponSlotMax; i++) {
+        if (!arr[i].active) continue;
+        int wt = arr[i].weaponType;
+        bool keep = (wt >= 0 && wt < maxWt) && (arr[i].secondary ? want2[wt] : want[wt]);
+        if (keep) {
+            const std::string desiredReplacementKey =
+                (g_weaponReplacementEnabled && g_weaponReplacementOnBody)
+                ? OrcResolveUsableWeaponReplacementKeyForPed(ped, wt, true)
+                : std::string{};
+            if (desiredReplacementKey != arr[i].replacementKey)
+                keep = false;
+        }
+        if (!keep) OrcDestroyRenderedWeapon(arr[i]);
+    }
+    for (int wt = 1; wt < maxWt; wt++) if (want[wt])  CreateWeaponInstance(arr, wt, false, 0, ped);
+    for (int wt = 1; wt < maxWt; wt++) if (want2[wt]) CreateWeaponInstance(arr, wt, true,  0, ped);
+}
+
+int OrcRenderPedWeapons(CPed* ped, RenderedWeapon* arr) {
+    int active = 0;
+    for (int i = 0; i < OrcWeaponSlotMax; i++) {
+        if (!arr[i].active) continue;
+        active++;
+        RenderOneWeapon(ped, arr[i]);
+    }
+    return active;
+}
+
+

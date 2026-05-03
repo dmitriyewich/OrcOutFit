@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
 
 OrcLogLevel g_orcLogLevel = OrcLogLevel::Off;
 
@@ -73,6 +74,26 @@ void OrcLogError(const char* fmt, ...) {
 
 void OrcLogInfo(const char* fmt, ...) {
     if (g_orcLogLevel < OrcLogLevel::Info || !fmt) return;
+    va_list ap;
+    va_start(ap, fmt);
+    OrcWriteLine('I', fmt, ap);
+    va_end(ap);
+}
+
+void OrcLogInfoThrottled(int slot, unsigned intervalMs, const char* fmt, ...) {
+    if (g_orcLogLevel < OrcLogLevel::Info || !fmt) return;
+    enum { kMaxSlots = 32 };
+    if (slot < 0 || slot >= kMaxSlots)
+        slot = 0;
+    static DWORD s_lastTick[kMaxSlots] = {};
+    static unsigned char s_seen[kMaxSlots] = {};
+    const DWORD now = GetTickCount();
+    const DWORD elapsed =
+        (s_seen[slot] && now >= s_lastTick[slot]) ? (now - s_lastTick[slot]) : intervalMs;
+    if (s_seen[slot] && elapsed < intervalMs)
+        return;
+    s_seen[slot] = 1;
+    s_lastTick[slot] = now;
     va_list ap;
     va_start(ap, fmt);
     OrcWriteLine('I', fmt, ap);

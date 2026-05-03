@@ -2,6 +2,7 @@
 
 #include "orc_types.h"
 #include "orc_log.h"
+#include "orc_ini.h"
 
 #include <array>
 #include <string>
@@ -10,6 +11,7 @@
 #include <windows.h>
 
 class CPed;
+class CPlayerPed;
 
 extern char g_iniPath[MAX_PATH];
 extern char g_gameObjDir[MAX_PATH];
@@ -36,6 +38,7 @@ extern bool g_renderStandardObjects;
 extern bool g_weaponReplacementEnabled;
 extern bool g_weaponReplacementOnBody;
 extern bool g_weaponReplacementInHands;
+extern bool g_weaponReplacementHideBaseHeld;
 extern bool g_weaponTexturesEnabled;
 extern bool g_weaponTextureNickMode;
 extern bool g_weaponTextureRandomMode;
@@ -82,9 +85,25 @@ extern std::string g_skinSelectedName;
 extern int g_skinSelectedSource;
 extern int g_standardSkinSelectedModelId;
 
+// LoadPedObject cache (model id -> ped.dat DFF name); shared with orc_skins.
+extern std::vector<std::string> g_pedModelNameById;
+
+bool OrcIsValidStandardSkinModel(int modelId);
+void OrcAppendSkinFeatureIniValues(std::vector<OrcIniValue>& values);
+void OrcAppendSkinModeIniValues(std::vector<OrcIniValue>& values);
+void OrcSkinsRegisterPreviewHook();
+void OrcSkinsRenderForPeds(CPlayerPed* localPlayer);
+void OrcSkinsDestroyPreview();
+void OrcSkinsReleaseAllInstancesAndPreview();
+bool OrcSkinsLocalSelectionAddsActiveWork();
+void OrcSkinsOnPedRenderBefore(CPed* ped);
+void OrcSkinsOnPedRenderAfter(CPed* ped);
+void OrcSkinsShutdown();
+
 // Shared with orc_ui.cpp (skin list selection)
 extern int g_uiSkinIdx;
 extern int g_uiSkinEditIdx;
+extern int g_uiCustomIdx;
 
 void LoadConfig();
 void RefreshActivationRouting();
@@ -137,6 +156,7 @@ bool OrcRandomizeLocalPedTextureRemaps();
 bool OrcSetAllLocalPedTextureRemaps(int remap);
 void OrcReloadTextureRemapNickBindings();
 void OrcCollectLocalPedTextureRemapNickBindings(std::vector<TextureRemapNickBindingInfo>& out);
+void OrcFlushDeferredHeldWeaponSlotRestore();
 bool OrcSaveLocalPedTextureRemapNickBinding(const char* nickCsv);
 bool OrcDeleteLocalPedTextureRemapNickBinding(int bindingId);
 
@@ -144,8 +164,23 @@ bool LoadObjectSkinParamsFromIni(const char* iniPath, const char* skinDffName, C
 void SaveObjectSkinParamsToIni(const char* iniPath, const char* skinDffName, const CustomObjectSkinParams& p);
 bool LoadStandardObjectSkinParamsFromIni(int modelId, int slot, const char* skinDffName, CustomObjectSkinParams& out);
 void SaveStandardObjectSkinParamsToIni(int modelId, int slot, const char* skinDffName, const CustomObjectSkinParams& p);
+
+bool OrcIsValidStandardPedModelForLocalApply(int modelId);
+void OrcObjectsBeginFrame();
+void OrcObjectsReleaseAllInstances();
+void OrcObjectsDestroyAllStandardInstances();
+void OrcObjectsApplyWeaponSuppression(CPed* ped, std::vector<char>* suppress);
+void OrcObjectsPrepassLocalPlayer(CPlayerPed* player, int& active, std::vector<char>& objectUsed);
+void OrcObjectsRenderLocalPlayer(CPlayerPed* player, std::vector<char>& objectUsed);
+void OrcObjectsRenderForRemotePed(CPed* ped, std::vector<char>& objectUsed);
+void OrcObjectsFinalizeFrame(std::vector<char>& objectUsed);
+void OrcObjectsWhenSkippingRenderNoActive();
+void OrcObjectsShutdown();
 StandardSkinCfg* OrcGetStandardSkinCfgByModelId(int modelId, bool createIfMissing);
 
 std::vector<std::string> ParseNickCsv(const std::string& csv);
+
+const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt);
+const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt);
 const char* VkToString(int vk);
 int ParseActivationVk(const char* text);

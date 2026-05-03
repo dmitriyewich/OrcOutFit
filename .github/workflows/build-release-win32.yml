@@ -1,5 +1,7 @@
 name: Build OrcOutFit Win32
-run-name: ${{ github.event.release.name || github.event.release.tag_name || (github.ref_type == 'tag' && github.ref_name) || github.event.head_commit.message || github.sha }}
+# Для release — заголовок/тег релиза. Для workflow_dispatch/push — ветка и номер run (иначе GitHub
+# часто показывал только SHA: у workflow_dispatch нет head_commit.message, release.* пустые.)
+run-name: ${{ github.event.release.name || github.event.release.tag_name || format('{0} (#{1})', github.ref_name, github.run_number) }}
 
 on:
   workflow_dispatch:

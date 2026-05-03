@@ -1192,6 +1192,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) 
 }
 
 HRESULT __stdcall EndSceneDetour(IDirect3DDevice9* device) {
+    OrcFlushDeferredHeldWeaponSlotRestore();
     if (!g_shutdownRequested.load() && !g_originalPresent && IsPrimaryRenderTarget(device))
         SafeRenderImGuiFrame(device);
     return g_originalEndScene ? g_originalEndScene(device) : D3D_OK;
@@ -1203,6 +1204,8 @@ HRESULT __stdcall PresentDetour(
     const RECT* destRect,
     HWND overrideWindow,
     const RGNDATA* dirtyRegion) {
+    // If EndScene is not used on this path, still apply deferred held-weapon slot restore once per present.
+    OrcFlushDeferredHeldWeaponSlotRestore();
     if (!g_shutdownRequested.load() && IsPrimaryRenderTarget(device))
         SafeRenderImGuiFrame(device);
     return g_originalPresent ? g_originalPresent(device, sourceRect, destRect, overrideWindow, dirtyRegion) : D3D_OK;
