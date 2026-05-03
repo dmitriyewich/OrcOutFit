@@ -16,11 +16,14 @@
 #include "CVisibilityPlugins.h"
 #include "CPointLights.h"
 #include "CTxdStore.h"
+#include "CScene.h"
+#include "CEntity.h"
 #include "RenderWare.h"
 #include "ePedType.h"
 #include "eWeaponType.h"
 #include "game_sa/rw/rphanim.h"
 #include "game_sa/rw/rpskin.h"
+#include "extensions/ScriptCommands.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -49,12 +52,17 @@
 
 using namespace plugin;
 
+static CdeclEvent<AddressList<0x53EA12, H_CALL>, PRIORITY_BEFORE, ArgPickNone, void()> g_standardSkinPreviewRenderEvent;
+
 static HMODULE g_module = nullptr;
 char    g_iniPath[MAX_PATH] = {};
 char    g_gameObjDir[MAX_PATH] = {};
 char    g_gameWeaponsDir[MAX_PATH] = {};
 char    g_gameSkinDir[MAX_PATH] = {};
 char    g_gameTextureDir[MAX_PATH] = {};
+char    g_gameWeaponGunsDir[MAX_PATH] = {};
+char    g_gameWeaponGunsNickDir[MAX_PATH] = {};
+char    g_gameWeaponTexturesDir[MAX_PATH] = {};
 
 static void LogInit() {
     char modPath[MAX_PATH] = {};
@@ -72,6 +80,9 @@ static void LogInit() {
     // Relative to plugin location (modloader-friendly):
     _snprintf_s(g_gameObjDir, _TRUNCATE, "%s\\OrcOutFit\\Objects", moduleDir);
     _snprintf_s(g_gameWeaponsDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons", moduleDir);
+    _snprintf_s(g_gameWeaponGunsDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons\\Guns", moduleDir);
+    _snprintf_s(g_gameWeaponGunsNickDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons\\GunsNick", moduleDir);
+    _snprintf_s(g_gameWeaponTexturesDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons\\Textures", moduleDir);
     _snprintf_s(g_gameSkinDir, _TRUNCATE, "%s\\OrcOutFit\\Skins", moduleDir);
     _snprintf_s(g_gameTextureDir, _TRUNCATE, "%s\\OrcOutFit\\Skins\\Textures", moduleDir);
 
@@ -90,12 +101,18 @@ float g_renderAllPedsRadius = 80.0f;
 int  g_activationVk = VK_F7;
 bool g_sampAllowActivationKey = false;
 std::string g_toggleCommand = "/orcoutfit";
-bool g_uiAutoScale = true;
+bool g_uiAutoScale = false;
 float g_uiScale = 1.0f;
 float g_uiFontSize = 15.0f;
 bool g_considerWeaponSkills = true;
 bool g_renderCustomObjects = true;
 bool g_renderStandardObjects = true;
+bool g_weaponReplacementEnabled = true;
+bool g_weaponReplacementOnBody = true;
+bool g_weaponReplacementInHands = true;
+bool g_weaponTexturesEnabled = true;
+bool g_weaponTextureNickMode = true;
+bool g_weaponTextureRandomMode = true;
 std::vector<WeaponCfg> g_cfg;
 std::vector<WeaponCfg> g_cfg2; // secondary dual-wield placement
 bool g_livePreviewWeaponsActive = false;
@@ -439,6 +456,10 @@ static void DestroyStandardObjectInstancesForSlot(int modelId, int slot);
 static CustomSkinCfg* GetSelectedSkin();
 static void DestroyStandardSkinInstance(StandardSkinCfg& s);
 static bool IsValidStandardSkinModel(int modelId);
+static void ClearAllWeaponReplacementInstances();
+static void DestroyAllHeldWeaponReplacementInstances();
+static void DestroyStandardSkinPreview();
+static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed);
 
 // Секция INI → индекс оружия. Дефолтные расположения в стиле тактической выкладки.
 // Оси кости (наблюдение): X = вдоль "right", Y = вдоль "up" (spine) / "at" (бедро), Z = "at/up".
@@ -688,7 +709,7 @@ void LoadConfig() {
         g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
     }
     g_sampAllowActivationKey = GetPrivateProfileIntA("Main", "SampAllowActivationKey", 0, g_iniPath) != 0;
-    g_uiAutoScale = GetPrivateProfileIntA("Main", "UiAutoScale", 1, g_iniPath) != 0;
+    g_uiAutoScale = GetPrivateProfileIntA("Main", "UiAutoScale", 0, g_iniPath) != 0;
     g_uiScale = ClampConfigFloat(ReadIniFloat("Main", "UiScale", 1.0f, g_iniPath), 0.75f, 1.60f, 1.0f);
     g_uiFontSize = ClampConfigFloat(ReadIniFloat("Main", "UiFontSize", 15.0f, g_iniPath), 13.0f, 22.0f, 15.0f);
     char languageBuf[16] = {};
@@ -702,6 +723,12 @@ void LoadConfig() {
     g_toggleCommand = cmdBuf;
     NormalizeCommand();
     if (g_renderAllPedsRadius < 5.0f) g_renderAllPedsRadius = 5.0f;
+    g_weaponReplacementEnabled = GetPrivateProfileIntA("Features", "WeaponReplacement", 1, g_iniPath) != 0;
+    g_weaponReplacementOnBody = GetPrivateProfileIntA("Features", "WeaponReplacementOnBody", 1, g_iniPath) != 0;
+    g_weaponReplacementInHands = GetPrivateProfileIntA("Features", "WeaponReplacementInHands", 1, g_iniPath) != 0;
+    g_weaponTexturesEnabled = GetPrivateProfileIntA("Features", "WeaponTextures", 1, g_iniPath) != 0;
+    g_weaponTextureNickMode = GetPrivateProfileIntA("Features", "WeaponTextureNickMode", 1, g_iniPath) != 0;
+    g_weaponTextureRandomMode = GetPrivateProfileIntA("Features", "WeaponTextureRandomMode", 1, g_iniPath) != 0;
     for (int wt : g_availableWeaponTypes) {
         if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
         auto& c = g_cfg[wt];
@@ -811,6 +838,12 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "ConsiderWeaponSkills", g_considerWeaponSkills ? 1 : 0);
     AddIniInt(values, "Features", "CustomObjects", g_renderCustomObjects ? 1 : 0);
     AddIniInt(values, "Features", "StandardObjects", g_renderStandardObjects ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponReplacement", g_weaponReplacementEnabled ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponReplacementOnBody", g_weaponReplacementOnBody ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponReplacementInHands", g_weaponReplacementInHands ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponTextures", g_weaponTexturesEnabled ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponTextureNickMode", g_weaponTextureNickMode ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponTextureRandomMode", g_weaponTextureRandomMode ? 1 : 0);
     AppendSkinFeatureIniValues(values);
     AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
     AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
@@ -842,7 +875,7 @@ static void SaveDefaultConfig() {
           "ActivationKey=F7\n"
           "SampAllowActivationKey=0\n"
           "Command=/orcoutfit\n"
-          "UiAutoScale=1\n"
+          "UiAutoScale=0\n"
           "UiScale=1.00\n"
           "UiFontSize=15\n\n"
           "[Features]\n"
@@ -852,6 +885,12 @@ static void SaveDefaultConfig() {
           "ConsiderWeaponSkills=1\n"
           "CustomObjects=1\n"
           "StandardObjects=1\n"
+          "WeaponReplacement=1\n"
+          "WeaponReplacementOnBody=1\n"
+          "WeaponReplacementInHands=1\n"
+          "WeaponTextures=1\n"
+          "WeaponTextureNickMode=1\n"
+          "WeaponTextureRandomMode=1\n"
           "SkinMode=0\n"
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
@@ -930,10 +969,15 @@ struct SkinRandomPool {
     int modelId = -1;
     std::string folderName;
     std::vector<CustomSkinCfg> variants;
+    std::vector<int> shuffleBag;
 };
 
 static std::vector<SkinRandomPool> g_skinRandomPools;
-static std::unordered_map<CPed*, int> g_pedRandomSkinIdx;
+struct PedRandomSkinState {
+    int modelId = -1;
+    int variant = -1;
+};
+static std::unordered_map<CPed*, PedRandomSkinState> g_pedRandomSkinIdx;
 
 static void DestroyAllRandomPoolSkins();
 
@@ -962,6 +1006,34 @@ static SkinRandomPool* FindRandomPoolForModelId(int modelId) {
     return nullptr;
 }
 
+static int FindPedModelIdByDffName(const std::string& dffName) {
+    if (dffName.empty()) return -1;
+    const std::string want = ToLowerAscii(dffName);
+    for (int id = 0; id < (int)g_pedModelNameById.size(); ++id) {
+        if (g_pedModelNameById[id].empty()) continue;
+        if (ToLowerAscii(g_pedModelNameById[id]) == want)
+            return id;
+    }
+    return -1;
+}
+
+static int PopRandomPoolVariant(SkinRandomPool& pool) {
+    const int n = (int)pool.variants.size();
+    if (n <= 0) return -1;
+    if (pool.shuffleBag.empty()) {
+        pool.shuffleBag.reserve((size_t)n);
+        for (int i = 0; i < n; ++i)
+            pool.shuffleBag.push_back(i);
+        for (int i = n - 1; i > 0; --i) {
+            const int j = rand() % (i + 1);
+            std::swap(pool.shuffleBag[(size_t)i], pool.shuffleBag[(size_t)j]);
+        }
+    }
+    const int pick = pool.shuffleBag.back();
+    pool.shuffleBag.pop_back();
+    return pick;
+}
+
 static CustomSkinCfg* ResolveRandomSkinForPed(CPed* ped) {
     if (!g_skinRandomFromPools || !ped)
         return nullptr;
@@ -972,12 +1044,14 @@ static CustomSkinCfg* ResolveRandomSkinForPed(CPed* ped) {
     if (n <= 0)
         return nullptr;
     auto it = g_pedRandomSkinIdx.find(ped);
-    if (it == g_pedRandomSkinIdx.end()) {
-        const int pick = rand() % n;
-        g_pedRandomSkinIdx[ped] = pick;
+    if (it == g_pedRandomSkinIdx.end() || it->second.modelId != (int)ped->m_nModelIndex ||
+        it->second.variant < 0 || it->second.variant >= n) {
+        const int pick = PopRandomPoolVariant(*pool);
+        if (pick < 0) return nullptr;
+        g_pedRandomSkinIdx[ped] = PedRandomSkinState{ (int)ped->m_nModelIndex, pick };
         it = g_pedRandomSkinIdx.find(ped);
     }
-    return &pool->variants[it->second];
+    return &pool->variants[(size_t)it->second.variant];
 }
 
 static std::string JoinPath(const std::string& a, const std::string& b) {
@@ -1308,16 +1382,39 @@ static std::string StandardObjectSkinIniSection(int modelId, int slot, const cha
     return std::string("Object.") + StandardObjectSlotKey(modelId, slot) + ".Skin." + (skinDffName ? skinDffName : "");
 }
 
-bool IsValidStandardObjectModel(int modelId) {
-    if (modelId < 0) return false;
+static CBaseModelInfo* GetExistingStandardModelInfo(int modelId) {
+    if (modelId < 0 || modelId >= CModelInfo::ms_modelInfoCount) return nullptr;
+    if (!CModelInfo::ms_modelInfoPtrs) return nullptr;
     CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
-    if (!mi) return false;
+    if (!mi) return nullptr;
+    if (mi->m_pRwObject) return mi;
+    if (!CStreaming::ms_aInfoForModel) return nullptr;
+    __try {
+        const CStreamingInfo& info = CStreaming::ms_aInfoForModel[modelId];
+        if (info.m_nCdSize > 0 || info.m_nLoadState == LOADSTATE_LOADED)
+            return mi;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("GetExistingStandardModelInfo: streaming info SEH ex=0x%08X model=%d", GetExceptionCode(), modelId);
+    }
+    return nullptr;
+}
+
+static CBaseModelInfo* GetExistingStandardObjectModelInfo(int modelId) {
+    CBaseModelInfo* mi = GetExistingStandardModelInfo(modelId);
+    if (!mi) return nullptr;
     const eModelInfoType type = mi->GetModelType();
-    return type == MODEL_INFO_ATOMIC ||
-           type == MODEL_INFO_TIME ||
-           type == MODEL_INFO_WEAPON ||
-           type == MODEL_INFO_CLUMP ||
-           type == MODEL_INFO_LOD;
+    if (type == MODEL_INFO_ATOMIC ||
+        type == MODEL_INFO_TIME ||
+        type == MODEL_INFO_WEAPON ||
+        type == MODEL_INFO_CLUMP ||
+        type == MODEL_INFO_LOD) {
+        return mi;
+    }
+    return nullptr;
+}
+
+bool IsValidStandardObjectModel(int modelId) {
+    return GetExistingStandardObjectModelInfo(modelId) != nullptr;
 }
 
 void SaveStandardObjectListToIni() {
@@ -1390,6 +1487,7 @@ static bool StandardObjectSkinIniSectionExists(int modelId, int slot, const char
 
 bool LoadStandardObjectSkinParamsFromIni(int modelId, int slot, const char* skinDffName, CustomObjectSkinParams& out) {
     if (modelId < 0 || slot <= 0 || !skinDffName || !skinDffName[0]) return false;
+    if (!IsValidStandardObjectModel(modelId)) return false;
     const std::string path = StandardObjectsIniPath();
     if (!StandardObjectSkinIniSectionExists(modelId, slot, skinDffName)) return false;
     const std::string sec = StandardObjectSkinIniSection(modelId, slot, skinDffName);
@@ -1441,6 +1539,7 @@ void InvalidateStandardObjectSkinParamCache() {
 
 static bool ResolveStandardObjectSkinParamsCached(int modelId, int slot, const std::string& skinDff, CustomObjectSkinParams& out) {
     if (modelId < 0 || slot <= 0 || skinDff.empty()) return false;
+    if (!IsValidStandardObjectModel(modelId)) return false;
     if (g_livePreviewStandardObjectActive &&
         g_livePreviewStandardObjectModelId == modelId &&
         g_livePreviewStandardObjectSlot == slot &&
@@ -1471,6 +1570,7 @@ static bool ResolveStandardObjectSkinParamsCached(int modelId, int slot, const s
 
 void SaveStandardObjectSkinParamsToIni(int modelId, int slot, const char* skinDffName, const CustomObjectSkinParams& p) {
     if (modelId < 0 || slot <= 0 || !skinDffName || !skinDffName[0]) return;
+    if (!IsValidStandardObjectModel(modelId)) return;
     const std::string path = StandardObjectsIniPath();
     const std::string sec = StandardObjectSkinIniSection(modelId, slot, skinDffName);
     std::vector<OrcIniValue> values;
@@ -1666,6 +1766,14 @@ static bool EnsureCustomSkinLoaded(CustomSkinCfg& s) {
 }
 
 static bool EnsureStandardSkinLoaded(StandardSkinCfg& s) {
+    if (s.rwObject && !IsValidStandardSkinModel(s.modelId)) {
+        DestroyStandardSkinInstance(s);
+        if (!s.loadFailedLogged) {
+            s.loadFailedLogged = true;
+            OrcLogError("standard skin \"%s\" [%d]: model no longer exists", s.dffName.c_str(), s.modelId);
+        }
+        return false;
+    }
     if (s.rwObject) return true;
     if (!IsValidStandardSkinModel(s.modelId)) {
         if (!s.loadFailedLogged) {
@@ -1757,15 +1865,19 @@ static std::string StandardSkinIniSection(const char* dffName) {
 }
 
 static bool IsValidStandardSkinModel(int modelId) {
-    if (modelId < 0) return false;
-    CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
+    CBaseModelInfo* mi = GetExistingStandardModelInfo(modelId);
     return mi && mi->GetModelType() == MODEL_INFO_PED;
 }
 
 StandardSkinCfg* OrcGetStandardSkinCfgByModelId(int modelId, bool createIfMissing) {
     for (auto& s : g_standardSkins) {
-        if (s.modelId == modelId)
+        if (s.modelId == modelId) {
+            if (!IsValidStandardSkinModel(modelId)) {
+                DestroyStandardSkinInstance(s);
+                return nullptr;
+            }
             return &s;
+        }
     }
     if (!createIfMissing || !IsValidStandardSkinModel(modelId))
         return nullptr;
@@ -1818,6 +1930,7 @@ static void EnsureStandardSkinNickLookup() {
     if (!g_standardSkinLookupDirty) return;
     g_standardSkinNickLookup.clear();
     for (const auto& s : g_standardSkins) {
+        if (!IsValidStandardSkinModel(s.modelId)) continue;
         if (!s.bindToNick || s.nicknames.empty()) continue;
         for (const auto& nick : s.nicknames) {
             if (!nick.empty())
@@ -1829,6 +1942,7 @@ static void EnsureStandardSkinNickLookup() {
 
 void SaveStandardSkinCfgToIni(const StandardSkinCfg& s) {
     if (s.modelId < 0 || s.dffName.empty()) return;
+    if (!IsValidStandardSkinModel(s.modelId)) return;
     const std::string path = StandardSkinsIniPath();
 
     char entriesBuf[4096] = {};
@@ -1863,6 +1977,66 @@ void SaveStandardSkinCfgToIni(const StandardSkinCfg& s) {
     if (!OrcIniWriteValues(path.c_str(), "; OrcOutFit standard game skin config.\n\n", values))
         OrcLogError("SaveStandardSkinCfgToIni: cannot write %s", path.c_str());
     InvalidateStandardSkinLookupCache();
+}
+
+static void DiscoverRandomSkinPools() {
+    DestroyAllRandomPoolSkins();
+    const std::string randomDir = JoinPath(std::string(g_gameSkinDir), "Random");
+    DWORD attr = GetFileAttributesA(randomDir.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+        return;
+
+    std::string mask = JoinPath(randomDir, "*");
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        const std::string folder = fd.cFileName;
+        if (folder == "." || folder == "..") continue;
+
+        const int modelId = FindPedModelIdByDffName(folder);
+        if (!IsValidStandardSkinModel(modelId)) continue;
+
+        const std::string poolDir = JoinPath(randomDir, folder);
+        std::string fileMask = JoinPath(poolDir, "*.*");
+        WIN32_FIND_DATAA fileData{};
+        HANDLE hf = FindFirstFileA(fileMask.c_str(), &fileData);
+        if (hf == INVALID_HANDLE_VALUE) continue;
+
+        SkinRandomPool pool;
+        pool.modelId = modelId;
+        pool.folderName = folder;
+
+        do {
+            if (fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const std::string fname = fileData.cFileName;
+            if (LowerExt(fname) != ".dff") continue;
+            const std::string base = BaseNameNoExt(fname);
+            CustomSkinCfg s;
+            s.name = folder + "/" + base;
+            s.dffPath = JoinPath(poolDir, fname);
+            s.txdPath = FindBestTxdPath(poolDir, base);
+            s.iniPath.clear();
+            s.remapKey = base;
+            s.remapFallbackKey = folder;
+            pool.variants.push_back(std::move(s));
+        } while (FindNextFileA(hf, &fileData));
+        FindClose(hf);
+
+        if (!pool.variants.empty())
+            g_skinRandomPools.push_back(std::move(pool));
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    g_skinRandomPoolModels = (int)g_skinRandomPools.size();
+    g_skinRandomPoolVariants = 0;
+    for (const auto& pool : g_skinRandomPools)
+        g_skinRandomPoolVariants += (int)pool.variants.size();
+    OrcLogInfo("DiscoverRandomSkinPools: %d pools, %d variants in %s",
+        g_skinRandomPoolModels, g_skinRandomPoolVariants, randomDir.c_str());
 }
 
 void DiscoverCustomObjectsAndEnsureIni() {
@@ -1935,12 +2109,14 @@ void DiscoverCustomSkins() {
         s.dffPath = JoinPath(dir, base + ".dff");
         s.txdPath = FindBestTxdPath(dir, base);
         s.iniPath = JoinPath(dir, base + ".ini");
+        s.remapKey = base;
         CreateDefaultSkinIniIfMissing(s.iniPath, base);
         LoadSkinCfgFromIni(s);
         g_customSkins.push_back(s);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     OrcLogInfo("DiscoverCustomSkins: %zu skins in %s", g_customSkins.size(), g_gameSkinDir);
+    DiscoverRandomSkinPools();
     if (!g_skinSelectedName.empty()) {
         for (int i = 0; i < (int)g_customSkins.size(); i++) {
             if (ToLowerAscii(g_customSkins[i].name) == ToLowerAscii(g_skinSelectedName)) {
@@ -1951,6 +2127,39 @@ void DiscoverCustomSkins() {
     }
     if (g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
     g_uiSkinEditIdx = -1;
+}
+
+void OrcCollectRandomSkinPools(std::vector<SkinRandomPoolInfo>& out) {
+    out.clear();
+    for (const auto& pool : g_skinRandomPools) {
+        SkinRandomPoolInfo info;
+        info.dffName = pool.folderName;
+        info.modelId = pool.modelId;
+        info.variants = (int)pool.variants.size();
+        out.push_back(std::move(info));
+    }
+    std::sort(out.begin(), out.end(), [](const SkinRandomPoolInfo& a, const SkinRandomPoolInfo& b) {
+        return a.modelId < b.modelId;
+    });
+}
+
+void OrcCollectRandomSkinPreviewVariants(std::vector<SkinPreviewRandomVariantInfo>& out) {
+    out.clear();
+    for (const auto& pool : g_skinRandomPools) {
+        for (int i = 0; i < (int)pool.variants.size(); ++i) {
+            const CustomSkinCfg& skin = pool.variants[(size_t)i];
+            SkinPreviewRandomVariantInfo info;
+            info.label = skin.name.empty() ? (pool.folderName + "/" + std::to_string(i + 1)) : skin.name;
+            info.poolDffName = pool.folderName;
+            info.modelId = pool.modelId;
+            info.variantIndex = i;
+            out.push_back(std::move(info));
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const SkinPreviewRandomVariantInfo& a, const SkinPreviewRandomVariantInfo& b) {
+        if (a.modelId != b.modelId) return a.modelId < b.modelId;
+        return a.label < b.label;
+    });
 }
 
 void SaveSkinModeIni() {
@@ -2051,8 +2260,7 @@ void OrcCollectPedSkins(std::vector<std::pair<std::string, int>>& out) {
     out.clear();
     for (int id = 0; id < (int)g_pedModelNameById.size(); id++) {
         if (g_pedModelNameById[id].empty()) continue;
-        CBaseModelInfo* mi = CModelInfo::GetModelInfo(id);
-        if (!mi || mi->GetModelType() != MODEL_INFO_PED) continue;
+        if (!IsValidStandardSkinModel(id)) continue;
         out.push_back({ g_pedModelNameById[id], id });
     }
     std::sort(out.begin(), out.end(), [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) {
@@ -2155,13 +2363,1326 @@ static const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt) {
     return it->second[wt];
 }
 
+struct WeaponReplacementAsset {
+    std::string key;
+    std::string weaponNameLower;
+    std::string matchNameLower;
+    std::string displayName;
+    std::string dffPath;
+    std::string txdPath;
+    int txdSlot = -1;
+    RwObject* rwObject = nullptr;
+    bool loadAttempted = false;
+    bool loadFailedLogged = false;
+};
+
+static std::vector<WeaponReplacementAsset> g_weaponReplacementAssets;
+static std::unordered_map<std::string, int> g_weaponReplacementByNick;
+static std::unordered_map<std::string, int> g_weaponReplacementBySkin;
+static std::unordered_map<std::string, std::vector<int>> g_weaponReplacementRandomBySkin;
+static std::unordered_map<std::string, std::vector<int>> g_weaponReplacementRandomBags;
+static std::unordered_map<std::string, int> g_weaponReplacementRandomChoiceByPed;
+static WeaponReplacementStats g_weaponReplacementStats;
+
+static std::string MakeWeaponReplacementKey(const std::string& weaponLower, const std::string& matchLower) {
+    return weaponLower + "|" + matchLower;
+}
+
+static std::string StripSampColorCodes(std::string value) {
+    std::string out;
+    out.reserve(value.size());
+    for (size_t i = 0; i < value.size();) {
+        if (value[i] == '{' && i + 8 <= value.size()) {
+            size_t j = i + 1;
+            int hex = 0;
+            while (j < value.size() && hex < 8) {
+                const char c = value[j];
+                const bool isHex =
+                    (c >= '0' && c <= '9') ||
+                    (c >= 'a' && c <= 'f') ||
+                    (c >= 'A' && c <= 'F');
+                if (!isHex) break;
+                ++j;
+                ++hex;
+            }
+            if ((hex == 6 || hex == 8) && j < value.size() && value[j] == '}') {
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push_back(value[i++]);
+    }
+    return out;
+}
+
+static std::string GetWeaponModelBaseNameLower(int wt) {
+    if (wt > 0 && wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[(size_t)wt].empty())
+        return ToLowerAscii(g_weaponDatIdeName[(size_t)wt]);
+    if (wt > 0 && wt < (int)g_cfg.size() && g_cfg[(size_t)wt].name && g_cfg[(size_t)wt].name[0])
+        return ToLowerAscii(g_cfg[(size_t)wt].name);
+    return {};
+}
+
+static std::vector<std::string> KnownWeaponModelNamesLower() {
+    std::vector<std::string> names;
+    for (int wt : g_availableWeaponTypes) {
+        std::string name = GetWeaponModelBaseNameLower(wt);
+        if (!name.empty())
+            names.push_back(name);
+        if (wt > 0 && wt < (int)g_cfg.size() && g_cfg[(size_t)wt].name && g_cfg[(size_t)wt].name[0])
+            names.push_back(ToLowerAscii(g_cfg[(size_t)wt].name));
+    }
+    std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return a.size() > b.size();
+        return a < b;
+    });
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
+static void DestroyRwObjectInstance(RwObject*& obj) {
+    if (!obj) return;
+    if (obj->type == rpCLUMP) {
+        RpClumpDestroy(reinterpret_cast<RpClump*>(obj));
+    } else if (obj->type == rpATOMIC) {
+        auto* a = reinterpret_cast<RpAtomic*>(obj);
+        RwFrame* f = RpAtomicGetFrame(a);
+        RpAtomicDestroy(a);
+        if (f) RwFrameDestroy(f);
+    }
+    obj = nullptr;
+}
+
+static void DestroyWeaponReplacementAssets() {
+    for (auto& asset : g_weaponReplacementAssets) {
+        DestroyRwObjectInstance(asset.rwObject);
+        asset.txdSlot = -1;
+    }
+    g_weaponReplacementAssets.clear();
+    g_weaponReplacementByNick.clear();
+    g_weaponReplacementBySkin.clear();
+    g_weaponReplacementRandomBySkin.clear();
+    g_weaponReplacementRandomBags.clear();
+    g_weaponReplacementRandomChoiceByPed.clear();
+    g_weaponReplacementStats = {};
+}
+
+static bool EnsureWeaponReplacementAssetLoaded(WeaponReplacementAsset& asset) {
+    if (asset.rwObject)
+        return true;
+    if (asset.loadAttempted)
+        return false;
+    asset.loadAttempted = true;
+
+    if (!FileExistsA(asset.dffPath.c_str())) {
+        if (!asset.loadFailedLogged) {
+            asset.loadFailedLogged = true;
+            OrcLogError("weapon replacement \"%s\": DFF missing %s", asset.displayName.c_str(), asset.dffPath.c_str());
+        }
+        return false;
+    }
+    if (asset.txdPath.empty() || !FileExistsA(asset.txdPath.c_str())) {
+        if (!asset.loadFailedLogged) {
+            asset.loadFailedLogged = true;
+            OrcLogError("weapon replacement \"%s\": TXD missing or invalid path", asset.displayName.c_str());
+        }
+        return false;
+    }
+
+    std::string txdName = "orc_wr_" + asset.key;
+    for (char& c : txdName) {
+        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+            c = '_';
+    }
+    int txdSlot = CTxdStore::FindTxdSlot(txdName.c_str());
+    if (txdSlot == -1)
+        txdSlot = CTxdStore::AddTxdSlot(txdName.c_str());
+    if (txdSlot == -1) {
+        OrcLogError("weapon replacement \"%s\": CTxdStore::AddTxdSlot failed", asset.displayName.c_str());
+        return false;
+    }
+
+    bool txdOk = false;
+    RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.txdPath.c_str());
+    if (txdStream) {
+        txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
+        RwStreamClose(txdStream, nullptr);
+    }
+    if (!txdOk) {
+        OrcLogError("weapon replacement \"%s\": LoadTxd failed", asset.displayName.c_str());
+        return false;
+    }
+    asset.txdSlot = txdSlot;
+
+    CTxdStore::PushCurrentTxd();
+    CTxdStore::SetCurrentTxd(txdSlot);
+    RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.dffPath.c_str());
+    if (!stream) {
+        CTxdStore::PopCurrentTxd();
+        OrcLogError("weapon replacement \"%s\": RwStreamOpen DFF failed", asset.displayName.c_str());
+        return false;
+    }
+
+    bool ok = false;
+    if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr)) {
+        RpClump* c = RpClumpStreamRead(stream);
+        if (c) {
+            asset.rwObject = reinterpret_cast<RwObject*>(c);
+            RpClumpForAllAtomics(c, InitAttachmentAtomicCB, nullptr);
+            ok = true;
+        }
+    }
+    RwStreamClose(stream, nullptr);
+
+    if (!ok) {
+        stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.dffPath.c_str());
+        if (stream) {
+            if (RwStreamFindChunk(stream, rwID_ATOMIC, nullptr, nullptr)) {
+                RpAtomic* a = RpAtomicStreamRead(stream);
+                if (a) {
+                    if (!RpAtomicGetFrame(a)) {
+                        RwFrame* frame = RwFrameCreate();
+                        if (frame) RpAtomicSetFrame(a, frame);
+                    }
+                    InitAttachmentAtomicCB(a, nullptr);
+                    asset.rwObject = reinterpret_cast<RwObject*>(a);
+                    ok = true;
+                }
+            }
+            RwStreamClose(stream, nullptr);
+        }
+    }
+    CTxdStore::PopCurrentTxd();
+
+    if (!ok) {
+        OrcLogError("weapon replacement \"%s\": DFF has no readable clump/atomic", asset.displayName.c_str());
+        return false;
+    }
+
+    asset.loadFailedLogged = false;
+    OrcLogInfo("weapon replacement \"%s\": loaded", asset.displayName.c_str());
+    return true;
+}
+
+static RwObject* CloneWeaponReplacementObject(WeaponReplacementAsset& asset) {
+    if (!EnsureWeaponReplacementAssetLoaded(asset) || !asset.rwObject)
+        return nullptr;
+    if (asset.rwObject->type == rpCLUMP) {
+        RpClump* clone = RpClumpClone(reinterpret_cast<RpClump*>(asset.rwObject));
+        if (!clone) return nullptr;
+        RpClumpForAllAtomics(clone, InitAttachmentAtomicCB, nullptr);
+        return reinterpret_cast<RwObject*>(clone);
+    }
+    if (asset.rwObject->type == rpATOMIC) {
+        RpAtomic* clone = RpAtomicClone(reinterpret_cast<RpAtomic*>(asset.rwObject));
+        if (!clone) return nullptr;
+        RwFrame* frame = RwFrameCreate();
+        if (frame) RpAtomicSetFrame(clone, frame);
+        InitAttachmentAtomicCB(clone, nullptr);
+        return reinterpret_cast<RwObject*>(clone);
+    }
+    return nullptr;
+}
+
+static void AddWeaponReplacementAsset(const std::string& key,
+                                      const std::string& weaponLower,
+                                      const std::string& matchLower,
+                                      const std::string& displayName,
+                                      const std::string& dffPath,
+                                      const std::string& txdPath,
+                                      std::unordered_map<std::string, int>* directMap,
+                                      std::unordered_map<std::string, std::vector<int>>* randomMap) {
+    WeaponReplacementAsset asset;
+    asset.key = key;
+    asset.weaponNameLower = weaponLower;
+    asset.matchNameLower = matchLower;
+    asset.displayName = displayName;
+    asset.dffPath = dffPath;
+    asset.txdPath = txdPath;
+    const int index = (int)g_weaponReplacementAssets.size();
+    g_weaponReplacementAssets.push_back(std::move(asset));
+
+    const std::string mapKey = MakeWeaponReplacementKey(weaponLower, matchLower);
+    if (directMap) {
+        if (directMap->find(mapKey) == directMap->end())
+            (*directMap)[mapKey] = index;
+    }
+    if (randomMap)
+        (*randomMap)[mapKey].push_back(index);
+}
+
+void DiscoverWeaponReplacements() {
+    ClearAllWeaponReplacementInstances();
+    DestroyWeaponReplacementAssets();
+
+    const std::string gunsDir = g_gameWeaponGunsDir;
+    DWORD gunsAttr = GetFileAttributesA(gunsDir.c_str());
+    if (gunsAttr != INVALID_FILE_ATTRIBUTES && (gunsAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+        std::string weaponMask = JoinPath(gunsDir, "*");
+        WIN32_FIND_DATAA weaponData{};
+        HANDLE hw = FindFirstFileA(weaponMask.c_str(), &weaponData);
+        if (hw != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(weaponData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                const std::string weaponFolder = weaponData.cFileName;
+                if (weaponFolder == "." || weaponFolder == "..") continue;
+                const std::string weaponLower = ToLowerAscii(weaponFolder);
+                const std::string weaponDir = JoinPath(gunsDir, weaponFolder);
+
+                std::string fileMask = JoinPath(weaponDir, "*.*");
+                WIN32_FIND_DATAA fileData{};
+                HANDLE hf = FindFirstFileA(fileMask.c_str(), &fileData);
+                if (hf != INVALID_HANDLE_VALUE) {
+                    do {
+                        if (fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                        const std::string fname = fileData.cFileName;
+                        if (LowerExt(fname) != ".dff") continue;
+                        const std::string base = BaseNameNoExt(fname);
+                        const std::string skinLower = ToLowerAscii(base);
+                        AddWeaponReplacementAsset(
+                            "skin:" + weaponLower + ":" + skinLower,
+                            weaponLower,
+                            skinLower,
+                            weaponFolder + "/" + base,
+                            JoinPath(weaponDir, fname),
+                            FindBestTxdPath(weaponDir, base),
+                            &g_weaponReplacementBySkin,
+                            nullptr);
+                    } while (FindNextFileA(hf, &fileData));
+                    FindClose(hf);
+                }
+
+                std::string skinDirMask = JoinPath(weaponDir, "*");
+                WIN32_FIND_DATAA skinDirData{};
+                HANDLE hs = FindFirstFileA(skinDirMask.c_str(), &skinDirData);
+                if (hs != INVALID_HANDLE_VALUE) {
+                    do {
+                        if (!(skinDirData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                        const std::string skinFolder = skinDirData.cFileName;
+                        if (skinFolder == "." || skinFolder == "..") continue;
+                        const std::string skinLower = ToLowerAscii(skinFolder);
+                        const std::string skinDir = JoinPath(weaponDir, skinFolder);
+                        std::string variantMask = JoinPath(skinDir, "*.*");
+                        WIN32_FIND_DATAA variantData{};
+                        HANDLE hv = FindFirstFileA(variantMask.c_str(), &variantData);
+                        if (hv == INVALID_HANDLE_VALUE) continue;
+                        do {
+                            if (variantData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                            const std::string fname = variantData.cFileName;
+                            if (LowerExt(fname) != ".dff") continue;
+                            const std::string base = BaseNameNoExt(fname);
+                            AddWeaponReplacementAsset(
+                                "skinrandom:" + weaponLower + ":" + skinLower + ":" + ToLowerAscii(base),
+                                weaponLower,
+                                skinLower,
+                                weaponFolder + "/" + skinFolder + "/" + base,
+                                JoinPath(skinDir, fname),
+                                FindBestTxdPath(skinDir, base),
+                                nullptr,
+                                &g_weaponReplacementRandomBySkin);
+                        } while (FindNextFileA(hv, &variantData));
+                        FindClose(hv);
+                    } while (FindNextFileA(hs, &skinDirData));
+                    FindClose(hs);
+                }
+            } while (FindNextFileA(hw, &weaponData));
+            FindClose(hw);
+        }
+    }
+
+    const std::vector<std::string> knownWeapons = KnownWeaponModelNamesLower();
+    const std::string nickDir = g_gameWeaponGunsNickDir;
+    DWORD nickAttr = GetFileAttributesA(nickDir.c_str());
+    if (nickAttr != INVALID_FILE_ATTRIBUTES && (nickAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+        std::string nickMask = JoinPath(nickDir, "*.*");
+        WIN32_FIND_DATAA nickData{};
+        HANDLE hn = FindFirstFileA(nickMask.c_str(), &nickData);
+        if (hn != INVALID_HANDLE_VALUE) {
+            do {
+                if (nickData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                const std::string fname = nickData.cFileName;
+                if (LowerExt(fname) != ".dff") continue;
+                const std::string base = BaseNameNoExt(fname);
+                const std::string baseLower = ToLowerAscii(base);
+                std::string weaponLower;
+                std::string nickLower;
+                for (const std::string& known : knownWeapons) {
+                    const std::string prefix = known + "_";
+                    if (baseLower.rfind(prefix, 0) == 0 && baseLower.size() > prefix.size()) {
+                        weaponLower = known;
+                        nickLower = baseLower.substr(prefix.size());
+                        break;
+                    }
+                }
+                if (weaponLower.empty()) {
+                    const size_t underscore = baseLower.find('_');
+                    if (underscore == std::string::npos || underscore == 0 || underscore + 1 >= baseLower.size())
+                        continue;
+                    weaponLower = baseLower.substr(0, underscore);
+                    nickLower = baseLower.substr(underscore + 1);
+                }
+                AddWeaponReplacementAsset(
+                    "nick:" + weaponLower + ":" + nickLower,
+                    weaponLower,
+                    nickLower,
+                    base,
+                    JoinPath(nickDir, fname),
+                    FindBestTxdPath(nickDir, base),
+                    &g_weaponReplacementByNick,
+                    nullptr);
+            } while (FindNextFileA(hn, &nickData));
+            FindClose(hn);
+        }
+    }
+
+    g_weaponReplacementStats.uniqueSkinWeapons = (int)g_weaponReplacementBySkin.size();
+    g_weaponReplacementStats.randomSkinWeapons = 0;
+    for (const auto& kv : g_weaponReplacementRandomBySkin)
+        g_weaponReplacementStats.randomSkinWeapons += (int)kv.second.size();
+    g_weaponReplacementStats.nickWeapons = (int)g_weaponReplacementByNick.size();
+    OrcLogInfo("DiscoverWeaponReplacements: skin=%d random=%d nick=%d",
+        g_weaponReplacementStats.uniqueSkinWeapons,
+        g_weaponReplacementStats.randomSkinWeapons,
+        g_weaponReplacementStats.nickWeapons);
+}
+
+WeaponReplacementStats OrcGetWeaponReplacementStats() {
+    return g_weaponReplacementStats;
+}
+
+struct WeaponTextureAsset {
+    std::string key;
+    std::string weaponNameLower;
+    std::string matchNameLower;
+    std::string displayName;
+    std::string txdPath;
+    int txdSlot = -1;
+    bool loadAttempted = false;
+    bool loadFailedLogged = false;
+};
+
+struct WeaponTextureRestoreEntry {
+    RpMaterial* material = nullptr;
+    RwTexture* texture = nullptr;
+};
+
+static std::vector<WeaponTextureAsset> g_weaponTextureAssets;
+static std::unordered_map<std::string, int> g_weaponTextureByNick;
+static std::unordered_map<std::string, int> g_weaponTextureBySkin;
+static std::unordered_map<std::string, std::vector<int>> g_weaponTextureRandomBySkin;
+static std::unordered_map<std::string, std::vector<int>> g_weaponTextureRandomBags;
+static std::unordered_map<std::string, int> g_weaponTextureRandomChoiceByPed;
+static std::vector<WeaponTextureRestoreEntry> g_weaponTextureRestoreEntries;
+static WeaponTextureStats g_weaponTextureStats;
+
+static RwTexDictionary* GetTxdDictionaryByIndexMain(int txdIndex) {
+    if (txdIndex < 0 || !CTxdStore::ms_pTxdPool || !CTxdStore::ms_pTxdPool->m_pObjects)
+        return nullptr;
+    if (txdIndex >= CTxdStore::ms_pTxdPool->m_nSize)
+        return nullptr;
+    return CTxdStore::ms_pTxdPool->m_pObjects[txdIndex].m_pRwDictionary;
+}
+
+static void RestoreWeaponTextureOverrides() {
+    if (g_weaponTextureRestoreEntries.empty())
+        return;
+    for (auto it = g_weaponTextureRestoreEntries.rbegin(); it != g_weaponTextureRestoreEntries.rend(); ++it) {
+        if (!it->material) continue;
+        __try {
+            it->material->texture = it->texture;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    g_weaponTextureRestoreEntries.clear();
+}
+
+static void DestroyWeaponTextureAssets() {
+    RestoreWeaponTextureOverrides();
+    g_weaponTextureAssets.clear();
+    g_weaponTextureByNick.clear();
+    g_weaponTextureBySkin.clear();
+    g_weaponTextureRandomBySkin.clear();
+    g_weaponTextureRandomBags.clear();
+    g_weaponTextureRandomChoiceByPed.clear();
+    g_weaponTextureStats = {};
+}
+
+static bool EnsureWeaponTextureAssetLoaded(WeaponTextureAsset& asset) {
+    if (asset.txdSlot >= 0 && GetTxdDictionaryByIndexMain(asset.txdSlot))
+        return true;
+    if (asset.loadAttempted)
+        return false;
+    asset.loadAttempted = true;
+
+    if (asset.txdPath.empty() || !FileExistsA(asset.txdPath.c_str())) {
+        if (!asset.loadFailedLogged) {
+            asset.loadFailedLogged = true;
+            OrcLogError("weapon texture \"%s\": TXD missing %s", asset.displayName.c_str(), asset.txdPath.c_str());
+        }
+        return false;
+    }
+
+    std::string txdName = "orc_wtex_" + asset.key;
+    for (char& c : txdName) {
+        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+            c = '_';
+    }
+    int txdSlot = CTxdStore::FindTxdSlot(txdName.c_str());
+    if (txdSlot == -1)
+        txdSlot = CTxdStore::AddTxdSlot(txdName.c_str());
+    if (txdSlot == -1) {
+        OrcLogError("weapon texture \"%s\": CTxdStore::AddTxdSlot failed", asset.displayName.c_str());
+        return false;
+    }
+
+    bool txdOk = false;
+    RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.txdPath.c_str());
+    if (txdStream) {
+        txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
+        RwStreamClose(txdStream, nullptr);
+    }
+    if (!txdOk) {
+        OrcLogError("weapon texture \"%s\": LoadTxd failed", asset.displayName.c_str());
+        return false;
+    }
+
+    asset.txdSlot = txdSlot;
+    asset.loadFailedLogged = false;
+    OrcLogInfo("weapon texture \"%s\": loaded", asset.displayName.c_str());
+    return true;
+}
+
+static void AddWeaponTextureAsset(const std::string& key,
+                                  const std::string& weaponLower,
+                                  const std::string& matchLower,
+                                  const std::string& displayName,
+                                  const std::string& txdPath,
+                                  std::unordered_map<std::string, int>* directMap,
+                                  std::unordered_map<std::string, std::vector<int>>* randomMap) {
+    WeaponTextureAsset asset;
+    asset.key = key;
+    asset.weaponNameLower = weaponLower;
+    asset.matchNameLower = matchLower;
+    asset.displayName = displayName;
+    asset.txdPath = txdPath;
+    const int index = (int)g_weaponTextureAssets.size();
+    g_weaponTextureAssets.push_back(std::move(asset));
+
+    const std::string mapKey = MakeWeaponReplacementKey(weaponLower, matchLower);
+    if (directMap && directMap->find(mapKey) == directMap->end())
+        (*directMap)[mapKey] = index;
+    if (randomMap)
+        (*randomMap)[mapKey].push_back(index);
+}
+
+void DiscoverWeaponTextures() {
+    DestroyWeaponTextureAssets();
+    const std::string texturesDir = g_gameWeaponTexturesDir;
+    DWORD attr = GetFileAttributesA(texturesDir.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+        return;
+
+    std::string weaponMask = JoinPath(texturesDir, "*");
+    WIN32_FIND_DATAA weaponData{};
+    HANDLE hw = FindFirstFileA(weaponMask.c_str(), &weaponData);
+    if (hw != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(weaponData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            const std::string weaponFolder = weaponData.cFileName;
+            if (weaponFolder == "." || weaponFolder == ".." || _stricmp(weaponFolder.c_str(), "Nick") == 0)
+                continue;
+            const std::string weaponLower = ToLowerAscii(weaponFolder);
+            const std::string weaponDir = JoinPath(texturesDir, weaponFolder);
+
+            std::string fileMask = JoinPath(weaponDir, "*.*");
+            WIN32_FIND_DATAA fileData{};
+            HANDLE hf = FindFirstFileA(fileMask.c_str(), &fileData);
+            if (hf != INVALID_HANDLE_VALUE) {
+                do {
+                    if (fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    const std::string fname = fileData.cFileName;
+                    if (LowerExt(fname) != ".txd") continue;
+                    const std::string base = BaseNameNoExt(fname);
+                    const std::string skinLower = ToLowerAscii(base);
+                    AddWeaponTextureAsset(
+                        "skin:" + weaponLower + ":" + skinLower,
+                        weaponLower,
+                        skinLower,
+                        weaponFolder + "/" + base,
+                        JoinPath(weaponDir, fname),
+                        &g_weaponTextureBySkin,
+                        nullptr);
+                } while (FindNextFileA(hf, &fileData));
+                FindClose(hf);
+            }
+
+            std::string skinDirMask = JoinPath(weaponDir, "*");
+            WIN32_FIND_DATAA skinDirData{};
+            HANDLE hs = FindFirstFileA(skinDirMask.c_str(), &skinDirData);
+            if (hs != INVALID_HANDLE_VALUE) {
+                do {
+                    if (!(skinDirData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                    const std::string skinFolder = skinDirData.cFileName;
+                    if (skinFolder == "." || skinFolder == "..") continue;
+                    const std::string skinLower = ToLowerAscii(skinFolder);
+                    const std::string skinDir = JoinPath(weaponDir, skinFolder);
+                    std::string variantMask = JoinPath(skinDir, "*.*");
+                    WIN32_FIND_DATAA variantData{};
+                    HANDLE hv = FindFirstFileA(variantMask.c_str(), &variantData);
+                    if (hv == INVALID_HANDLE_VALUE) continue;
+                    do {
+                        if (variantData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                        const std::string fname = variantData.cFileName;
+                        if (LowerExt(fname) != ".txd") continue;
+                        const std::string base = BaseNameNoExt(fname);
+                        AddWeaponTextureAsset(
+                            "skinrandom:" + weaponLower + ":" + skinLower + ":" + ToLowerAscii(base),
+                            weaponLower,
+                            skinLower,
+                            weaponFolder + "/" + skinFolder + "/" + base,
+                            JoinPath(skinDir, fname),
+                            nullptr,
+                            &g_weaponTextureRandomBySkin);
+                    } while (FindNextFileA(hv, &variantData));
+                    FindClose(hv);
+                } while (FindNextFileA(hs, &skinDirData));
+                FindClose(hs);
+            }
+        } while (FindNextFileA(hw, &weaponData));
+        FindClose(hw);
+    }
+
+    const std::vector<std::string> knownWeapons = KnownWeaponModelNamesLower();
+    const std::string nickDir = JoinPath(texturesDir, "Nick");
+    DWORD nickAttr = GetFileAttributesA(nickDir.c_str());
+    if (nickAttr != INVALID_FILE_ATTRIBUTES && (nickAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+        std::string nickMask = JoinPath(nickDir, "*.*");
+        WIN32_FIND_DATAA nickData{};
+        HANDLE hn = FindFirstFileA(nickMask.c_str(), &nickData);
+        if (hn != INVALID_HANDLE_VALUE) {
+            do {
+                if (nickData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                const std::string fname = nickData.cFileName;
+                if (LowerExt(fname) != ".txd") continue;
+                const std::string base = BaseNameNoExt(fname);
+                const std::string baseLower = ToLowerAscii(base);
+                std::string weaponLower;
+                std::string nickLower;
+                for (const std::string& known : knownWeapons) {
+                    const std::string prefix = known + "_";
+                    if (baseLower.rfind(prefix, 0) == 0 && baseLower.size() > prefix.size()) {
+                        weaponLower = known;
+                        nickLower = baseLower.substr(prefix.size());
+                        break;
+                    }
+                }
+                if (weaponLower.empty()) {
+                    const size_t underscore = baseLower.find('_');
+                    if (underscore == std::string::npos || underscore == 0 || underscore + 1 >= baseLower.size())
+                        continue;
+                    weaponLower = baseLower.substr(0, underscore);
+                    nickLower = baseLower.substr(underscore + 1);
+                }
+                AddWeaponTextureAsset(
+                    "nick:" + weaponLower + ":" + nickLower,
+                    weaponLower,
+                    nickLower,
+                    base,
+                    JoinPath(nickDir, fname),
+                    &g_weaponTextureByNick,
+                    nullptr);
+            } while (FindNextFileA(hn, &nickData));
+            FindClose(hn);
+        }
+    }
+
+    g_weaponTextureStats.uniqueSkinTextures = (int)g_weaponTextureBySkin.size();
+    g_weaponTextureStats.randomSkinTextures = 0;
+    for (const auto& kv : g_weaponTextureRandomBySkin)
+        g_weaponTextureStats.randomSkinTextures += (int)kv.second.size();
+    g_weaponTextureStats.nickTextures = (int)g_weaponTextureByNick.size();
+    OrcLogInfo("DiscoverWeaponTextures: skin=%d random=%d nick=%d",
+        g_weaponTextureStats.uniqueSkinTextures,
+        g_weaponTextureStats.randomSkinTextures,
+        g_weaponTextureStats.nickTextures);
+}
+
+WeaponTextureStats OrcGetWeaponTextureStats() {
+    return g_weaponTextureStats;
+}
+
+static WeaponTextureAsset* PickRandomWeaponTextureAsset(const std::string& mapKey) {
+    auto it = g_weaponTextureRandomBySkin.find(mapKey);
+    if (it == g_weaponTextureRandomBySkin.end() || it->second.empty())
+        return nullptr;
+    std::vector<int>& bag = g_weaponTextureRandomBags[mapKey];
+    if (bag.empty()) {
+        bag = it->second;
+        for (int i = (int)bag.size() - 1; i > 0; --i) {
+            const int j = rand() % (i + 1);
+            std::swap(bag[(size_t)i], bag[(size_t)j]);
+        }
+    }
+    const int assetIndex = bag.back();
+    bag.pop_back();
+    if (assetIndex < 0 || assetIndex >= (int)g_weaponTextureAssets.size())
+        return nullptr;
+    return &g_weaponTextureAssets[(size_t)assetIndex];
+}
+
+static WeaponTextureAsset* PickStickyRandomWeaponTextureAsset(CPed* ped, const std::string& mapKey) {
+    if (!ped)
+        return nullptr;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return PickRandomWeaponTextureAsset(mapKey);
+
+    const std::string choiceKey = std::to_string(pedRef) + "|" + mapKey;
+    auto chosen = g_weaponTextureRandomChoiceByPed.find(choiceKey);
+    if (chosen != g_weaponTextureRandomChoiceByPed.end()) {
+        const int assetIndex = chosen->second;
+        if (assetIndex >= 0 && assetIndex < (int)g_weaponTextureAssets.size())
+            return &g_weaponTextureAssets[(size_t)assetIndex];
+    }
+
+    WeaponTextureAsset* asset = PickRandomWeaponTextureAsset(mapKey);
+    if (!asset)
+        return nullptr;
+    const int assetIndex = (int)(asset - g_weaponTextureAssets.data());
+    if (assetIndex >= 0)
+        g_weaponTextureRandomChoiceByPed[choiceKey] = assetIndex;
+    return asset;
+}
+
+static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped, int wt, bool allowRandom) {
+    if (!g_enabled || !g_weaponTexturesEnabled || !ped || wt <= 0)
+        return nullptr;
+    const std::string weaponLower = GetWeaponModelBaseNameLower(wt);
+    if (weaponLower.empty())
+        return nullptr;
+
+    if (g_weaponTextureNickMode && samp_bridge::IsSampBuildKnown()) {
+        char nick[64] = {};
+        bool isLocal = false;
+        if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocal)) {
+            const std::string nickLower = ToLowerAscii(StripSampColorCodes(nick));
+            if (!nickLower.empty()) {
+                const std::string nickKey = MakeWeaponReplacementKey(weaponLower, nickLower);
+                auto nickIt = g_weaponTextureByNick.find(nickKey);
+                if (nickIt != g_weaponTextureByNick.end() &&
+                    nickIt->second >= 0 && nickIt->second < (int)g_weaponTextureAssets.size()) {
+                    return &g_weaponTextureAssets[(size_t)nickIt->second];
+                }
+            }
+        }
+    }
+
+    const std::string skinLower = ToLowerAscii(GetPedStdSkinDffName(ped));
+    if (skinLower.empty())
+        return nullptr;
+    const std::string skinKey = MakeWeaponReplacementKey(weaponLower, skinLower);
+    auto skinIt = g_weaponTextureBySkin.find(skinKey);
+    if (skinIt != g_weaponTextureBySkin.end() &&
+        skinIt->second >= 0 && skinIt->second < (int)g_weaponTextureAssets.size()) {
+        return &g_weaponTextureAssets[(size_t)skinIt->second];
+    }
+    if (allowRandom && g_weaponTextureRandomMode)
+        return PickStickyRandomWeaponTextureAsset(ped, skinKey);
+    return nullptr;
+}
+
+static WeaponTextureAsset* ResolveUsableWeaponTextureAssetForPed(CPed* ped, int wt, bool allowRandom) {
+    WeaponTextureAsset* asset = ResolveWeaponTextureAssetForPed(ped, wt, allowRandom);
+    if (!asset)
+        return nullptr;
+    if (EnsureWeaponTextureAssetLoaded(*asset))
+        return asset;
+    if (asset->key.rfind("skinrandom:", 0) == 0) {
+        const int failedIndex = (int)(asset - g_weaponTextureAssets.data());
+        for (auto it = g_weaponTextureRandomChoiceByPed.begin(); it != g_weaponTextureRandomChoiceByPed.end();) {
+            if (it->second == failedIndex)
+                it = g_weaponTextureRandomChoiceByPed.erase(it);
+            else
+                ++it;
+        }
+    }
+    return nullptr;
+}
+
+struct WeaponTextureApplyCtx {
+    RwTexDictionary* dict = nullptr;
+};
+
+static RpMaterial* WeaponTextureApplyMaterialCB(RpMaterial* material, void* data) {
+    if (!material || !material->texture || !data)
+        return material;
+    WeaponTextureApplyCtx* ctx = reinterpret_cast<WeaponTextureApplyCtx*>(data);
+    if (!ctx->dict)
+        return material;
+    RwTexture* replacement = RwTexDictionaryFindNamedTexture(ctx->dict, material->texture->name);
+    if (!replacement || replacement == material->texture)
+        return material;
+    g_weaponTextureRestoreEntries.push_back({ material, material->texture });
+    material->texture = replacement;
+    return material;
+}
+
+static RpAtomic* WeaponTextureApplyAtomicCB(RpAtomic* atomic, void* data) {
+    if (!atomic || !atomic->geometry)
+        return atomic;
+    RpGeometryForAllMaterials(atomic->geometry, WeaponTextureApplyMaterialCB, data);
+    return atomic;
+}
+
+static void ApplyWeaponTextureToRwObject(RwObject* object, WeaponTextureAsset* asset) {
+    if (!object || !asset || !EnsureWeaponTextureAssetLoaded(*asset))
+        return;
+    WeaponTextureApplyCtx ctx;
+    ctx.dict = GetTxdDictionaryByIndexMain(asset->txdSlot);
+    if (!ctx.dict)
+        return;
+    __try {
+        if (object->type == rpCLUMP) {
+            RpClumpForAllAtomics(reinterpret_cast<RpClump*>(object), WeaponTextureApplyAtomicCB, &ctx);
+        } else if (object->type == rpATOMIC) {
+            WeaponTextureApplyAtomicCB(reinterpret_cast<RpAtomic*>(object), &ctx);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("weapon texture apply: SEH ex=0x%08X asset=%s", GetExceptionCode(), asset->displayName.c_str());
+    }
+}
+
+static WeaponReplacementAsset* PickRandomWeaponReplacementAsset(const std::string& mapKey) {
+    auto it = g_weaponReplacementRandomBySkin.find(mapKey);
+    if (it == g_weaponReplacementRandomBySkin.end() || it->second.empty())
+        return nullptr;
+    std::vector<int>& bag = g_weaponReplacementRandomBags[mapKey];
+    if (bag.empty()) {
+        bag = it->second;
+        for (int i = (int)bag.size() - 1; i > 0; --i) {
+            const int j = rand() % (i + 1);
+            std::swap(bag[(size_t)i], bag[(size_t)j]);
+        }
+    }
+    const int assetIndex = bag.back();
+    bag.pop_back();
+    if (assetIndex < 0 || assetIndex >= (int)g_weaponReplacementAssets.size())
+        return nullptr;
+    return &g_weaponReplacementAssets[(size_t)assetIndex];
+}
+
+static WeaponReplacementAsset* PickStickyRandomWeaponReplacementAsset(CPed* ped, const std::string& mapKey) {
+    if (!ped)
+        return nullptr;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return PickRandomWeaponReplacementAsset(mapKey);
+
+    const std::string choiceKey = std::to_string(pedRef) + "|" + mapKey;
+    auto chosen = g_weaponReplacementRandomChoiceByPed.find(choiceKey);
+    if (chosen != g_weaponReplacementRandomChoiceByPed.end()) {
+        const int assetIndex = chosen->second;
+        if (assetIndex >= 0 && assetIndex < (int)g_weaponReplacementAssets.size())
+            return &g_weaponReplacementAssets[(size_t)assetIndex];
+    }
+
+    WeaponReplacementAsset* asset = PickRandomWeaponReplacementAsset(mapKey);
+    if (!asset)
+        return nullptr;
+    const int assetIndex = (int)(asset - g_weaponReplacementAssets.data());
+    if (assetIndex >= 0)
+        g_weaponReplacementRandomChoiceByPed[choiceKey] = assetIndex;
+    return asset;
+}
+
+static WeaponReplacementAsset* ResolveWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom) {
+    if (!g_weaponReplacementEnabled || !ped || wt <= 0)
+        return nullptr;
+    const std::string weaponLower = GetWeaponModelBaseNameLower(wt);
+    if (weaponLower.empty())
+        return nullptr;
+
+    if (samp_bridge::IsSampBuildKnown()) {
+        char nick[64] = {};
+        bool isLocal = false;
+        if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocal)) {
+            const std::string nickLower = ToLowerAscii(StripSampColorCodes(nick));
+            if (!nickLower.empty()) {
+                const std::string nickKey = MakeWeaponReplacementKey(weaponLower, nickLower);
+                auto nickIt = g_weaponReplacementByNick.find(nickKey);
+                if (nickIt != g_weaponReplacementByNick.end() &&
+                    nickIt->second >= 0 && nickIt->second < (int)g_weaponReplacementAssets.size()) {
+                    return &g_weaponReplacementAssets[(size_t)nickIt->second];
+                }
+            }
+        }
+    }
+
+    const std::string skinLower = ToLowerAscii(GetPedStdSkinDffName(ped));
+    if (skinLower.empty())
+        return nullptr;
+    const std::string skinKey = MakeWeaponReplacementKey(weaponLower, skinLower);
+    auto skinIt = g_weaponReplacementBySkin.find(skinKey);
+    if (skinIt != g_weaponReplacementBySkin.end() &&
+        skinIt->second >= 0 && skinIt->second < (int)g_weaponReplacementAssets.size()) {
+        return &g_weaponReplacementAssets[(size_t)skinIt->second];
+    }
+    if (allowRandom)
+        return PickStickyRandomWeaponReplacementAsset(ped, skinKey);
+    return nullptr;
+}
+
+static WeaponReplacementAsset* ResolveUsableWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom) {
+    WeaponReplacementAsset* asset = ResolveWeaponReplacementAssetForPed(ped, wt, allowRandom);
+    if (!asset)
+        return nullptr;
+    if (!EnsureWeaponReplacementAssetLoaded(*asset)) {
+        if (asset->key.rfind("skinrandom:", 0) == 0) {
+            const int failedIndex = (int)(asset - g_weaponReplacementAssets.data());
+            for (auto it = g_weaponReplacementRandomChoiceByPed.begin(); it != g_weaponReplacementRandomChoiceByPed.end();) {
+                if (it->second == failedIndex)
+                    it = g_weaponReplacementRandomChoiceByPed.erase(it);
+                else
+                    ++it;
+            }
+        }
+        return nullptr;
+    }
+    return asset;
+}
+
+static std::string ResolveUsableWeaponReplacementKeyForPed(CPed* ped, int wt, bool allowRandom) {
+    WeaponReplacementAsset* asset = ResolveUsableWeaponReplacementAssetForPed(ped, wt, allowRandom);
+    return asset ? asset->key : std::string{};
+}
+
 // Queued from UI; applied at the start of drawingEvent (see ApplyPendingLocalPlayerModel).
 static int g_pendingLocalPedModelId = -1;
 
 bool OrcApplyLocalPlayerModelById(int modelId) {
-    if (modelId < 0) return false;
+    if (!IsValidStandardSkinModel(modelId)) return false;
     g_pendingLocalPedModelId = modelId;
     return true;
+}
+
+int OrcGetLocalPlayerModelId() {
+    CPlayerPed* ped = FindPlayerPed(0);
+    return ped ? (int)ped->m_nModelIndex : -1;
+}
+
+struct StandardSkinPreviewRuntime {
+    int requestedSource = SKIN_PREVIEW_STANDARD;
+    int requestedModelId = -1;
+    int requestedVariantIndex = -1;
+    std::string requestedName;
+    int requestedWidth = 0;
+    int requestedHeight = 0;
+    float requestedYawDeg = 0.0f;
+    bool requestDirty = false;
+
+    int renderedSource = SKIN_PREVIEW_STANDARD;
+    int renderedModelId = -1;
+    int renderedVariantIndex = -1;
+    std::string renderedName;
+    int renderedWidth = 0;
+    int renderedHeight = 0;
+    float renderedYawDeg = 0.0f;
+
+    RwCamera* camera = nullptr;
+    RwFrame* cameraFrame = nullptr;
+    RwRaster* raster = nullptr;
+    RwRaster* zRaster = nullptr;
+    RwTexture* texture = nullptr;
+    RpLight* light = nullptr;
+    RwFrame* lightFrame = nullptr;
+    bool lightInWorld = false;
+};
+
+static StandardSkinPreviewRuntime g_standardSkinPreview;
+
+static RwV3d NormalizeRwV3d(RwV3d v, const RwV3d& fallback) {
+    const float lenSq = v.x * v.x + v.y * v.y + v.z * v.z;
+    if (lenSq <= 0.000001f)
+        return fallback;
+    const float inv = 1.0f / sqrtf(lenSq);
+    v.x *= inv;
+    v.y *= inv;
+    v.z *= inv;
+    return v;
+}
+
+static RwV3d CrossRwV3d(const RwV3d& a, const RwV3d& b) {
+    return {
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    };
+}
+
+static void SetPreviewCameraLookAt(RwFrame* frame) {
+    if (!frame)
+        return;
+    const RwV3d pos = { 0.0f, -7.0f, 1.05f };
+    const RwV3d target = { 0.0f, 0.0f, 0.86f };
+    const RwV3d worldUp = { 0.0f, 0.0f, 1.0f };
+    RwV3d at = { target.x - pos.x, target.y - pos.y, target.z - pos.z };
+    at = NormalizeRwV3d(at, { 0.0f, 1.0f, 0.0f });
+    RwV3d right = NormalizeRwV3d(CrossRwV3d(at, worldUp), { 1.0f, 0.0f, 0.0f });
+    RwV3d up = NormalizeRwV3d(CrossRwV3d(right, at), worldUp);
+
+    RwMatrix* m = RwFrameGetMatrix(frame);
+    m->right = right;
+    m->up = up;
+    m->at = at;
+    m->pos = pos;
+    RwMatrixUpdate(m);
+    RwFrameUpdateObjects(frame);
+}
+
+static void DestroyStandardSkinPreview() {
+    if (g_standardSkinPreview.camera && Scene.m_pWorld)
+        RpWorldRemoveCamera(Scene.m_pWorld, g_standardSkinPreview.camera);
+    if (g_standardSkinPreview.light && g_standardSkinPreview.lightInWorld && Scene.m_pWorld) {
+        RpWorldRemoveLight(Scene.m_pWorld, g_standardSkinPreview.light);
+        g_standardSkinPreview.lightInWorld = false;
+    }
+    if (g_standardSkinPreview.camera) {
+        RwCameraSetRaster(g_standardSkinPreview.camera, nullptr);
+        RwCameraSetZRaster(g_standardSkinPreview.camera, nullptr);
+        RwCameraSetFrame(g_standardSkinPreview.camera, nullptr);
+        RwCameraDestroy(g_standardSkinPreview.camera);
+    }
+    if (g_standardSkinPreview.cameraFrame)
+        RwFrameDestroy(g_standardSkinPreview.cameraFrame);
+    if (g_standardSkinPreview.light) {
+        RpLightSetFrame(g_standardSkinPreview.light, nullptr);
+        RpLightDestroy(g_standardSkinPreview.light);
+    }
+    if (g_standardSkinPreview.lightFrame)
+        RwFrameDestroy(g_standardSkinPreview.lightFrame);
+    if (g_standardSkinPreview.texture) {
+        RwTextureDestroy(g_standardSkinPreview.texture);
+    } else if (g_standardSkinPreview.raster) {
+        RwRasterDestroy(g_standardSkinPreview.raster);
+    }
+    if (g_standardSkinPreview.zRaster)
+        RwRasterDestroy(g_standardSkinPreview.zRaster);
+    g_standardSkinPreview.camera = nullptr;
+    g_standardSkinPreview.cameraFrame = nullptr;
+    g_standardSkinPreview.raster = nullptr;
+    g_standardSkinPreview.zRaster = nullptr;
+    g_standardSkinPreview.texture = nullptr;
+    g_standardSkinPreview.light = nullptr;
+    g_standardSkinPreview.lightFrame = nullptr;
+    g_standardSkinPreview.lightInWorld = false;
+    g_standardSkinPreview.renderedSource = SKIN_PREVIEW_STANDARD;
+    g_standardSkinPreview.renderedModelId = -1;
+    g_standardSkinPreview.renderedVariantIndex = -1;
+    g_standardSkinPreview.renderedName.clear();
+    g_standardSkinPreview.renderedWidth = 0;
+    g_standardSkinPreview.renderedHeight = 0;
+}
+
+static bool EnsureStandardSkinPreviewResources(int width, int height) {
+    width = std::max(64, std::min(width, 1024));
+    height = std::max(64, std::min(height, 1024));
+    if (g_standardSkinPreview.camera &&
+        g_standardSkinPreview.raster &&
+        g_standardSkinPreview.zRaster &&
+        g_standardSkinPreview.texture &&
+        g_standardSkinPreview.renderedWidth == width &&
+        g_standardSkinPreview.renderedHeight == height) {
+        return true;
+    }
+
+    DestroyStandardSkinPreview();
+
+    g_standardSkinPreview.raster = RwRasterCreate(width, height, 0, rwRASTERTYPECAMERATEXTURE | rwRASTERFORMAT8888);
+    g_standardSkinPreview.zRaster = RwRasterCreate(width, height, 0, rwRASTERTYPEZBUFFER);
+    if (!g_standardSkinPreview.raster || !g_standardSkinPreview.zRaster)
+        return false;
+    g_standardSkinPreview.texture = RwTextureCreate(g_standardSkinPreview.raster);
+    if (!g_standardSkinPreview.texture)
+        return false;
+    RwTextureSetFilterMode(g_standardSkinPreview.texture, rwFILTERLINEAR);
+
+    g_standardSkinPreview.camera = RwCameraCreate();
+    g_standardSkinPreview.cameraFrame = RwFrameCreate();
+    if (!g_standardSkinPreview.camera || !g_standardSkinPreview.cameraFrame)
+        return false;
+    RwCameraSetFrame(g_standardSkinPreview.camera, g_standardSkinPreview.cameraFrame);
+    SetPreviewCameraLookAt(g_standardSkinPreview.cameraFrame);
+    RwCameraSetRaster(g_standardSkinPreview.camera, g_standardSkinPreview.raster);
+    RwCameraSetZRaster(g_standardSkinPreview.camera, g_standardSkinPreview.zRaster);
+    RwCameraSetNearClipPlane(g_standardSkinPreview.camera, 0.01f);
+    RwCameraSetFarClipPlane(g_standardSkinPreview.camera, 300.0f);
+    const float aspect = height > 0 ? (float)height / (float)width : 1.0f;
+    RwV2d viewWindow = { 0.42f, 0.42f * aspect };
+    RwCameraSetViewWindow(g_standardSkinPreview.camera, &viewWindow);
+    RwCameraSetProjection(g_standardSkinPreview.camera, rwPERSPECTIVE);
+    if (Scene.m_pWorld)
+        RpWorldAddCamera(Scene.m_pWorld, g_standardSkinPreview.camera);
+
+    g_standardSkinPreview.light = RpLightCreate(rpLIGHTDIRECTIONAL);
+    if (g_standardSkinPreview.light) {
+        g_standardSkinPreview.lightFrame = RwFrameCreate();
+        if (g_standardSkinPreview.lightFrame) {
+            const RwV3d worldUp = { 0.0f, 0.0f, 1.0f };
+            RwV3d at = NormalizeRwV3d({ 0.0f, 1.0f, -0.35f }, { 0.0f, 1.0f, 0.0f });
+            RwV3d right = NormalizeRwV3d(CrossRwV3d(at, worldUp), { 1.0f, 0.0f, 0.0f });
+            RwV3d up = NormalizeRwV3d(CrossRwV3d(right, at), worldUp);
+            RwMatrix* m = RwFrameGetMatrix(g_standardSkinPreview.lightFrame);
+            m->right = right;
+            m->up = up;
+            m->at = at;
+            m->pos = { 0.0f, -4.0f, 3.0f };
+            RwMatrixUpdate(m);
+            RwFrameUpdateObjects(g_standardSkinPreview.lightFrame);
+            RpLightSetFrame(g_standardSkinPreview.light, g_standardSkinPreview.lightFrame);
+        } else {
+            RpLightDestroy(g_standardSkinPreview.light);
+            g_standardSkinPreview.light = nullptr;
+        }
+    }
+    if (g_standardSkinPreview.light) {
+        RwRGBAReal color{ 1.0f, 1.0f, 1.0f, 1.0f };
+        RpLightSetColor(g_standardSkinPreview.light, &color);
+    }
+    g_standardSkinPreview.renderedWidth = width;
+    g_standardSkinPreview.renderedHeight = height;
+    return g_standardSkinPreview.camera && g_standardSkinPreview.texture;
+}
+
+static CustomSkinCfg* FindCustomSkinForPreview(const std::string& name) {
+    if (name.empty())
+        return nullptr;
+    const std::string want = ToLowerAscii(name);
+    for (auto& skin : g_customSkins) {
+        if (ToLowerAscii(skin.name) == want)
+            return &skin;
+    }
+    return nullptr;
+}
+
+static CustomSkinCfg* FindRandomSkinForPreview(int modelId, int variantIndex) {
+    SkinRandomPool* pool = FindRandomPoolForModelId(modelId);
+    if (!pool || variantIndex < 0 || variantIndex >= (int)pool->variants.size())
+        return nullptr;
+    return &pool->variants[(size_t)variantIndex];
+}
+
+static int GetPreviewBasePedModelId(int source, int requestedModelId) {
+    if (source == SKIN_PREVIEW_STANDARD || source == SKIN_PREVIEW_RANDOM) {
+        if (IsValidStandardSkinModel(requestedModelId))
+            return requestedModelId;
+    }
+    const int localModelId = OrcGetLocalPlayerModelId();
+    if (IsValidStandardSkinModel(localModelId))
+        return localModelId;
+    if (IsValidStandardSkinModel(g_standardSkinSelectedModelId))
+        return g_standardSkinSelectedModelId;
+    std::vector<std::pair<std::string, int>> skins;
+    OrcCollectPedSkins(skins);
+    if (!skins.empty())
+        return skins.front().second;
+    return -1;
+}
+
+static void RenderStandardSkinPreviewRequest() {
+    if (!g_standardSkinPreview.requestDirty)
+        return;
+    g_standardSkinPreview.requestDirty = false;
+    const int source = g_standardSkinPreview.requestedSource;
+    const int requestedModelId = g_standardSkinPreview.requestedModelId;
+    CustomSkinCfg* overlaySkin = nullptr;
+    if (source == SKIN_PREVIEW_CUSTOM)
+        overlaySkin = FindCustomSkinForPreview(g_standardSkinPreview.requestedName);
+    else if (source == SKIN_PREVIEW_RANDOM)
+        overlaySkin = FindRandomSkinForPreview(requestedModelId, g_standardSkinPreview.requestedVariantIndex);
+
+    const int modelId = GetPreviewBasePedModelId(source, requestedModelId);
+    const int width = std::max(64, std::min(g_standardSkinPreview.requestedWidth, 1024));
+    const int height = std::max(64, std::min(g_standardSkinPreview.requestedHeight, 1024));
+    if (!IsValidStandardSkinModel(modelId) ||
+        ((source == SKIN_PREVIEW_CUSTOM || source == SKIN_PREVIEW_RANDOM) && !overlaySkin) ||
+        !EnsureStandardSkinPreviewResources(width, height)) {
+        g_standardSkinPreview.renderedModelId = -1;
+        return;
+    }
+    static int s_previewLogLeft = 12;
+    if (s_previewLogLeft > 0) {
+        OrcLogInfo("SkinPreview: render request source=%d model=%d variant=%d name=%s size=%dx%d",
+                   source,
+                   modelId,
+                   g_standardSkinPreview.requestedVariantIndex,
+                   g_standardSkinPreview.requestedName.c_str(),
+                   width,
+                   height);
+        --s_previewLogLeft;
+    }
+
+    const bool wasLoaded = CStreaming::HasModelLoaded(modelId) != 0;
+    if (!wasLoaded) {
+        CStreaming::RequestModel(modelId, 0);
+        for (int i = 0; i < 32 && !CStreaming::HasModelLoaded(modelId); ++i)
+            CStreaming::LoadAllRequestedModels(false);
+        if (!CStreaming::HasModelLoaded(modelId)) {
+            g_standardSkinPreview.renderedModelId = -1;
+            return;
+        }
+    }
+
+    std::uint32_t handle = 0;
+    Command<Commands::CREATE_CHAR>(0, modelId, 0.0f, 0.0f, 0.0f, &handle);
+    CPed* previewPed = CPools::GetPed(handle);
+    if (!previewPed || !previewPed->m_pRwClump) {
+        if (handle)
+            Command<Commands::DELETE_CHAR>(handle);
+        if (!wasLoaded)
+            CStreaming::RemoveModel(modelId);
+        g_standardSkinPreview.renderedModelId = -1;
+        return;
+    }
+
+    previewPed->SetIdle();
+    previewPed->Teleport({ 0.0f, 0.0f, 0.0f }, false);
+    previewPed->bCollisionProcessed = false;
+    previewPed->bUsesCollision = false;
+    previewPed->SetHeading(g_standardSkinPreview.requestedYawDeg * D2R);
+    previewPed->UpdateRwFrame();
+    RpAnimBlendClumpUpdateAnimations(previewPed->m_pRwClump, 100.0f, true);
+
+    CVisibilityPlugins::SetRenderWareCamera(g_standardSkinPreview.camera);
+    RwRGBA clearColor = { 18, 20, 24, 255 };
+
+    bool rendered = false;
+    RwCameraClear(g_standardSkinPreview.camera, &clearColor, rwCAMERACLEARIMAGE | rwCAMERACLEARZ);
+    if (RwCameraBeginUpdate(g_standardSkinPreview.camera)) {
+        if (g_standardSkinPreview.light && g_standardSkinPreview.lightFrame && Scene.m_pWorld) {
+            RpWorldAddLight(Scene.m_pWorld, g_standardSkinPreview.light);
+            g_standardSkinPreview.lightInWorld = true;
+        }
+
+        int oldCull = 0, oldZT = 0, oldZW = 0, oldShade = 0, oldFog = 0;
+        RwRenderStateGet(rwRENDERSTATECULLMODE,     &oldCull);
+        RwRenderStateGet(rwRENDERSTATEZTESTENABLE,  &oldZT);
+        RwRenderStateGet(rwRENDERSTATEZWRITEENABLE, &oldZW);
+        RwRenderStateGet(rwRENDERSTATESHADEMODE,    &oldShade);
+        RwRenderStateGet(rwRENDERSTATEFOGENABLE,    &oldFog);
+        int v = rwCULLMODECULLBACK; RwRenderStateSet(rwRENDERSTATECULLMODE, reinterpret_cast<void*>(v));
+        v = TRUE; RwRenderStateSet(rwRENDERSTATEZTESTENABLE, reinterpret_cast<void*>(v));
+        v = TRUE; RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(v));
+        v = rwSHADEMODEGOURAUD; RwRenderStateSet(rwRENDERSTATESHADEMODE, reinterpret_cast<void*>(v));
+        v = FALSE; RwRenderStateSet(rwRENDERSTATEFOGENABLE, reinterpret_cast<void*>(v));
+
+        __try {
+            previewPed->Add();
+            previewPed->PreRender();
+            bool overlayRendered = false;
+            if (source == SKIN_PREVIEW_STANDARD)
+                CVisibilityPlugins::RenderEntity(previewPed, false, 999.0f);
+            else if (EnsureCustomSkinLoaded(*overlaySkin)) {
+                RenderSkinOnPed(previewPed, overlaySkin, false);
+                overlayRendered = true;
+            }
+            previewPed->Remove();
+            rendered = (source == SKIN_PREVIEW_STANDARD) || overlayRendered;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            OrcLogError("SkinPreview render: SEH ex=0x%08X source=%d model=%d", GetExceptionCode(), source, modelId);
+            __try { previewPed->Remove(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            rendered = false;
+        }
+
+        RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(oldCull));
+        RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(oldZT));
+        RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(oldZW));
+        RwRenderStateSet(rwRENDERSTATESHADEMODE,    reinterpret_cast<void*>(oldShade));
+        RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(oldFog));
+
+        if (g_standardSkinPreview.light && g_standardSkinPreview.lightInWorld && Scene.m_pWorld) {
+            RpWorldRemoveLight(Scene.m_pWorld, g_standardSkinPreview.light);
+            g_standardSkinPreview.lightInWorld = false;
+        }
+        __try {
+            RwCameraEndUpdate(g_standardSkinPreview.camera);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            OrcLogError("StandardSkinPreview CameraEndUpdate: SEH ex=0x%08X model=%d", GetExceptionCode(), modelId);
+            DestroyStandardSkinPreview();
+            rendered = false;
+        }
+    }
+
+    if (Scene.m_pCamera)
+        CVisibilityPlugins::SetRenderWareCamera(Scene.m_pCamera);
+    Command<Commands::DELETE_CHAR>(handle);
+    if (!wasLoaded)
+        CStreaming::RemoveModel(modelId);
+
+    g_standardSkinPreview.renderedSource = source;
+    g_standardSkinPreview.renderedModelId = rendered ? modelId : -1;
+    g_standardSkinPreview.renderedVariantIndex = rendered ? g_standardSkinPreview.requestedVariantIndex : -1;
+    g_standardSkinPreview.renderedName = rendered ? g_standardSkinPreview.requestedName : std::string{};
+    g_standardSkinPreview.renderedYawDeg = g_standardSkinPreview.requestedYawDeg;
+}
+
+void OrcRequestSkinPreview(int source, int modelId, int variantIndex, const char* name, int width, int height, float yawDeg) {
+    if (source < SKIN_PREVIEW_STANDARD || source > SKIN_PREVIEW_RANDOM)
+        source = SKIN_PREVIEW_STANDARD;
+    const std::string requestedName = name ? name : "";
+    width = std::max(64, std::min(width, 1024));
+    height = std::max(64, std::min(height, 1024));
+    const int expectedRenderedModelId = GetPreviewBasePedModelId(source, modelId);
+    if (g_standardSkinPreview.requestedSource == source &&
+        g_standardSkinPreview.requestedModelId == modelId &&
+        g_standardSkinPreview.requestedVariantIndex == variantIndex &&
+        g_standardSkinPreview.requestedName == requestedName &&
+        g_standardSkinPreview.requestedWidth == width &&
+        g_standardSkinPreview.requestedHeight == height &&
+        fabsf(g_standardSkinPreview.requestedYawDeg - yawDeg) < 0.01f &&
+        g_standardSkinPreview.renderedSource == source &&
+        g_standardSkinPreview.renderedVariantIndex == variantIndex &&
+        g_standardSkinPreview.renderedName == requestedName &&
+        g_standardSkinPreview.renderedModelId == expectedRenderedModelId) {
+        return;
+    }
+    g_standardSkinPreview.requestedSource = source;
+    g_standardSkinPreview.requestedModelId = modelId;
+    g_standardSkinPreview.requestedVariantIndex = variantIndex;
+    g_standardSkinPreview.requestedName = requestedName;
+    g_standardSkinPreview.requestedWidth = width;
+    g_standardSkinPreview.requestedHeight = height;
+    g_standardSkinPreview.requestedYawDeg = yawDeg;
+    g_standardSkinPreview.requestDirty = true;
+    if (g_standardSkinPreview.renderedSource != source ||
+        g_standardSkinPreview.renderedModelId != expectedRenderedModelId ||
+        g_standardSkinPreview.renderedVariantIndex != variantIndex ||
+        g_standardSkinPreview.renderedName != requestedName ||
+        g_standardSkinPreview.renderedWidth != width ||
+        g_standardSkinPreview.renderedHeight != height) {
+        g_standardSkinPreview.renderedModelId = -1;
+    }
+}
+
+void* OrcGetSkinPreviewTexture() {
+    if (g_standardSkinPreview.renderedModelId < 0 ||
+        !g_standardSkinPreview.texture ||
+        !g_standardSkinPreview.texture->raster) {
+        return nullptr;
+    }
+    return *reinterpret_cast<void**>(g_standardSkinPreview.texture->raster + 1);
+}
+
+static void OnStandardSkinPreviewRenderEvent() {
+    __try {
+        RenderStandardSkinPreviewRequest();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("StandardSkinPreview before-main-render: SEH ex=0x%08X", GetExceptionCode());
+        if (Scene.m_pCamera)
+            CVisibilityPlugins::SetRenderWareCamera(Scene.m_pCamera);
+        DestroyStandardSkinPreview();
+        g_standardSkinPreview.renderedModelId = -1;
+        g_standardSkinPreview.requestDirty = false;
+    }
 }
 
 static void AppendFormat(std::string& out, const char* fmt, ...) {
@@ -2192,6 +3713,12 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "ConsiderWeaponSkills=%d\n", g_considerWeaponSkills ? 1 : 0);
     AppendFormat(out, "CustomObjects=%d\n", g_renderCustomObjects ? 1 : 0);
     AppendFormat(out, "StandardObjects=%d\n", g_renderStandardObjects ? 1 : 0);
+    AppendFormat(out, "WeaponReplacement=%d\n", g_weaponReplacementEnabled ? 1 : 0);
+    AppendFormat(out, "WeaponReplacementOnBody=%d\n", g_weaponReplacementOnBody ? 1 : 0);
+    AppendFormat(out, "WeaponReplacementInHands=%d\n", g_weaponReplacementInHands ? 1 : 0);
+    AppendFormat(out, "WeaponTextures=%d\n", g_weaponTexturesEnabled ? 1 : 0);
+    AppendFormat(out, "WeaponTextureNickMode=%d\n", g_weaponTextureNickMode ? 1 : 0);
+    AppendFormat(out, "WeaponTextureRandomMode=%d\n", g_weaponTextureRandomMode ? 1 : 0);
     AppendFormat(out, "SkinMode=%d\n", g_skinModeEnabled ? 1 : 0);
     AppendFormat(out, "SkinHideBasePed=%d\n", g_skinHideBasePed ? 1 : 0);
     AppendFormat(out, "SkinNickMode=%d\n", g_skinNickMode ? 1 : 0);
@@ -2334,6 +3861,7 @@ struct RenderedWeapon {
     int       modelId;
     int       slot;
     RwObject* rwObject;
+    std::string replacementKey;
 };
 static constexpr int kMax = 20;
 static RenderedWeapon g_rendered[kMax] = {};
@@ -2351,15 +3879,11 @@ static int FindFree(RenderedWeapon* arr) {
 }
 
 static void DestroyRendered(RenderedWeapon& r) {
-    if (!r.rwObject) { r.active = false; return; }
-    if (r.rwObject->type == rpCLUMP) {
-        RpClumpDestroy(reinterpret_cast<RpClump*>(r.rwObject));
-    } else if (r.rwObject->type == rpATOMIC) {
-        auto* a = reinterpret_cast<RpAtomic*>(r.rwObject);
-        RwFrame* f = RpAtomicGetFrame(a);
-        RpAtomicDestroy(a);
-        if (f) RwFrameDestroy(f);
+    if (!r.rwObject) {
+        r = {};
+        return;
     }
+    DestroyRwObjectInstance(r.rwObject);
     r = {};
 }
 
@@ -2442,9 +3966,9 @@ static void ApplyPendingLocalPlayerModel() {
         return;
     }
 
-    CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
+    CBaseModelInfo* mi = GetExistingStandardModelInfo(modelId);
     if (!mi || mi->GetModelType() != MODEL_INFO_PED) {
-        OrcLogError("ApplyPendingLocalPlayerModel: model %d is not MODEL_INFO_PED", modelId);
+        OrcLogError("ApplyPendingLocalPlayerModel: model %d is missing or is not MODEL_INFO_PED", modelId);
         return;
     }
 
@@ -2634,26 +4158,37 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
     int mid = info->m_nModelId;
     if (mid <= 0) return false;
 
-    auto* mi = CModelInfo::GetModelInfo(mid);
-    if (!mi || !mi->m_pRwObject) {
-        // Auto-request weapon model streaming (supports modded weapon.dat setups).
-        if (mid > 0 && !CStreaming::HasModelLoaded(mid)) {
-            static std::unordered_set<int> requested;
-            if (requested.insert(mid).second) {
-                CStreaming::RequestModel(mid, 0);
-                CStreaming::LoadAllRequestedModels(false);
-            }
-        }
-        return false;
-    }
-
     RwMatrix* bone = GetBoneMatrix(ped, wc.boneId);
     if (!bone) return false;
 
     RwMatrix mtx{};
     std::memcpy(&mtx, bone, sizeof(RwMatrix));
 
-    RwObject* inst = mi->CreateInstance(&mtx);
+    std::string replacementKey;
+    RwObject* inst = nullptr;
+    if (g_weaponReplacementEnabled && g_weaponReplacementOnBody) {
+        if (WeaponReplacementAsset* asset = ResolveUsableWeaponReplacementAssetForPed(ped, wt, true)) {
+            inst = CloneWeaponReplacementObject(*asset);
+            if (inst)
+                replacementKey = asset->key;
+        }
+    }
+
+    if (!inst) {
+        auto* mi = CModelInfo::GetModelInfo(mid);
+        if (!mi || !mi->m_pRwObject) {
+            // Auto-request weapon model streaming (supports modded weapon.dat setups).
+            if (mid > 0 && !CStreaming::HasModelLoaded(mid)) {
+                static std::unordered_set<int> requested;
+                if (requested.insert(mid).second) {
+                    CStreaming::RequestModel(mid, 0);
+                    CStreaming::LoadAllRequestedModels(false);
+                }
+            }
+            return false;
+        }
+        inst = mi->CreateInstance(&mtx);
+    }
     if (!inst) return false;
 
     // Сброс render-callback на дефолтный RW + leak материалов (см. InitAtomicCB).
@@ -2661,20 +4196,22 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
         RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), InitAttachmentAtomicCB, nullptr);
     } else if (inst->type == rpATOMIC) {
         InitAttachmentAtomicCB(reinterpret_cast<RpAtomic*>(inst), nullptr);
+    } else {
+        DestroyRwObjectInstance(inst);
+        return false;
     }
 
     int fi = FindFree(arr);
     if (fi < 0) {
         OrcLogError("CreateWeaponInstance: no free slot (weapon type %d)", wt);
-        if (inst->type == rpCLUMP) RpClumpDestroy(reinterpret_cast<RpClump*>(inst));
+        DestroyRwObjectInstance(inst);
         return false;
     }
-    arr[fi] = { true, wt, secondary, mid, 0, inst };
+    arr[fi] = { true, wt, secondary, mid, slot, inst, replacementKey };
 
     static std::unordered_set<int> logged;
     if (!secondary && logged.insert(wt).second) {
     }
-    (void)slot;
     return true;
 }
 
@@ -2710,16 +4247,244 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
 
     CVector lightPos = { bone->pos.x, bone->pos.y, bone->pos.z };
     ApplyAttachmentLightingForPed(ped, lightPos);
+    WeaponTextureAsset* textureAsset = ResolveUsableWeaponTextureAssetForPed(ped, r.weaponType, true);
+    ApplyWeaponTextureToRwObject(r.rwObject, textureAsset);
 
     if (r.rwObject->type == rpCLUMP) {
         auto* clump = reinterpret_cast<RpClump*>(r.rwObject);
-        if (!clump) return;
+        if (!clump) {
+            RestoreWeaponTextureOverrides();
+            return;
+        }
         RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
         RpClumpRender(clump);
     } else {
         PrepAtomicCB(atomic, nullptr);
         atomic->renderCallBack(atomic);
     }
+    RestoreWeaponTextureOverrides();
+}
+
+static RwFrame* GetRwObjectFrameForRender(RwObject* object) {
+    if (!object)
+        return nullptr;
+    if (object->type == rpATOMIC)
+        return RpAtomicGetFrame(reinterpret_cast<RpAtomic*>(object));
+    if (object->type == rpCLUMP)
+        return RpClumpGetFrame(reinterpret_cast<RpClump*>(object));
+    return nullptr;
+}
+
+static void SetRwObjectMatrixForRender(RwObject* object, const RwMatrix& matrix) {
+    RwFrame* frame = GetRwObjectFrameForRender(object);
+    if (!frame)
+        return;
+    std::memcpy(RwFrameGetMatrix(frame), &matrix, sizeof(RwMatrix));
+    RwMatrixUpdate(RwFrameGetMatrix(frame));
+    RwFrameUpdateObjects(frame);
+}
+
+static void RenderPreparedRwObject(RwObject* object) {
+    if (!object)
+        return;
+    if (object->type == rpCLUMP) {
+        RpClump* clump = reinterpret_cast<RpClump*>(object);
+        RpClumpForAllAtomics(clump, PrepAtomicCB, nullptr);
+        RpClumpRender(clump);
+    } else if (object->type == rpATOMIC) {
+        RpAtomic* atomic = reinterpret_cast<RpAtomic*>(object);
+        PrepAtomicCB(atomic, nullptr);
+        if (atomic->renderCallBack)
+            atomic->renderCallBack(atomic);
+        else
+            RpAtomicRender(atomic);
+    }
+}
+
+struct HeldWeaponReplacementState {
+    int weaponType = 0;
+    std::string replacementKey;
+    RwObject* rwObject = nullptr;
+    RwObject* originalObject = nullptr;
+    RwMatrix matrix{};
+    bool captureActive = false;
+};
+
+static std::unordered_map<int, HeldWeaponReplacementState> g_heldWeaponReplacements;
+
+static int GetPedCurrentWeaponType(CPed* ped) {
+    if (!ped)
+        return 0;
+    const unsigned char slot = ped->m_nSelectedWepSlot;
+    if (slot >= 13)
+        return 0;
+    const int wt = (int)ped->m_aWeapons[slot].m_eWeaponType;
+    if (wt <= 0)
+        return 0;
+    CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+    const bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+    if (needsAmmo && ped->m_aWeapons[slot].m_nAmmoTotal == 0)
+        return 0;
+    return wt;
+}
+
+static bool ShouldReplaceHeldWeaponForPed(CPed* ped) {
+    if (!g_enabled || !g_weaponReplacementEnabled || !g_weaponReplacementInHands || !ped)
+        return false;
+    CPlayerPed* player = FindPlayerPed(0);
+    if (player && ped == player)
+        return true;
+    if (!g_renderAllPedsWeapons || !player)
+        return false;
+    const CVector& pp = player->GetPosition();
+    const CVector& p = ped->GetPosition();
+    const float dx = p.x - pp.x;
+    const float dy = p.y - pp.y;
+    const float dz = p.z - pp.z;
+    return (dx * dx + dy * dy + dz * dz) <= (g_renderAllPedsRadius * g_renderAllPedsRadius);
+}
+
+static bool ShouldTextureHeldWeaponForPed(CPed* ped) {
+    if (!g_enabled || !g_weaponTexturesEnabled || !ped)
+        return false;
+    CPlayerPed* player = FindPlayerPed(0);
+    if (player && ped == player)
+        return true;
+    if (!g_renderAllPedsWeapons || !player)
+        return false;
+    const CVector& pp = player->GetPosition();
+    const CVector& p = ped->GetPosition();
+    const float dx = p.x - pp.x;
+    const float dy = p.y - pp.y;
+    const float dz = p.z - pp.z;
+    return (dx * dx + dy * dy + dz * dz) <= (g_renderAllPedsRadius * g_renderAllPedsRadius);
+}
+
+static void PrepareHeldWeaponTextureBefore(CPed* ped) {
+    if (!ShouldTextureHeldWeaponForPed(ped) || !ped->m_pWeaponObject)
+        return;
+    const int wt = GetPedCurrentWeaponType(ped);
+    if (wt <= 0)
+        return;
+    WeaponTextureAsset* asset = ResolveUsableWeaponTextureAssetForPed(ped, wt, true);
+    ApplyWeaponTextureToRwObject(ped->m_pWeaponObject, asset);
+}
+
+static void DestroyAllHeldWeaponReplacementInstances() {
+    for (auto& kv : g_heldWeaponReplacements) {
+        kv.second.captureActive = false;
+        kv.second.originalObject = nullptr;
+        DestroyRwObjectInstance(kv.second.rwObject);
+    }
+    g_heldWeaponReplacements.clear();
+}
+
+static void PruneHeldWeaponReplacementInstances() {
+    if (!CPools::ms_pPedPool) {
+        DestroyAllHeldWeaponReplacementInstances();
+        return;
+    }
+    std::unordered_set<int> alive;
+    for (int i = 0; i < CPools::ms_pPedPool->m_nSize; ++i) {
+        CPed* ped = CPools::ms_pPedPool->GetAt(i);
+        if (ped)
+            alive.insert(CPools::GetPedRef(ped));
+    }
+    for (auto it = g_heldWeaponReplacements.begin(); it != g_heldWeaponReplacements.end();) {
+        if (alive.find(it->first) == alive.end()) {
+            DestroyRwObjectInstance(it->second.rwObject);
+            it = g_heldWeaponReplacements.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void PrepareHeldWeaponReplacementBefore(CPed* ped) {
+    if (!ShouldReplaceHeldWeaponForPed(ped) || !ped->m_pWeaponObject)
+        return;
+    const int wt = GetPedCurrentWeaponType(ped);
+    if (wt <= 0)
+        return;
+    WeaponReplacementAsset* asset = ResolveUsableWeaponReplacementAssetForPed(ped, wt, true);
+    if (!asset)
+        return;
+
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return;
+    HeldWeaponReplacementState& state = g_heldWeaponReplacements[pedRef];
+    if (!state.rwObject || state.weaponType != wt || state.replacementKey != asset->key) {
+        DestroyRwObjectInstance(state.rwObject);
+        state.rwObject = CloneWeaponReplacementObject(*asset);
+        state.weaponType = wt;
+        state.replacementKey = asset->key;
+    }
+    if (!state.rwObject)
+        return;
+
+    if (RwFrame* frame = GetRwObjectFrameForRender(ped->m_pWeaponObject)) {
+        std::memcpy(&state.matrix, RwFrameGetMatrix(frame), sizeof(RwMatrix));
+    } else if (RwMatrix* bone = GetBoneMatrix(ped, BONE_R_HAND)) {
+        std::memcpy(&state.matrix, bone, sizeof(RwMatrix));
+    } else {
+        return;
+    }
+    state.originalObject = ped->m_pWeaponObject;
+    state.captureActive = true;
+    ped->m_pWeaponObject = nullptr;
+}
+
+static void RestoreHeldWeaponReplacementAfter(CPed* ped) {
+    if (!ped)
+        return;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return;
+    auto it = g_heldWeaponReplacements.find(pedRef);
+    if (it == g_heldWeaponReplacements.end() || !it->second.captureActive)
+        return;
+
+    HeldWeaponReplacementState& state = it->second;
+    ped->m_pWeaponObject = state.originalObject;
+    state.originalObject = nullptr;
+    state.captureActive = false;
+    if (!state.rwObject)
+        return;
+
+    SetRwObjectMatrixForRender(state.rwObject, state.matrix);
+
+    int oldCull = 0, oldZT = 0, oldZW = 0, oldShade = 0, oldFog = 0;
+    RwRenderStateGet(rwRENDERSTATECULLMODE,     &oldCull);
+    RwRenderStateGet(rwRENDERSTATEZTESTENABLE,  &oldZT);
+    RwRenderStateGet(rwRENDERSTATEZWRITEENABLE, &oldZW);
+    RwRenderStateGet(rwRENDERSTATESHADEMODE,    &oldShade);
+    RwRenderStateGet(rwRENDERSTATEFOGENABLE,    &oldFog);
+
+    int v = rwCULLMODECULLBACK; RwRenderStateSet(rwRENDERSTATECULLMODE, reinterpret_cast<void*>(v));
+    v = TRUE; RwRenderStateSet(rwRENDERSTATEZTESTENABLE, reinterpret_cast<void*>(v));
+    v = TRUE; RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(v));
+    v = rwSHADEMODEGOURAUD; RwRenderStateSet(rwRENDERSTATESHADEMODE, reinterpret_cast<void*>(v));
+    v = FALSE; RwRenderStateSet(rwRENDERSTATEFOGENABLE, reinterpret_cast<void*>(v));
+
+    CVector lightPos = { state.matrix.pos.x, state.matrix.pos.y, state.matrix.pos.z };
+    ApplyAttachmentLightingForPed(ped, lightPos);
+    WeaponTextureAsset* textureAsset = ResolveUsableWeaponTextureAssetForPed(ped, state.weaponType, true);
+    ApplyWeaponTextureToRwObject(state.rwObject, textureAsset);
+    RenderPreparedRwObject(state.rwObject);
+    RestoreWeaponTextureOverrides();
+
+    RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(oldCull));
+    RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(oldZT));
+    RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(oldZW));
+    RwRenderStateSet(rwRENDERSTATESHADEMODE,    reinterpret_cast<void*>(oldShade));
+    RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(oldFog));
+}
+
+static void ClearAllWeaponReplacementInstances() {
+    ClearAll();
+    ClearAllOtherPeds();
+    DestroyAllHeldWeaponReplacementInstances();
 }
 
 static bool PedHasWeaponType(CPed* ped, int wt) {
@@ -2831,6 +4596,11 @@ static RenderedStandardObject* EnsureStandardObjectInstance(CPed* ped, const Sta
     if (!ped || cfg.modelId < 0 || cfg.slot <= 0) return nullptr;
     RwMatrix* bone = GetBoneMatrix(ped, p.boneId);
     if (!bone) return nullptr;
+    CBaseModelInfo* mi = GetExistingStandardObjectModelInfo(cfg.modelId);
+    if (!mi) {
+        DestroyStandardObjectInstancesForSlot(cfg.modelId, cfg.slot);
+        return nullptr;
+    }
 
     StandardObjectRuntimeKey key;
     key.ped = ped;
@@ -2839,10 +4609,6 @@ static RenderedStandardObject* EnsureStandardObjectInstance(CPed* ped, const Sta
     auto existing = g_renderedStandardObjects.find(key);
     if (existing != g_renderedStandardObjects.end() && existing->second.rwObject)
         return &existing->second;
-
-    CBaseModelInfo* mi = CModelInfo::GetModelInfo(cfg.modelId);
-    if (!mi || !IsValidStandardObjectModel(cfg.modelId))
-        return nullptr;
 
     if (!CStreaming::HasModelLoaded(cfg.modelId) || !mi->m_pRwObject) {
         const DWORD now = GetTickCount();
@@ -3041,9 +4807,9 @@ struct ResolvedPedSkin {
 
 static ResolvedPedSkin ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
     ResolvedPedSkin result;
-    if (!ped || !g_skinModeEnabled) return result;
-    CustomSkinCfg* selectedCustom = (g_skinSelectedSource == SKIN_SELECTED_CUSTOM) ? GetSelectedSkin() : nullptr;
-    StandardSkinCfg* selectedStandard = (g_skinSelectedSource == SKIN_SELECTED_STANDARD) ? GetSelectedStandardSkin() : nullptr;
+    if (!ped || (!g_skinModeEnabled && !g_skinRandomFromPools)) return result;
+    CustomSkinCfg* selectedCustom = (g_skinModeEnabled && g_skinSelectedSource == SKIN_SELECTED_CUSTOM) ? GetSelectedSkin() : nullptr;
+    StandardSkinCfg* selectedStandard = (g_skinModeEnabled && g_skinSelectedSource == SKIN_SELECTED_STANDARD) ? GetSelectedStandardSkin() : nullptr;
     const bool isLocalByPtr = (localPlayer && ped == localPlayer);
 
     if (g_skinNickMode && samp_bridge::IsSampBuildKnown()) {
@@ -3062,11 +4828,9 @@ static ResolvedPedSkin ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
                 result.standard = standardNickSkin;
                 return result;
             }
-            if (isLocal) {
-                if (g_skinLocalPreferSelected) {
-                    result.custom = selectedCustom;
-                    result.standard = selectedStandard;
-                }
+            if (isLocal && g_skinModeEnabled && g_skinLocalPreferSelected) {
+                result.custom = selectedCustom;
+                result.standard = selectedStandard;
                 return result;
             }
         }
@@ -3082,6 +4846,10 @@ static ResolvedPedSkin ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
     }
 
     if (isLocalByPtr) result.isLocalPed = true;
+    if (CustomSkinCfg* randomSkin = ResolveRandomSkinForPed(ped)) {
+        result.custom = randomSkin;
+        result.standard = nullptr;
+    }
     return result;
 }
 
@@ -3122,7 +4890,11 @@ static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
         s_fallbackLogLeft--;
     }
     ApplyAttachmentLightingForPed(ped, boundCentre, 1.0f);
+    const char* remapKey = sel->remapKey.empty() ? sel->name.c_str() : sel->remapKey.c_str();
+    const char* remapFallback = sel->remapFallbackKey.empty() ? nullptr : sel->remapFallbackKey.c_str();
+    OrcTextureRemapApplyToClumpBefore(ped, clump, remapKey, remapFallback, sel->txdSlot);
     OrcTryRpClumpRender(clump);
+    OrcTextureRemapRestoreAfter();
     if (lit)
         OrcTryPedRemoveLighting(ped);
 }
@@ -3159,7 +4931,12 @@ static void RenderStandardSkinOnPed(CPed* ped, StandardSkinCfg* sel, bool isLoca
     CVector boundCentre{};
     ped->GetBoundCentre(boundCentre);
     ApplyAttachmentLightingForPed(ped, boundCentre, 1.0f);
+    int txdIndex = -1;
+    if (CBaseModelInfo* mi = CModelInfo::GetModelInfo(sel->modelId))
+        txdIndex = mi->m_nTxdIndex;
+    OrcTextureRemapApplyToClumpBefore(ped, clump, sel->dffName.c_str(), nullptr, txdIndex);
     OrcTryRpClumpRender(clump);
+    OrcTextureRemapRestoreAfter();
     if (lit)
         OrcTryPedRemoveLighting(ped);
 }
@@ -3199,7 +4976,15 @@ static void SyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<cha
     for (int i = 0; i < kMax; i++) {
         if (!arr[i].active) continue;
         int wt = arr[i].weaponType;
-        const bool keep = (wt >= 0 && wt < maxWt) && (arr[i].secondary ? want2[wt] : want[wt]);
+        bool keep = (wt >= 0 && wt < maxWt) && (arr[i].secondary ? want2[wt] : want[wt]);
+        if (keep) {
+            const std::string desiredReplacementKey =
+                (g_weaponReplacementEnabled && g_weaponReplacementOnBody)
+                ? ResolveUsableWeaponReplacementKeyForPed(ped, wt, true)
+                : std::string{};
+            if (desiredReplacementKey != arr[i].replacementKey)
+                keep = false;
+        }
         if (!keep) DestroyRendered(arr[i]);
     }
     for (int wt = 1; wt < maxWt; wt++) if (want[wt])  CreateWeaponInstance(arr, wt, false, 0, ped);
@@ -3217,7 +5002,7 @@ static int RenderPedWeapons(CPed* ped, RenderedWeapon* arr) {
 }
 
 static void RenderSkinsForPeds(CPlayerPed* localPlayer) {
-    if (!localPlayer || !g_skinModeEnabled) return;
+    if (!localPlayer || (!g_skinModeEnabled && !g_skinRandomFromPools)) return;
     g_skinCanAnimate = false;
     if (g_skinRandomFromPools)
         PrunePedRandomSkinMap();
@@ -3247,6 +5032,9 @@ static void SyncAndRender() {
     if (!g_enabled) {
         ClearAll();
         ClearAllOtherPeds();
+        DestroyAllHeldWeaponReplacementInstances();
+        RestoreWeaponTextureOverrides();
+        DestroyStandardSkinPreview();
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
         DestroyAllStandardObjectInstances();
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
@@ -3259,6 +5047,9 @@ static void SyncAndRender() {
     if (!player) {
         ClearAll();
         ClearAllOtherPeds();
+        DestroyAllHeldWeaponReplacementInstances();
+        RestoreWeaponTextureOverrides();
+        DestroyStandardSkinPreview();
         for (auto& o : g_customObjects) DestroyCustomObjectInstance(o);
         DestroyAllStandardObjectInstances();
         for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
@@ -3267,6 +5058,10 @@ static void SyncAndRender() {
         OrcTextureRemapClearRuntimeState();
         return;
     }
+    if (!g_weaponReplacementEnabled || !g_weaponReplacementInHands)
+        DestroyAllHeldWeaponReplacementInstances();
+    else
+        PruneHeldWeaponReplacementInstances();
 
     std::vector<char> suppress;
     suppress.assign(g_cfg.size(), 0);
@@ -3302,6 +5097,8 @@ static void SyncAndRender() {
             active++;
         }
     }
+    if (g_skinRandomFromPools && g_skinRandomPoolVariants > 0)
+        active++;
     if (g_renderStandardObjects && !g_standardObjects.empty())
         active++;
     if (g_skinNickMode && samp_bridge::IsSampBuildKnown() && (!g_customSkins.empty() || !g_standardSkins.empty()))
@@ -3455,7 +5252,19 @@ static void OnInitRw() {}
 static void OnDrawingEvent();
 static void OnPedRenderBefore(CPed* ped);
 static void OnPedRenderAfter(CPed* ped);
-static void OnD3dReset() { overlay::OnResetBefore(); overlay::OnResetAfter(); }
+static void OnD3dLost() {
+    DestroyStandardSkinPreview();
+    RestoreWeaponTextureOverrides();
+    OrcTextureRemapRestoreAfter();
+    overlay::OnResetBefore();
+}
+static void OnD3dReset() {
+    DestroyStandardSkinPreview();
+    RestoreWeaponTextureOverrides();
+    OrcTextureRemapRestoreAfter();
+    overlay::OnResetBefore();
+    overlay::OnResetAfter();
+}
 static void OnShutdownRw();
 
 static void OnDrawingEvent() {
@@ -3472,6 +5281,8 @@ static void OnDrawingEvent() {
             LoadStandardObjectsFromIni();
             DiscoverCustomSkins();
             LoadStandardSkinsFromIni();
+            DiscoverWeaponReplacements();
+            DiscoverWeaponTextures();
             overlay::SetDrawCallback(&OrcUiDraw);
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -3494,7 +5305,9 @@ static void OnDrawingEvent() {
 
 static void OnPedRenderBefore(CPed* ped) {
     OrcTextureRemapApplyBefore(ped);
-    if (!g_skinModeEnabled || !g_skinHideBasePed) return;
+    PrepareHeldWeaponReplacementBefore(ped);
+    PrepareHeldWeaponTextureBefore(ped);
+    if ((!g_skinModeEnabled && !g_skinRandomFromPools) || !g_skinHideBasePed) return;
     CPlayerPed* player = FindPlayerPed(0);
     if (!ped || !ped->m_pRwClump) return;
     ResolvedPedSkin skin = ResolveSkinForPed(ped, player);
@@ -3520,6 +5333,8 @@ static void OnPedRenderBefore(CPed* ped) {
 
 static void OnPedRenderAfter(CPed* ped) {
     OrcTextureRemapRestoreAfter();
+    RestoreHeldWeaponReplacementAfter(ped);
+    RestoreWeaponTextureOverrides();
     // Always try to finish previously captured hide snapshot, even if toggles changed.
     if (!g_hideSnapshotValid) return;
     if (!ped || ped != g_hiddenPed) return;
@@ -3543,6 +5358,10 @@ static void OnShutdownRw() {
     samp_bridge::Shutdown();
     for (int i = 0; i < kMax; i++) g_rendered[i] = {};
     ClearAllOtherPeds();
+    DestroyAllHeldWeaponReplacementInstances();
+    DestroyWeaponReplacementAssets();
+    DestroyWeaponTextureAssets();
+    DestroyStandardSkinPreview();
     g_hideSnapshotValid = false;
     g_hiddenPed = nullptr;
     g_hiddenClump = nullptr;
@@ -3578,10 +5397,12 @@ public:
         // проставит g_iniPath через LogInit().
         Events::initRwEvent.after += &OnInitRw;
         Events::drawingEvent += &OnDrawingEvent;
+        g_standardSkinPreviewRenderEvent += &OnStandardSkinPreviewRenderEvent;
         Events::processScriptsEvent += &OrcTextureRemapOnProcessScripts;
         Events::pedSetModelEvent += &OrcTextureRemapOnPedSetModel;
         Events::pedRenderEvent.before += &OnPedRenderBefore;
         Events::pedRenderEvent.after += &OnPedRenderAfter;
+        Events::d3dLostEvent += &OnD3dLost;
         Events::d3dResetEvent += &OnD3dReset;
         // При shutdownRwEvent сцена уже частично разобрана, RpClumpDestroy на
         // клонированных материалах падает в CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB

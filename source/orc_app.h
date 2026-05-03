@@ -16,6 +16,9 @@ extern char g_gameObjDir[MAX_PATH];
 extern char g_gameWeaponsDir[MAX_PATH];
 extern char g_gameSkinDir[MAX_PATH];
 extern char g_gameTextureDir[MAX_PATH];
+extern char g_gameWeaponGunsDir[MAX_PATH];
+extern char g_gameWeaponGunsNickDir[MAX_PATH];
+extern char g_gameWeaponTexturesDir[MAX_PATH];
 
 extern bool g_enabled;
 extern bool g_renderAllPedsWeapons;
@@ -30,6 +33,12 @@ extern float g_uiFontSize;
 extern bool g_considerWeaponSkills;
 extern bool g_renderCustomObjects;
 extern bool g_renderStandardObjects;
+extern bool g_weaponReplacementEnabled;
+extern bool g_weaponReplacementOnBody;
+extern bool g_weaponReplacementInHands;
+extern bool g_weaponTexturesEnabled;
+extern bool g_weaponTextureNickMode;
+extern bool g_weaponTextureRandomMode;
 
 extern std::vector<WeaponCfg> g_cfg;
 extern std::vector<WeaponCfg> g_cfg2;
@@ -81,6 +90,8 @@ void LoadConfig();
 void RefreshActivationRouting();
 void DiscoverCustomObjectsAndEnsureIni();
 void DiscoverCustomSkins();
+void DiscoverWeaponReplacements();
+void DiscoverWeaponTextures();
 void LoadStandardObjectsFromIni();
 void LoadStandardSkinsFromIni();
 void SaveStandardObjectListToIni();
@@ -109,9 +120,16 @@ const char* OrcTryGetPedModelNameById(int modelId);
 std::string GetPedStdSkinDffName(CPed* ped);
 bool ResolveWeaponsIniForSkinDff(const char* skinDffName, char* outPath, size_t outPathChars);
 bool OrcApplyLocalPlayerModelById(int modelId);
+int OrcGetLocalPlayerModelId();
 
 // Ped.dat DFF names with model ids (for UI lists).
 void OrcCollectPedSkins(std::vector<std::pair<std::string, int>>& out);
+void OrcCollectRandomSkinPools(std::vector<SkinRandomPoolInfo>& out);
+void OrcCollectRandomSkinPreviewVariants(std::vector<SkinPreviewRandomVariantInfo>& out);
+WeaponReplacementStats OrcGetWeaponReplacementStats();
+WeaponTextureStats OrcGetWeaponTextureStats();
+void OrcRequestSkinPreview(int source, int modelId, int variantIndex, const char* name, int width, int height, float yawDeg);
+void* OrcGetSkinPreviewTexture();
 void OrcCollectPedTextureRemapStats(std::vector<TextureRemapPedInfo>& out);
 bool OrcGetLocalPedTextureRemaps(TextureRemapPedInfo& out);
 bool OrcSetLocalPedTextureRemap(int slot, int remap);

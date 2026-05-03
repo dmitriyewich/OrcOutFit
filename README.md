@@ -2,7 +2,7 @@
 
 <img width="238" height="408" alt="kHKmcxq" src="https://github.com/user-attachments/assets/44e51b41-9600-4cb8-ae4e-611afc44ed08" />
 
-Нативный **ASI-плагин** для **GTA San Andreas 1.0 US** (x86), в том числе для **SA:MP**. Рисует оружие на теле педа, кастомные и стандартные игровые объекты, а также кастомные и стандартные скины поверх модели, с настройкой через **ImGui**-оверлей и INI-файлы.
+Нативный **ASI-плагин** для **GTA San Andreas 1.0 US** (x86), в том числе для **SA:MP**. Рисует оружие на теле педа, кастомные и стандартные игровые объекты, кастомные/стандартные/random-скины поверх модели, умеет менять DFF/TXD оружия и отдельные TXD-текстуры оружия, с настройкой через **ImGui**-оверлей и INI-файлы.
 
 **Репозиторий:** [github.com/dmitriyewich/OrcOutFit](https://github.com/dmitriyewich/OrcOutFit) — исходники, `.github/workflows`, профиль сборки Visual Studio и **`README.md`**. `context.md` и `README.txt` считаются локальными заметками по умолчанию и публикуются только по явному запросу; `AGENTS.md`, журнал агента (`.claude/work.md`) и правила Cursor остаются локальными.
 
@@ -24,6 +24,19 @@
 - Приоритет: пресет скина выше глобального `OrcOutFit.ini`.
 - Резолв `Weapons\<skin>.ini` кеширует найденные пути и отсутствующие файлы, чтобы режим всех ped не сканировал папку каждый кадр.
 
+### Замена моделей оружия
+- Подвкладка **Weapons → Weapon replacement** управляет заменой моделей оружия, которое OrcOutFit рисует на теле, и видимого оружия в руках.
+- Приоритет замены: **`OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff`** выше замены по скину; ник сравнивается без учёта регистра и без SA:MP color-кодов.
+- Замена по скину хранится в **`OrcOutFit\Weapons\Guns\<weapon>\<dff>.dff`**; random-варианты — в **`OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.dff`**.
+- Имя `<weapon>` берётся из `weapon.dat` / `LoadWeaponObject` и сравнивается без учёта регистра (`m4`, `ak47`, `desert_eagle` и т.п.).
+- Random-вариант закрепляется за ped/оружием/скином и выбирается через shuffle-bag, без файловых сканов в per-frame пути.
+
+### Текстуры оружия
+- Подвкладка **Weapons → Textures** управляет отдельной TXD-подменой оружия без замены DFF-модели.
+- Приоритет текстур: **`OrcOutFit\Weapons\Textures\Nick\<weapon>_<nick>.txd`** выше текстуры по скину; ник сравнивается без учёта регистра и без SA:MP color-кодов.
+- Текстура по скину хранится в **`OrcOutFit\Weapons\Textures\<weapon>\<dff>.txd`**; random-варианты — в **`OrcOutFit\Weapons\Textures\<weapon>\<dff>\*.txd`**.
+- Один ped получает один и тот же выбранный TXD-вариант для оружия на теле и видимого оружия в руках.
+
 ### Все педы в радиусе (опционально)
 - Режимы **«оружие у всех ped»** и **«объекты у всех ped»** с радиусом от локального игрока.
 - Для оружия используется отдельный per-ped cache инстансов; пресеты оружия подбираются по **`GetPedStdSkinDffName`**.
@@ -38,6 +51,7 @@
 ### Стандартные объекты игры
 - Подвкладка **Objects → Standard objects** добавляет игровые модели по **model id**. Повтор одного ID поддерживается слотами вида **`123#1`**, **`123#2`**.
 - Разрешены объектные типы моделей игры: atomic/time/weapon/clump/lod; ped и vehicle ID не принимаются.
+- ID дополнительно проверяется на существование в текущей игре/SA:MP-сборке: если модель удалена или не имеет streaming/RW-источника, она не добавляется и не рендерится.
 - Настройки крепления такие же, как у кастомных объектов: кость, offset, rotation, `Scale`, `ScaleX/Y/Z`, условие по оружию и `HideWeapons`.
 - Стандартные объекты используют тот же lighting path для attachment-ов, что оружие и кастомные объекты, и отдельные runtime-инстансы по ped/slot.
 - Список и настройки хранятся в **`OrcOutFit\Objects\StandardObjects.ini`**.
@@ -53,14 +67,28 @@
 
 ### Стандартные скины игры
 - Подвкладка **Skins → Standard skins** использует список стандартных ped из кеша `LoadPedObject`, сортированный по model id: **`Имя [ID]`**.
+- В список и примерку попадают только ped-модели, которые реально существуют в текущей игре/SA:MP-сборке.
 - Доступны два сценария: overlay стандартного ped-clump поверх текущего ped и кнопка **Wear this skin (local player)**, которая меняет модель локального игрока через `CPed::SetModelIndex`.
 - Выбранный overlay-источник хранится в `[SkinMode] SelectedSource=custom|standard`; стандартный выбор — в `[SkinMode] StandardSelected=<modelId>`.
 - Nick binding стандартных скинов хранится в **`OrcOutFit\Skins\StandardSkins.ini`**. Приоритет выбора: кастомный skin по нику → стандартный skin по нику → выбранный локальный skin при `SkinLocalPreferSelected=1`.
 - Стандартный overlay использует ту же цепочку освещения, что кастомный skin overlay: `SetupLighting` → `ApplyAttachmentLightingForPed` с `colourScale=1.0` → `RpClumpRender` → `RemoveLighting`.
 
+### Предпросмотр скинов
+- Подвкладка **Skins → Skin preview** показывает стандартные, кастомные и random-скины в отдельной D3D9 texture внутри ImGui.
+- Preview создаётся перед основным RenderWare-рендером по подходу `EntityRender`: отдельная camera texture/z-buffer, затем восстановление основной камеры.
+- Для custom/random preview используется тот же путь, что у overlay-скинов на ped: копирование позы по костям, `SetupLighting`, `ApplyAttachmentLightingForPed`, `RpClumpRender`, `RemoveLighting`.
+
+### Рандомные скины
+- Подвкладка **Skins → Random skins** включает random-пулы из **`OrcOutFit\Skins\Random\<dff>\*.dff`**.
+- Папка `<dff>` должна совпадать с именем стандартного ped из `LoadPedObject`, например `swfyst`.
+- Для ped с таким базовым DFF выбирается один случайный вариант из соответствующего пула; выбор закрепляется за ped и сбрасывается при смене модели, рескане или перезагрузке runtime-состояния.
+- Random-пулы применяются после привязок по нику и после выбранного локального overlay-скина, если `SkinLocalPreferSelected=1`.
+- Random-пулы могут работать отдельно от выбранного overlay-режима `SkinMode`: достаточно включить `RandomFromPools`.
+
 ### Texture remap стандартных ped
 - Подвкладка **Skins → Texture** включает PedFuncs-style замену текстур стандартных ped-моделей.
 - Если в TXD модели есть текстуры вида **`*_remap`**, плагин ищет базовую текстуру с именем до `_remap` и временно подменяет её в материалах ped перед рендером.
+- Remap применяется не только к базовому ped clump, но и к standard/custom/random overlay-скинам; для random-скина сначала используется имя варианта, затем fallback на DFF папки пула.
 - Для локального ped в UI доступны только реально найденные уникальные варианты, **Randomize local** и возврат к **Original textures**; PedFuncs-циклы по несуществующим номерам не используются.
 - **Random mode**: `Linked variant` (по умолчанию) выбирает общий remap-index для всего ped, а если у отдельного слота такого индекса нет — берёт случайный реальный вариант этого слота. Повтор того же варианта подряд не запрещается.
 - **Nick binding** для texture remap: текущий набор выбранных текстур можно сохранить для ника SA:MP. Binding имеет приоритет; если для ника binding не найден, используется random.
@@ -78,18 +106,19 @@
 
 ### Интерфейс
 - Вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**, **Settings**.
+- Внутри **Weapons** три подвкладки: **Weapon render** (крепление оружия на теле), **Weapon replacement** (замена моделей оружия по скину/random/нику) и **Textures** (TXD-текстуры оружия по скину/random/нику).
 - Внутри **Objects** две подвкладки: **Custom objects** (DFF из папки `Objects`) и **Standard objects** (модели игры по ID).
-- Внутри **Skins** три подвкладки: **Custom skins** (DFF поверх ped), **Standard skins** (ped-модели игры overlay / примерка) и **Texture** (`*_remap` для стандартных ped TXD).
+- Внутри **Skins** пять подвкладок: **Custom skins** (DFF поверх ped), **Standard skins** (ped-модели игры overlay / примерка), **Skin preview**, **Random skins** и **Texture** (`*_remap` для ped и overlay-скинов).
 - Интерфейс локализован на русский и английский язык; выбор хранится в **`[Main] Language=ru|en`** и переключается во вкладке **Settings**.
 - Кириллица в ImGui поддерживается через установленный шрифт Windows: основной **Arial**, fallback **Segoe UI / Tahoma / Calibri**. Путь к файлу берётся из реестра Windows Fonts (`HKLM` / `HKCU`) и системных каталогов Fonts, без жёсткой привязки к `C:\Windows\Fonts`; проект компилируется с **`/utf-8`**.
-- Базовый шрифт ImGui по умолчанию — **15 px**. Во вкладке **Settings** можно менять **Auto-scale UI**, ручной **UI scale** и **Font size**; значения сохраняются в `[Main] UiAutoScale`, `UiScale`, `UiFontSize`.
+- Базовый шрифт ImGui по умолчанию — **15 px**. Во вкладке **Settings** можно менять **Auto-scale UI** (по умолчанию выключен), ручной **UI scale** и **Font size**; значения сохраняются в `[Main] UiAutoScale`, `UiScale`, `UiFontSize`.
 - Стиль ImGui основан на `MyAsiModReshenie`: тёмная сине-серая палитра, более заметные рамки, мягкое скругление и голубой accent для активных элементов.
 - Основное окно ImGui можно перетаскивать, но нельзя увести за пределы клиентской области игры: активный drag зажимается до `Begin()` через текущий ImGui `MovingWindow`, поэтому окно не мигает при попытке вывести его за границы; позиция и размер также зажимаются при первом показе, смене масштаба/разрешения и resize.
 - Input/combo/checkbox/button-элементы в формах используют общий layout с правым запасом и шириной по внутренней области ячейки, чтобы контролы не уходили за правый край и под scrollbar.
 - Во вкладке **Settings** рядом с полем **ActivationKey** есть серый маркер **`(?)`** с подсказкой по допустимым значениям клавиши.
 - Список стандартных ped для редактирования/примерки: **сортировка по model id по возрастанию**, подписи **`Имя [ID]`**.
 - **Wear this skin (local player)** находится в **Skins → Standard skins** и меняет модель локального педа для превью: стриминг (`RequestModel` / `LoadAllRequestedModels`), затем `CPed::SetModelIndex` в начале следующего кадра (безопасно для clump).
-- Во вкладке **Weapons** оставлены только две кнопки сохранения:
+- В **Weapons → Weapon render** оставлены только две кнопки сохранения:
   - **Save to Global (`OrcOutFit.ini`)** — сохраняет весь набор оружия (primary + secondary) в глобальный INI.
   - **Save to skin (`OrcOutFit\Weapons`)** — сохраняет весь набор оружия (primary + secondary) в `Weapons\<dff>.ini`.
 - Сохранение INI выполняется пакетно: плагин собирает изменения в памяти и пишет файл одним проходом, чтобы не стопорить игру серией WinAPI INI-записей.
@@ -102,6 +131,10 @@
 - **Дубликаты объекта:** добавьте тот же ID повторно — появится следующий слот (`123#1`, `123#2`), каждый слот настраивается отдельно.
 - **Стандартный skin overlay:** откройте **Skins → Standard skins**, выберите ped model, в **Selected overlay skin source** выберите стандартный skin. Для локального игрока без ника включите **SkinLocalPreferSelected**.
 - **Примерка стандартного skin:** в **Skins → Standard skins** нажмите **Wear this skin (local player)** — модель локального игрока меняется через `CPed::SetModelIndex`.
+- **Предпросмотр skin:** откройте **Skins → Skin preview**, выберите источник Standard/Custom/Random и нужный вариант.
+- **Random skin pool:** положите варианты в `OrcOutFit\Skins\Random\<dff>\`, откройте **Skins → Random skins**, включите **Enable random skins** и нажмите **Rescan skins**.
+- **Замена оружия:** положите замену по скину в `OrcOutFit\Weapons\Guns\<weapon>\<dff>.dff`, random-варианты в `OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.dff`, а замену по нику в `OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff`; настройки находятся в **Weapons → Weapon replacement**.
+- **Текстуры оружия:** положите TXD по скину в `OrcOutFit\Weapons\Textures\<weapon>\<dff>.txd`, random-варианты в `OrcOutFit\Weapons\Textures\<weapon>\<dff>\*.txd`, а TXD по нику в `OrcOutFit\Weapons\Textures\Nick\<weapon>_<nick>.txd`; настройки находятся в **Weapons → Textures**.
 - **Привязка по нику:** в **Standard skins** включите nick binding, укажите ники через запятую и сохраните INI.
 
 ### SA:MP
@@ -131,7 +164,11 @@
    - `OrcOutFit\Objects` — кастомные объекты + их INI
    - `OrcOutFit\Objects\StandardObjects.ini` — список и настройки стандартных игровых объектов по ID
    - `OrcOutFit\Weapons` — опциональные пресеты оружия `<dff>.ini`
+   - `OrcOutFit\Weapons\Guns` — замены моделей оружия по скину и random-пулы оружия
+   - `OrcOutFit\Weapons\GunsNick` — замены моделей оружия по нику SA:MP
+   - `OrcOutFit\Weapons\Textures` — TXD-текстуры оружия по скину/random/нику
    - `OrcOutFit\Skins` — кастомные скины DFF/TXD
+   - `OrcOutFit\Skins\Random` — random-пулы скинов по базовому DFF ped
    - `OrcOutFit\Skins\StandardSkins.ini` — nick binding стандартных скинов
    - `OrcOutFit\Skins\Textures` — nick bindings для texture remap `<dff>.ini`
 
@@ -175,7 +212,7 @@
 | SA:MP | **`[Main] Command`** (по умолчанию **`/orcoutfit`**), настройка во вкладке **Settings**. Опционально **`SampAllowActivationKey=1`** |
 
 Удержание **ПКМ** отдаёт камере игры (меню может оставаться открытым).
-ImGui-рендер подключается через D3D9 hooks (`Present` / fallback `EndScene`, `Reset`) после первого drawable-кадра игры, поэтому одиночная игра не ждёт полной инициализации SA:MP. Для стабильности курсора/drag используется sticky-capture; в распознанном SA:MP периодически подтверждается `SetCursorMode`, а в одиночной игре и неизвестных сборках работает single-player fallback. При сбое рендера меню курсор и управление принудительно возвращаются игре.
+ImGui-рендер подключается через D3D9 hooks (`Present` / fallback `EndScene`, `Reset`) после первого drawable-кадра игры, поэтому одиночная игра не ждёт полной инициализации SA:MP. Для стабильности курсора/drag используется sticky-capture; в распознанном SA:MP периодически подтверждается `SetCursorMode`, а в одиночной игре и неизвестных сборках работает single-player fallback. `d3dLost`/`d3dReset` очищают render target предпросмотра и временные remap/weapon texture overrides. При сбое рендера меню курсор и управление принудительно возвращаются игре.
 
 ---
 
@@ -189,7 +226,7 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 | `ActivationKey` | Клавиша (SP и опционально SA:MP) |
 | `SampAllowActivationKey` | В SA:MP также разрешить клавишу (`0`/`1`) |
 | `Command` | Чат-команда (с `/`) |
-| `UiAutoScale` | `1` — автоматически масштабировать отступы, окно и контролы под текущее разрешение; `0` — только ручной `UiScale` |
+| `UiAutoScale` | `1` — автоматически масштабировать отступы, окно и контролы под текущее разрешение; `0` — только ручной `UiScale` (по умолчанию) |
 | `UiScale` | Ручной множитель масштаба интерфейса (`0.75..1.60`) |
 | `UiFontSize` | Базовый размер шрифта ImGui (`13..22`, по умолчанию `15`) |
 
@@ -202,6 +239,12 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 | `ConsiderWeaponSkills` | Dual wield по навыку |
 | `CustomObjects` | Рендер объектов из `Objects` |
 | `StandardObjects` | Рендер стандартных игровых объектов из `Objects\StandardObjects.ini` |
+| `WeaponReplacement` | Включить замену моделей оружия |
+| `WeaponReplacementOnBody` | Применять замену к оружию, которое OrcOutFit рисует на теле |
+| `WeaponReplacementInHands` | Применять замену к реальному видимому оружию в руках ped |
+| `WeaponTextures` | Включить TXD-текстуры оружия |
+| `WeaponTextureNickMode` | Включить приоритетные TXD-текстуры оружия по нику SA:MP |
+| `WeaponTextureRandomMode` | Включить random-пулы TXD-текстур оружия |
 | `SkinMode` | Режим overlay-скинов |
 | `SkinHideBasePed` | Скрыть базовый clump |
 | `SkinNickMode` | Привязка скинов по нику SA:MP |
@@ -222,7 +265,7 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 | `Selected` | Имя выбранного кастомного скина (basename `.dff`) |
 | `SelectedSource` | `custom` или `standard` — источник выбранного overlay-скина для локального игрока |
 | `StandardSelected` | Model id выбранного стандартного скина |
-| `RandomFromPools` | Ключ совместимости; скан random-пулов в текущей версии отключён |
+| `RandomFromPools` | `1` — включить random-пулы `OrcOutFit\Skins\Random\<dff>\*.dff`; `0` — выключить |
 
 ---
 
@@ -233,6 +276,26 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 ## INI стандартных объектов (`OrcOutFit\Objects\StandardObjects.ini`)
 
 `[Objects] Entries=123#1,123#2,...` хранит список добавленных игровых моделей. Настройки по ped skin хранятся в секциях **`[Object.<modelId>#<slot>.Skin.<dff_name>]`** с теми же ключами, что у кастомных объектов.
+
+---
+
+## Файлы замены оружия
+
+- `OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff/.txd` — замена по нику SA:MP, самый высокий приоритет.
+- `OrcOutFit\Weapons\Guns\<weapon>\<dff>.dff/.txd` — уникальная замена оружия для стандартного ped DFF.
+- `OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.dff/.txd` — random-варианты для такого же `<weapon>` и `<dff>`.
+
+Если TXD рядом с DFF не найден, модель не загружается и плагин использует обычную игровую модель.
+
+---
+
+## Файлы текстур оружия
+
+- `OrcOutFit\Weapons\Textures\Nick\<weapon>_<nick>.txd` — TXD по нику SA:MP, самый высокий приоритет.
+- `OrcOutFit\Weapons\Textures\<weapon>\<dff>.txd` — уникальная TXD-текстура оружия для стандартного ped DFF.
+- `OrcOutFit\Weapons\Textures\<weapon>\<dff>\*.txd` — random-варианты TXD для такого же `<weapon>` и `<dff>`.
+
+TXD должен содержать текстуры с теми же именами, что используются материалами текущей модели оружия.
 
 ---
 

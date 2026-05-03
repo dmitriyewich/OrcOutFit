@@ -13,8 +13,10 @@ constexpr int BONE_PELVIS = 2;
 constexpr int BONE_SPINE1 = 3;
 constexpr int BONE_R_CLAVIC = 21;
 constexpr int BONE_R_UPARM = 22;
+constexpr int BONE_R_HAND = 24;
 constexpr int BONE_L_CLAVIC = 31;
 constexpr int BONE_L_UPARM = 32;
+constexpr int BONE_L_HAND = 34;
 constexpr int BONE_L_THIGH = 41;
 constexpr int BONE_L_CALF = 42;
 constexpr int BONE_R_THIGH = 51;
@@ -60,6 +62,8 @@ struct CustomSkinCfg {
     std::string dffPath;
     std::string txdPath;
     std::string iniPath;
+    std::string remapKey;
+    std::string remapFallbackKey;
     bool bindToNick = false;
     std::string nickListCsv;
     std::vector<std::string> nicknames;
@@ -107,6 +111,37 @@ struct TextureRemapNickBindingInfo {
     bool enabled = true;
     std::string nickListCsv;
     int slotCount = 0;
+};
+
+struct SkinRandomPoolInfo {
+    std::string dffName;
+    int modelId = -1;
+    int variants = 0;
+};
+
+enum SkinPreviewSource {
+    SKIN_PREVIEW_STANDARD = 0,
+    SKIN_PREVIEW_CUSTOM = 1,
+    SKIN_PREVIEW_RANDOM = 2,
+};
+
+struct SkinPreviewRandomVariantInfo {
+    std::string label;
+    std::string poolDffName;
+    int modelId = -1;
+    int variantIndex = -1;
+};
+
+struct WeaponReplacementStats {
+    int uniqueSkinWeapons = 0;
+    int randomSkinWeapons = 0;
+    int nickWeapons = 0;
+};
+
+struct WeaponTextureStats {
+    int uniqueSkinTextures = 0;
+    int randomSkinTextures = 0;
+    int nickTextures = 0;
 };
 
 enum TextureRemapRandomMode {

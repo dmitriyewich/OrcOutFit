@@ -15,6 +15,8 @@
     X(SaveSettings, "Сохранить настройки", "Save settings") \
     X(TabMain, "Главная", "Main") \
     X(TabWeapons, "Оружие", "Weapons") \
+    X(TabWeaponRender, "Рендер оружия", "Weapon render") \
+    X(TabWeaponReplacement, "Замена оружия", "Weapon replacement") \
     X(TabObjects, "Объекты", "Objects") \
     X(TabSkins, "Скины", "Skins") \
     X(TabSettings, "Настройки", "Settings") \
@@ -22,7 +24,10 @@
     X(TabStandardObjects, "Стандартные объекты", "Standard objects") \
     X(TabCustomSkins, "Кастомные скины", "Custom skins") \
     X(TabStandardSkins, "Стандартные скины", "Standard skins") \
+    X(TabRandomSkins, "Рандомные скины", "Random skins") \
+    X(TabSkinPreview, "Предпросмотр скинов", "Skin preview") \
     X(TabTexture, "Текстуры", "Texture") \
+    X(TabWeaponTextures, "Текстуры", "Textures") \
     X(BoneNone, "(нет)", "(none)") \
     X(BoneRoot, "Корень", "Root") \
     X(BonePelvis, "Таз", "Pelvis") \
@@ -79,6 +84,7 @@
     X(ReloadIni, "Перезагрузить INI", "Reload INI") \
     X(RescanObjects, "Пересканировать объекты", "Rescan objects") \
     X(PedSkinEditingTarget, "Скин ped (цель редактирования) - из ped.dat / кеша LoadPedObject", "Ped skin (editing target) - from ped.dat / LoadPedObject cache") \
+    X(MySkin, "Мой скин", "My skin") \
     X(NoPedModelsInCacheReconnect, "В кеше пока нет моделей ped (загрузите мир / переподключитесь).", "No ped models in cache yet (load game world / reconnect).") \
     X(NoPedModelsInCache, "В кеше пока нет моделей ped.", "No ped models in cache yet.") \
     X(WearThisSkin, "Надеть этот скин (локальный игрок)", "Wear this skin (local player)") \
@@ -118,8 +124,21 @@
     X(Show, "Показывать", "Show") \
     X(SaveSkinSectionToObjectIni, "Сохранить [Skin.*] в INI объекта", "Save [Skin.*] to object .ini") \
     X(RescanObjectsFolder, "Пересканировать папку Objects", "Rescan Objects folder") \
-    X(CustomSkinsHint, "Кастомные скины - DFF/TXD в папке Skins. Пулы случайного выбора в интерфейсе отключены до реализации.", "Custom skins - DFF/TXD in Skins folder. Random pools UI is disabled until implemented.") \
+    X(CustomSkinsHint, "Кастомные скины - DFF/TXD в папке Skins.", "Custom skins - DFF/TXD in Skins folder.") \
     X(StandardSkinsHint, "Стандартные скины используют модели ped из игры: overlay поверх ped или примерка через SetModelIndex.", "Standard skins use game ped models: overlay on ped or preview via SetModelIndex.") \
+    X(StandardSkinPreview, "Предпросмотр", "Preview") \
+    X(StandardSkinPreviewUnavailable, "Предпросмотр пока недоступен.", "Preview is not available yet.") \
+    X(SkinPreviewSource, "Источник предпросмотра", "Preview source") \
+    X(SkinPreviewStandard, "Стандартный скин", "Standard skin") \
+    X(SkinPreviewCustom, "Кастомный скин", "Custom skin") \
+    X(SkinPreviewRandom, "Рандомный скин", "Random skin") \
+    X(SkinPreviewVariant, "Вариант", "Variant") \
+    X(SkinPreviewYaw, "Поворот", "Yaw") \
+    X(SkinPreviewHint, "Предпросмотр рендерится в отдельную D3D9-текстуру перед основным RenderWare-рендером и использует ту же позу/цепочку света, что overlay-скины.", "Preview renders into a separate D3D9 texture before the main RenderWare pass and uses the same pose/lighting path as overlay skins.") \
+    X(RandomSkinsHint, "Пулы берутся из OrcOutFit\\Skins\\Random\\<dff>\\*.dff и выбираются для ped с тем же DFF из ped.dat.", "Pools are read from OrcOutFit\\Skins\\Random\\<dff>\\*.dff and selected for peds with the same ped.dat DFF.") \
+    X(EnableRandomSkins, "Включить рандомные скины", "Enable random skins") \
+    X(RandomSkinPoolsFormat, "Пулов: %d, вариантов: %d", "Pools: %d, variants: %d") \
+    X(RandomSkinPoolRowFormat, "%s: %d вариант(ов)", "%s: %d variant(s)") \
     X(SelectedSkinSource, "Источник выбранного overlay-скина", "Selected overlay skin source") \
     X(SelectedCustomSkin, "Кастомный скин", "Custom skin") \
     X(SelectedStandardSkin, "Стандартный скин", "Standard skin") \
@@ -131,6 +150,18 @@
     X(SaveSkinIni, "Сохранить INI скина", "Save skin .ini") \
     X(SaveSkinModeSelection, "Сохранить выбор режима скина", "Save skin mode selection") \
     X(RescanSkins, "Пересканировать скины", "Rescan skins") \
+    X(WeaponReplacementHint, "Замена применяется к оружию OrcOutFit на теле и к видимому оружию в руках. По нику: Weapons\\GunsNick\\<weapon>_<nick>.dff. По скину: Weapons\\Guns\\<weapon>\\<dff>.dff или Weapons\\Guns\\<weapon>\\<dff>\\*.dff.", "Replacement applies to OrcOutFit body weapons and visible weapons in hands. By nick: Weapons\\GunsNick\\<weapon>_<nick>.dff. By skin: Weapons\\Guns\\<weapon>\\<dff>.dff or Weapons\\Guns\\<weapon>\\<dff>\\*.dff.") \
+    X(EnableWeaponReplacement, "Включить замену оружия", "Enable weapon replacement") \
+    X(ReplaceWeaponsOnBody, "Заменять оружие на теле", "Replace weapons on body") \
+    X(ReplaceWeaponsInHands, "Заменять оружие в руках", "Replace weapons in hands") \
+    X(WeaponReplacementStatsFormat, "Guns: %d уникальных, %d random. GunsNick: %d.", "Guns: %d unique, %d random. GunsNick: %d.") \
+    X(RescanWeaponReplacement, "Пересканировать замену оружия", "Rescan weapon replacement") \
+    X(EnableWeaponTextures, "Включить текстуры оружия", "Enable weapon textures") \
+    X(WeaponTextureNickBinding, "Текстуры оружия по нику (SA:MP)", "Weapon textures by nick (SA:MP)") \
+    X(WeaponTextureRandomMode, "Рандомные текстуры оружия", "Random weapon textures") \
+    X(WeaponTextureHint, "Текстуры применяются к оружию OrcOutFit на теле и к видимому оружию в руках. По нику: Weapons\\Textures\\Nick\\<weapon>_<nick>.txd. По скину: Weapons\\Textures\\<weapon>\\<dff>.txd или Weapons\\Textures\\<weapon>\\<dff>\\*.txd.", "Textures apply to OrcOutFit body weapons and visible weapons in hands. By nick: Weapons\\Textures\\Nick\\<weapon>_<nick>.txd. By skin: Weapons\\Textures\\<weapon>\\<dff>.txd or Weapons\\Textures\\<weapon>\\<dff>\\*.txd.") \
+    X(WeaponTextureStatsFormat, "Текстуры: %d уникальных, %d random, %d по нику.", "Textures: %d unique, %d random, %d by nick.") \
+    X(RescanWeaponTextures, "Пересканировать текстуры оружия", "Rescan weapon textures") \
     X(EnableTextureRemaps, "Включить замену текстур (*_remap)", "Enable texture remaps (*_remap)") \
     X(UnsupportedSampTextureNickBinding, "Неподдерживаемая сборка SA:MP - привязка текстур по нику неактивна.", "Unsupported SA:MP build - texture nick binding inactive.") \
     X(TextureNickBinding, "Привязка текстур по нику (SA:MP)", "Texture nick binding (SA:MP)") \

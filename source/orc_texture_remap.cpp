@@ -146,6 +146,8 @@ static std::string TextureRemapNormalizeNickForMatch(const char* nick) {
 struct PedTextureRemapState {
     int modelId = -1;
     int txdIndex = -1;
+    std::string dffName;
+    std::string fallbackDffName;
     bool scanned = false;
     bool nickBindingApplied = false;
     int nickBindingId = -1;
@@ -177,6 +179,7 @@ static int g_textureRemapGangHandsTxdIndex = 0;
 static RwTexDictionary* g_textureRemapGangHandsDict = nullptr;
 static unsigned int g_textureRemapCutsceneLastTime = 0;
 static std::unordered_map<int, PedTextureRemapState> g_pedTextureRemaps;
+static std::unordered_map<std::string, PedTextureRemapState> g_clumpTextureRemaps;
 static std::vector<TextureRemapRestoreEntry> g_textureRemapRestoreEntries;
 static std::unordered_map<std::string, std::vector<TextureRemapNickBinding>> g_textureRemapNickBindingsByDff;
 
@@ -508,19 +511,23 @@ static bool ApplyTextureRemapNickBindingToState(PedTextureRemapState& state, con
     return any;
 }
 
-static bool TryApplyTextureRemapManualNickBinding(
+static const char* TextureRemapPrimaryDff(const PedTextureRemapState& state) {
+    if (!state.dffName.empty())
+        return state.dffName.c_str();
+    return OrcTryGetPedModelNameById(state.modelId);
+}
+
+static bool TryApplyTextureRemapManualNickBindingForDff(
     PedTextureRemapState& state,
+    const char* dff,
     const std::string& nickLower,
     bool& matchedBinding
 ) {
-    matchedBinding = false;
-    if (!g_skinTextureRemapNickMode)
+    if (!dff || !dff[0])
         return false;
 
-    const char* dff = OrcTryGetPedModelNameById(state.modelId);
     const std::string key = TextureRemapDffKey(dff, state.modelId);
     LoadTextureRemapNickBindingsForDff(dff, state.modelId);
-
     auto it = g_textureRemapNickBindingsByDff.find(key);
     if (it == g_textureRemapNickBindingsByDff.end())
         return false;
@@ -541,6 +548,22 @@ static bool TryApplyTextureRemapManualNickBinding(
         }
         return false;
     }
+    return false;
+}
+
+static bool TryApplyTextureRemapManualNickBinding(
+    PedTextureRemapState& state,
+    const std::string& nickLower,
+    bool& matchedBinding
+) {
+    matchedBinding = false;
+    if (!g_skinTextureRemapNickMode)
+        return false;
+
+    if (TryApplyTextureRemapManualNickBindingForDff(state, TextureRemapPrimaryDff(state), nickLower, matchedBinding))
+        return true;
+    if (!state.fallbackDffName.empty())
+        return TryApplyTextureRemapManualNickBindingForDff(state, state.fallbackDffName.c_str(), nickLower, matchedBinding);
     return false;
 }
 
@@ -589,7 +612,7 @@ static bool ApplyTextureRemapAutoNickBinding(PedTextureRemapState& state, const 
     state.autoNickApplied = true;
     state.autoNickSlotCount = appliedSlots;
     if (state.autoNickLogKey != logKey) {
-        const char* dff = OrcTryGetPedModelNameById(state.modelId);
+        const char* dff = TextureRemapPrimaryDff(state);
         OrcLogInfo("texture remap auto nick: model=%d dff=%s nick=%s slots=%d",
                    state.modelId, dff ? dff : "?", nick ? nick : "", appliedSlots);
         state.autoNickLogKey = logKey;
@@ -769,6 +792,18 @@ static void CollectPedMaterialOriginalNames(CPed* ped, std::vector<TextureRemapO
     }
 }
 
+static void CollectClumpMaterialOriginalNames(RpClump* clump, std::vector<TextureRemapOriginalName>& originals) {
+    if (!clump)
+        return;
+    TextureRemapOriginalScanCtx ctx;
+    ctx.originals = &originals;
+    __try {
+        RpClumpForAllAtomics(clump, TextureRemapCollectOriginalAtomicCB, &ctx);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("texture remap clump material scan: SEH ex=0x%08X clump=%p", GetExceptionCode(), clump);
+    }
+}
+
 static void CollectAutoNickTextureCandidates(
     PedTextureRemapState& state,
     RwTexDictionary* dict,
@@ -832,6 +867,9 @@ static void CollectAutoNickTextureCandidates(
 static bool ScanTextureRemapsForPed(CPed* ped, int modelId, PedTextureRemapState& out) {
     out = PedTextureRemapState{};
     out.modelId = modelId;
+    const char* dff = OrcTryGetPedModelNameById(modelId);
+    if (dff && dff[0])
+        out.dffName = dff;
 
     CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
     if (!mi || mi->GetModelType() != MODEL_INFO_PED)
@@ -867,6 +905,56 @@ static bool ScanTextureRemapsForPed(CPed* ped, int modelId, PedTextureRemapState
     return true;
 }
 
+static bool ScanTextureRemapsForClump(
+    CPed* ped,
+    RpClump* clump,
+    int txdIndex,
+    const char* dffName,
+    const char* fallbackDffName,
+    PedTextureRemapState& out
+) {
+    out = PedTextureRemapState{};
+    out.modelId = ped ? (int)ped->m_nModelIndex : -1;
+    out.txdIndex = txdIndex;
+    if (dffName && dffName[0])
+        out.dffName = dffName;
+    if (fallbackDffName && fallbackDffName[0] && _stricmp(fallbackDffName, out.dffName.c_str()) != 0)
+        out.fallbackDffName = fallbackDffName;
+
+    RwTexDictionary* dict = GetTxdDictionaryByIndex(out.txdIndex);
+    if (!clump || !dict)
+        return false;
+
+    TextureRemapScanCtx ctx;
+    ctx.state = &out;
+    ctx.dict = dict;
+    __try {
+        RwTexDictionaryForAllTextures(dict, TextureRemapCollectTextureCB, &ctx);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("texture remap clump scan: SEH ex=0x%08X txd=%d dff=%s", GetExceptionCode(), out.txdIndex, out.dffName.c_str());
+        out = PedTextureRemapState{};
+        return false;
+    }
+
+    std::vector<TextureRemapOriginalName> materialOriginals;
+    CollectClumpMaterialOriginalNames(clump, materialOriginals);
+    CollectAutoNickTextureCandidates(out, dict, ctx.textures, materialOriginals);
+
+    out.scanned = true;
+    if (out.totalRemapTextures > 0 || out.totalAutoNickTextures > 0) {
+        SelectRandomTextureRemaps(out);
+        OrcLogInfo("texture remap clump scan: dff=%s fallback=%s model=%d txd=%d slots=%d variants=%d autoNick=%d",
+                   out.dffName.empty() ? "?" : out.dffName.c_str(),
+                   out.fallbackDffName.empty() ? "-" : out.fallbackDffName.c_str(),
+                   out.modelId,
+                   out.txdIndex,
+                   out.slotCount,
+                   out.totalRemapTextures,
+                   out.totalAutoNickTextures);
+    }
+    return true;
+}
+
 static int TextureRemapPedKey(CPed* ped) {
     if (!ped) return 0;
     __try {
@@ -898,12 +986,53 @@ static PedTextureRemapState* EnsurePedTextureRemapState(CPed* ped, bool forceRes
     return &inserted.first->second;
 }
 
+static PedTextureRemapState* EnsureClumpTextureRemapState(
+    CPed* ped,
+    RpClump* clump,
+    const char* dffName,
+    const char* fallbackDffName,
+    int txdIndex,
+    bool forceRescan = false
+) {
+    if (!ped || !clump || txdIndex < 0)
+        return nullptr;
+    const int pedKey = TextureRemapPedKey(ped);
+    if (!pedKey)
+        return nullptr;
+    std::string key = std::to_string(pedKey);
+    key += "|";
+    key += dffName && dffName[0] ? TextureRemapToLowerAscii(dffName) : "?";
+    key += "|";
+    key += fallbackDffName && fallbackDffName[0] ? TextureRemapToLowerAscii(fallbackDffName) : "-";
+    key += "|";
+    key += std::to_string(txdIndex);
+
+    auto it = g_clumpTextureRemaps.find(key);
+    if (it != g_clumpTextureRemaps.end() && !forceRescan && it->second.scanned)
+        return &it->second;
+
+    PedTextureRemapState fresh;
+    if (!ScanTextureRemapsForClump(ped, clump, txdIndex, dffName, fallbackDffName, fresh)) {
+        fresh.modelId = (int)ped->m_nModelIndex;
+        fresh.txdIndex = txdIndex;
+        if (dffName && dffName[0])
+            fresh.dffName = dffName;
+        if (fallbackDffName && fallbackDffName[0])
+            fresh.fallbackDffName = fallbackDffName;
+        fresh.scanned = true;
+    }
+    auto inserted = g_clumpTextureRemaps.insert_or_assign(key, std::move(fresh));
+    return &inserted.first->second;
+}
+
 static void FillTextureRemapPedInfo(const PedTextureRemapState& state, TextureRemapPedInfo& out) {
     out = TextureRemapPedInfo{};
     out.modelId = state.modelId;
     out.txdIndex = state.txdIndex;
     out.totalRemapTextures = state.totalRemapTextures;
-    if (const char* dff = OrcTryGetPedModelNameById(state.modelId))
+    if (!state.dffName.empty())
+        out.dffName = state.dffName;
+    else if (const char* dff = OrcTryGetPedModelNameById(state.modelId))
         out.dffName = dff;
     for (int i = 0; i < state.slotCount; ++i) {
         const TextureRemapSlotState& src = state.slots[(size_t)i];
@@ -1118,6 +1247,20 @@ void OrcTextureRemapApplyBefore(CPed* ped) {
     }
 }
 
+void OrcTextureRemapApplyToClumpBefore(CPed* ped, RpClump* clump, const char* dffName, const char* fallbackDffName, int txdIndex) {
+    if (!g_enabled || !g_skinTextureRemapEnabled || !ped || !clump || txdIndex < 0)
+        return;
+    PedTextureRemapState* state = EnsureClumpTextureRemapState(ped, clump, dffName, fallbackDffName, txdIndex, false);
+    if (!state || state->slotCount <= 0 || (state->totalRemapTextures <= 0 && state->totalAutoNickTextures <= 0))
+        return;
+    ApplyTextureRemapNickBinding(ped, *state);
+    __try {
+        RpClumpForAllAtomics(clump, TextureRemapApplyAtomicCB, state);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("texture remap clump before: SEH ex=0x%08X ped=%p dff=%s", GetExceptionCode(), ped, dffName ? dffName : "?");
+    }
+}
+
 void OrcTextureRemapRestoreAfter() {
     if (g_textureRemapRestoreEntries.empty())
         return;
@@ -1134,6 +1277,7 @@ void OrcTextureRemapRestoreAfter() {
 void OrcTextureRemapClearRuntimeState() {
     OrcTextureRemapRestoreAfter();
     g_pedTextureRemaps.clear();
+    g_clumpTextureRemaps.clear();
 }
 
 void OrcTextureRemapOnProcessScripts() {
@@ -1147,6 +1291,13 @@ void OrcTextureRemapOnPedSetModel(CPed* ped, int) {
     const int key = TextureRemapPedKey(ped);
     if (key)
         g_pedTextureRemaps.erase(key);
+    for (auto it = g_clumpTextureRemaps.begin(); it != g_clumpTextureRemaps.end();) {
+        const std::string prefix = std::to_string(key) + "|";
+        if (key && it->first.rfind(prefix, 0) == 0)
+            it = g_clumpTextureRemaps.erase(it);
+        else
+            ++it;
+    }
     if ((CTimer::m_snTimeInMilliseconds - g_textureRemapCutsceneLastTime) > 3000 && g_skinTextureRemapEnabled)
         EnsurePedTextureRemapState(ped, true);
 }
