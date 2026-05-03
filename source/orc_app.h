@@ -20,7 +20,6 @@ extern char g_gameSkinDir[MAX_PATH];
 extern char g_gameTextureDir[MAX_PATH];
 extern char g_gameWeaponGunsDir[MAX_PATH];
 extern char g_gameWeaponGunsNickDir[MAX_PATH];
-extern char g_gameWeaponTexturesDir[MAX_PATH];
 
 extern bool g_enabled;
 extern bool g_renderAllPedsWeapons;
@@ -38,10 +37,12 @@ extern bool g_renderStandardObjects;
 extern bool g_weaponReplacementEnabled;
 extern bool g_weaponReplacementOnBody;
 extern bool g_weaponReplacementInHands;
-extern bool g_weaponReplacementHideBaseHeld;
+extern bool g_weaponReplacementRandomIncludeVanilla;
 extern bool g_weaponTexturesEnabled;
 extern bool g_weaponTextureNickMode;
 extern bool g_weaponTextureRandomMode;
+/// Use `*_remap` pairs inside the game's loaded weapon model TXD (PedFuncs-style per slot).
+extern bool g_weaponTextureStandardRemap;
 
 extern std::vector<WeaponCfg> g_cfg;
 extern std::vector<WeaponCfg> g_cfg2;

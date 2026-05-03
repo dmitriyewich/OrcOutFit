@@ -133,13 +133,19 @@ struct SkinPreviewRandomVariantInfo {
 };
 
 struct WeaponReplacementStats {
-    int uniqueSkinWeapons = 0;
+    /// Entries under `Weapons\\Guns\\<weapon>\\*.dff` (per-weapon random pool).
+    int randomWeaponWeapons = 0;
+    /// Entries under `Weapons\\Guns\\<weapon>\\<skin>\\*.dff` (per-skin random pool).
     int randomSkinWeapons = 0;
     int nickWeapons = 0;
 };
 
 struct WeaponTextureStats {
+    /// All `.txd` entries indexed under Guns/GunsNick by DiscoverWeaponTextures.
+    int indexedTxdFiles = 0;
+    /// Distinct bindings from `Weapons\Guns\<weapon>\<dff>.txd` (basename = skin DFF name).
     int uniqueSkinTextures = 0;
+    /// Count of variants in random pools (`<weapon>\<dff>\*.txd`).
     int randomSkinTextures = 0;
     int nickTextures = 0;
 };

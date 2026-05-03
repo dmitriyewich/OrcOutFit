@@ -26,19 +26,23 @@
 
 ### Замена моделей оружия
 - Подвкладка **Weapons → Weapon replacement** управляет заменой моделей оружия, которое OrcOutFit рисует на теле, и видимого оружия в руках.
-- Приоритет замены: **`OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff`** выше замены по скину; ник сравнивается без учёта регистра и без SA:MP color-кодов.
-- Замена по скину хранится в **`OrcOutFit\Weapons\Guns\<weapon>\<dff>.dff`**; random-варианты — в **`OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.dff`**.
-- Имя `<weapon>` берётся из `weapon.dat` / `LoadWeaponObject` и сравнивается без учёта регистра (`m4`, `ak47`, `desert_eagle` и т.п.).
-- Random-вариант закрепляется за ped/оружием/скином и выбирается через shuffle-bag, без файловых сканов в per-frame пути.
+- Приоритет замены: **`OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff`**; ник сравнивается без учёта регистра и без SA:MP color-кодов.
+- Затем **random по скину**: **`OrcOutFit\Weapons\Guns\<weapon>\<skin_dff>\*.dff`** (если для этой папки есть варианты).
+- Затем **random по типу оружия**: **`OrcOutFit\Weapons\Guns\<weapon>\*.dff`** (DFF прямо в папке типа, не в подпапках).
+- Имя `<weapon>` берётся из `weapon.dat` / `LoadWeaponObject` и сравнивается без учёта регистра (`m4`, `ak47`, `desert_eagle` и т.п.). `<skin_dff>` — имя базового ped DFF из ped.dat так же, как для `Weapons\<dff>.ini`.
+- Вариант random закрепляется за ped (отдельно для пула «по скину» и пула «по оружию») и выбирается через shuffle-bag; INI **`[Features] WeaponReplacementRandomIncludeVanilla=1`** добавляет в эти пулы шанс оставить **ванильную** модель без DFF-замены.
 - Оружие в руках при **Weapon replacement**: подмена `m_pWeaponObject` на кадр рендера ped и хуки **`CPed::AddWeaponModel`** / **`CPed::RemoveWeaponModel`** (SA 1.0 US: `0x5E5ED0` / `0x5E3990`): сразу после того как движок подцепил штатную модель к ped, в слот подставляется клон замены; при снятии модели указатель возвращается движку, клон уничтожается. На каждом кадре матрица клона по-прежнему копируется со штатного меша (после прошлого кадра в слоте снова штатный объект), чтобы IK не «плавал». Атомики клона на стандартном RW-пути (`renderCallBack` штатного оружия не копируется — иначе `RenderWeaponCB` падает без данных плагина). Альфа вспышки для материалов вроде `gunflash`, `muzzleflash`, `muzzle_texture*` синхронизируется с `m_nWeaponGunflashAlphaMP1`. Для выбора пресета замены в руках используется тип оружия в **активном слоте** без требования «есть патроны» на клиенте; если слот в фазе рендера «пустой» (часто в SA:MP), дополнительно берётся **`CPed::m_nWeaponModelId`** и обратный поиск по `CWeaponInfo` / `weapon.dat`, затем сопоставление слотов инвентаря с этой моделью.
-- Опция **«Скрыть штатное оружие в руках, рисовать замену после»** / INI `[Features] WeaponReplacementHideBaseHeld=1`: на время `CPed::Render` в `m_pWeaponObject` подставляется `nullptr` (штатный клан не рисуется), кастомный клон дорисовывается в `pedRenderEvent.after` с **тем же** освещением, что оружие на теле: `ApplyAttachmentLightingForPed` (и при необходимости TXD на клоне), **без** `CPed::SetupLighting` / `RemoveLighting`, чтобы не ломать глобальные уличные/сценовые света. Поза клона берётся из той же секции оружия в OrcOutFit, что и для отображения на теле (кость `Bone`, смещения); если секция выключена или кость не задана, используется запасной узел **правая рука** (`Bone=24` в терминах RpHAnim node id в плагине).
-- Если слот `m_pWeaponObject` в фазе рендера ped пуст (в частности при **выключенной** опции выше), подмена в руках выполняется дорисовыванием после внутреннего вызова в `CPed::Render` (поза от кости). Указатель на штатный клан для слота возвращается в конце кадра (после сцены), иначе оставшаяся часть `CPed::Render` снова нарисует ванильное оружие поверх замены.
+- Если слот `m_pWeaponObject` в фазе рендера ped пуст (частый случай SA:MP при подмене), замена дорисовывается после внутреннего вызова в `CPed::Render`: клон позиционируется по кости как оружие на теле (**тот же `Bone`/offset**, что секция OrcOutFit; fallback — узел правой руки, node id плагина `24`). Указатель на штатный клан для слота возвращается в конце кадра; перед этим дополнительная отрисовка использует **`ApplyAttachmentLightingForPed`** (и при включённой подмене — TXD), **без** `CPed::SetupLighting` / `RemoveLighting` на этом пути, чтобы не менять глобальную сцену.
 
 ### Текстуры оружия
-- Подвкладка **Weapons → Textures** управляет отдельной TXD-подменой оружия без замены DFF-модели.
-- Приоритет текстур: **`OrcOutFit\Weapons\Textures\Nick\<weapon>_<nick>.txd`** выше текстуры по скину; ник сравнивается без учёта регистра и без SA:MP color-кодов.
-- Текстура по скину хранится в **`OrcOutFit\Weapons\Textures\<weapon>\<dff>.txd`**; random-варианты — в **`OrcOutFit\Weapons\Textures\<weapon>\<dff>\*.txd`**.
-- Один ped получает один и тот же выбранный TXD-вариант для оружия на теле и видимого оружия в руках.
+- Подвкладка **Weapons → Textures** управляет модификацией текстур оружия на теле у OrcOutFit и у видимого оружия в руках **без отдельной папки Textures**: кастомные TXD лежат в тех же **`Weapons\Guns`** и **`Weapons\GunsNick`**, что и замены моделей.
+- **Разделение по мешу:** для **ванильной** геометрии оружия (нет DFF-замены OrcOutFit) варианты **базовое имя + суффикс `*_remap`** берутся только из **TXD штатной модели игры** — опция **`WeaponTextureStandardRemap`**. Для **replacement**-меша (кастомный DFF из Guns/GunsNick) текстуры с **`_remap` внутри кастомного TXD** Guns/GunsNick применяются к этому мешу **до** подстановки текстур по совпадению имён из того же TXD; штатный каталог remap из игры на replacement не навешивается.
+- **Кастомные TXD приоритет**: **`OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.txd`** выше фиксированного TXD по скину; ник сравнивается без учёта регистра и без SA:MP color-кодов.
+- Фиксированный TXD по скину: **`OrcOutFit\Weapons\Guns\<weapon>\<dff>.txd`** (в корне папки типа оружия); random — **`OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.txd`**.
+- Если для DFF педа нет своего `<dff>.txd`, подхватывается **общий TXD** **`OrcOutFit\Weapons\Guns\<weapon>\<weapon>.txd`** (например `desert_eagle\desert_eagle.txd` для любого скина).
+- **TXD для варианта `wprand:<weapon>:<basename>`**: если активна замена с ключом **`wprand`**, текстуры того же базового имени, что у файла замены (**`<basename>.txd`** рядом с DFF, например `MarkVII.txd`), резолвятся так же, как для этой замены — не обязано совпадать с именем скина педа.
+- На кадре сначала готовится **held replacement** (если включена замена в руках), затем текстуры OrcOutFit навешиваются на **фактический** объект в слоте (`m_pWeaponObject`). **Откат** временных подмен материалов для **оружия в руках** откладывается до **EndScene/Present**, чтобы стандартный рендер руки после `CPed::Render` не шёл с уже сброшенными текстурами (событие «после ped» срабатывает раньше отрисовки оружия в руках).
+- Один ped получает один и тот же выбранный вариант для оружия на теле и в руках.
 
 ### Все педы в радиусе (опционально)
 - Режимы **«оружие у всех ped»** и **«объекты у всех ped»** с радиусом от локального игрока.
@@ -109,7 +113,7 @@
 
 ### Интерфейс
 - Вкладки **Main** (плагин, `[Features]`, пути), **Weapons**, **Objects**, **Skins**, **Settings**.
-- Внутри **Weapons** три подвкладки: **Weapon render** (крепление оружия на теле), **Weapon replacement** (замена моделей оружия по скину/random/нику) и **Textures** (TXD-текстуры оружия по скину/random/нику).
+- Внутри **Weapons** три подвкладки: **Weapon render** (крепление оружия на теле), **Weapon replacement** (замена моделей оружия по скину/random/нику) и **Textures** (`*_remap` из TXD модели, кастомные TXD из Guns/GunsNick).
 - Внутри **Objects** две подвкладки: **Custom objects** (DFF из папки `Objects`) и **Standard objects** (модели игры по ID).
 - Внутри **Skins** пять подвкладок: **Custom skins** (DFF поверх ped), **Standard skins** (ped-модели игры overlay / примерка), **Skin preview**, **Random skins** и **Texture** (`*_remap` для ped и overlay-скинов).
 - Интерфейс локализован на русский и английский язык; выбор хранится в **`[Main] Language=ru|en`** и переключается во вкладке **Settings**.
@@ -136,8 +140,8 @@
 - **Примерка стандартного skin:** в **Skins → Standard skins** нажмите **Wear this skin (local player)** — модель локального игрока меняется через `CPed::SetModelIndex`.
 - **Предпросмотр skin:** откройте **Skins → Skin preview**, выберите источник Standard/Custom/Random и нужный вариант.
 - **Random skin pool:** положите варианты в `OrcOutFit\Skins\Random\<dff>\`, откройте **Skins → Random skins**, включите **Enable random skins** и нажмите **Rescan skins**.
-- **Замена оружия:** положите замену по скину в `OrcOutFit\Weapons\Guns\<weapon>\<dff>.dff`, random-варианты в `OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.dff`, а замену по нику в `OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff`; настройки находятся в **Weapons → Weapon replacement**.
-- **Текстуры оружия:** положите TXD по скину в `OrcOutFit\Weapons\Textures\<weapon>\<dff>.txd`, random-варианты в `OrcOutFit\Weapons\Textures\<weapon>\<dff>\*.txd`, а TXD по нику в `OrcOutFit\Weapons\Textures\Nick\<weapon>_<nick>.txd`; настройки находятся в **Weapons → Textures**.
+- **Замена оружия:** замена по нику — `OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff`; random по скину — `OrcOutFit\Weapons\Guns\<weapon>\<skin_dff>\*.dff`; random по типу — `OrcOutFit\Weapons\Guns\<weapon>\*.dff`. Опционально включите **«в пул random входит и штатное оружие»** (`WeaponReplacementRandomIncludeVanilla`); подвкладка **Weapons → Weapon replacement**.
+- **Текстуры оружия:** `GunsNick\<weapon>_<nick>.txd`, по скину `Guns\<weapon>\<dff>.txd`, fallback `Guns\<weapon>\<weapon>.txd`, random `Guns\<weapon>\<dff>\*.txd`, для `wprand` — `<basename>.txd` рядом с DFF замены; `*_remap` в TXD игры на ванильном меше и `*_remap` в Orc-TXD на replacement — опции **Weapons → Textures**; отдельная папка `Weapons\Textures` не используется.
 - **Привязка по нику:** в **Standard skins** включите nick binding, укажите ники через запятую и сохраните INI.
 
 ### SA:MP
@@ -167,9 +171,8 @@
    - `OrcOutFit\Objects` — кастомные объекты + их INI
    - `OrcOutFit\Objects\StandardObjects.ini` — список и настройки стандартных игровых объектов по ID
    - `OrcOutFit\Weapons` — опциональные пресеты оружия `<dff>.ini`
-   - `OrcOutFit\Weapons\Guns` — замены моделей оружия по скину и random-пулы оружия
-   - `OrcOutFit\Weapons\GunsNick` — замены моделей оружия по нику SA:MP
-   - `OrcOutFit\Weapons\Textures` — TXD-текстуры оружия по скину/random/нику
+   - `OrcOutFit\Weapons\Guns` — замены DFF, random DFF и **кастомные TXD-текстуры** (`<weapon>\<dff>.txd`, `<weapon>\<weapon>.txd`, `<weapon>\<dff>\*.txd`, пары DFF+TXD с общим basename в одной папке)
+   - `OrcOutFit\Weapons\GunsNick` — замены DFF по нику SA:MP и **TXD по нику** (`<weapon>_<nick>.txd`)
    - `OrcOutFit\Skins` — кастомные скины DFF/TXD
    - `OrcOutFit\Skins\Random` — random-пулы скинов по базовому DFF ped
    - `OrcOutFit\Skins\StandardSkins.ini` — nick binding стандартных скинов
@@ -254,6 +257,7 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 | `WeaponTextures` | Включить TXD-текстуры оружия |
 | `WeaponTextureNickMode` | Включить приоритетные TXD-текстуры оружия по нику SA:MP |
 | `WeaponTextureRandomMode` | Включить random-пулы TXD-текстур оружия |
+| `WeaponTextureStandardRemap` | `1` — подставлять варианты `*_remap` из **TXD загруженной модели** оружия (до кастомных TXD из Guns) |
 | `SkinMode` | Режим overlay-скинов |
 | `SkinHideBasePed` | Скрыть базовый clump |
 | `SkinNickMode` | Привязка скинов по нику SA:MP |
@@ -290,21 +294,24 @@ ImGui-рендер подключается через D3D9 hooks (`Present` / f
 
 ## Файлы замены оружия
 
-- `OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff/.txd` — замена по нику SA:MP, самый высокий приоритет.
-- `OrcOutFit\Weapons\Guns\<weapon>\<dff>.dff/.txd` — уникальная замена оружия для стандартного ped DFF.
-- `OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.dff/.txd` — random-варианты для такого же `<weapon>` и `<dff>`.
+- `OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.dff/.txd` — замена по нику SA:MP (высший приоритет).
+- `OrcOutFit\Weapons\Guns\<weapon>\<skin_dff>\*.dff/.txd` — random замена для `<weapon>` под конкретный ped DFF.
+- `OrcOutFit\Weapons\Guns\<weapon>\*.dff/.txd` — random замена только по типу оружия (DFF лежит прямо в папке `<weapon>`).
+- Дальнейший fallback — обычная модель игры. Опционально **`WeaponReplacementRandomIncludeVanilla=1`**: пункт «ванилла» может выпасть среди outcomes в каждом random-пуле, где уже есть хотя бы один кастомный DFF.
 
 Если TXD рядом с DFF не найден, модель не загружается и плагин использует обычную игровую модель.
 
 ---
 
-## Файлы текстур оружия
+## Файлы текстур оружия (кастом)
 
-- `OrcOutFit\Weapons\Textures\Nick\<weapon>_<nick>.txd` — TXD по нику SA:MP, самый высокий приоритет.
-- `OrcOutFit\Weapons\Textures\<weapon>\<dff>.txd` — уникальная TXD-текстура оружия для стандартного ped DFF.
-- `OrcOutFit\Weapons\Textures\<weapon>\<dff>\*.txd` — random-варианты TXD для такого же `<weapon>` и `<dff>`.
+- **`OrcOutFit\Weapons\GunsNick\<weapon>_<nick>.txd`** — высший приоритет (SA:MP ник так же, как для DFF).
+- **`OrcOutFit\Weapons\Guns\<weapon>\<dff>.txd`** — фиксированная TXD для `<weapon>` и ped DFF `<dff>` (имя базового скина из `ped.dat`).
+- **`OrcOutFit\Weapons\Guns\<weapon>\<weapon>.txd`** — запасной общий TXD для типа оружия (если `<weapon>\<dff>.txd` нет); удобно для кастомной геометрии под все скины и для `*_remap` в этом TXD на replacement-меше.
+- Пара **`Guns\<weapon>\<Variant>.dff` + `<Variant>.txd`** в одной папке (например `MarkVII.dff` / `MarkVII.txd` при активной замене `wprand:<weapon>:<variant>`): TXD резолвится по тому же basename, что и файл замены — не нужно переименовывать TXD в имя скина педа.
+- **`OrcOutFit\Weapons\Guns\<weapon>\<dff>\*.txd`** — random TXD среди нескольких вариантов в подпапке.
 
-TXD должен содержать текстуры с теми же именами, что используются материалами текущей модели оружия.
+Кастомный TXD подменяет текстуры **по совпадению имён** с материалами текущей модели оружия. Пары **`базовое имя + *_remap*`** в **TXD загруженной игровой модели** участвует только **`WeaponTextureStandardRemap`** и только для **ванильной** геометрии; пары **`_remap` внутри Orc-TXD** Guns/GunsNick — для материалов **replacement**-меша (после сканирования того же словаря).
 
 ---
 
@@ -335,8 +342,8 @@ TXD должен содержать текстуры с теми же имена
 | `source/main.cpp` | Точка входа, конфиг, weapon.dat / ped.dat хуки, `SyncAndRender`, сохранение INI |
 | `source/orc_app.h`, `source/orc_types.h` | Состояние плагина, типы, объявления модулей |
 | `source/orc_weapons.cpp`, `source/orc_weapons.h` | Хук `LoadWeaponObject`, weapon.dat |
-| `source/orc_weapon_runtime.cpp`, `source/orc_weapon_runtime.h` | Оружие на теле, held replacement, `OrcSyncPedWeapons` / `OrcRenderPedWeapons` |
-| `source/orc_weapon_assets.cpp`, `source/orc_weapon_assets.h` | Скан Guns/GunsNick/Textures, замена DFF/TXD |
+| `source/orc_weapon_runtime.cpp`, `source/orc_weapon_runtime.h` | Оружие на теле, held replacement, отложенный откат текстур для оружия в руках, `OrcSyncPedWeapons` / `OrcRenderPedWeapons` |
+| `source/orc_weapon_assets.cpp`, `source/orc_weapon_assets.h` | Скан Guns/GunsNick (DFF+TXD), замена DFF/TXD, `*_remap`: штатная модель vs Orc-TXD для replacement, комбинированное применение текстур |
 | `source/orc_path.cpp`, `source/orc_path.h` | Пути, `OrcToLowerAscii`, поиск TXD |
 | `source/orc_attach.cpp`, `source/orc_attach.h` | Подготовка atomic/clump для вложений |
 | `source/orc_render.cpp`, `source/orc_render.h` | Кости, смещение матрицы, `OrcApplyAttachmentLightingForPed` |

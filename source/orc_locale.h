@@ -150,19 +150,22 @@
     X(SaveSkinIni, "Сохранить INI скина", "Save skin .ini") \
     X(SaveSkinModeSelection, "Сохранить выбор режима скина", "Save skin mode selection") \
     X(RescanSkins, "Пересканировать скины", "Rescan skins") \
-    X(WeaponReplacementHint, "Замена применяется к оружию OrcOutFit на теле и к видимому оружию в руках. По нику: Weapons\\GunsNick\\<weapon>_<nick>.dff. По скину: Weapons\\Guns\\<weapon>\\<dff>.dff или Weapons\\Guns\\<weapon>\\<dff>\\*.dff.", "Replacement applies to OrcOutFit body weapons and visible weapons in hands. By nick: Weapons\\GunsNick\\<weapon>_<nick>.dff. By skin: Weapons\\Guns\\<weapon>\\<dff>.dff or Weapons\\Guns\\<weapon>\\<dff>\\*.dff.") \
+    X(WeaponReplacementHint, "Замена применяется к оружию OrcOutFit на теле и к видимому оружию в руках. По нику: Weapons\\GunsNick\\<weapon>_<nick>.dff. Случайно по типу оружия: Weapons\\Guns\\<weapon>\\*.dff. Случайно по скину: Weapons\\Guns\\<weapon>\\<skin>\\*.dff.", "Replacement applies to OrcOutFit body weapons and visible weapons in hands. By nick: Weapons\\GunsNick\\<weapon>_<nick>.dff. Random by weapon type: Weapons\\Guns\\<weapon>\\*.dff. Random by skin: Weapons\\Guns\\<weapon>\\<skin>\\*.dff.") \
     X(EnableWeaponReplacement, "Включить замену оружия", "Enable weapon replacement") \
     X(ReplaceWeaponsOnBody, "Заменять оружие на теле", "Replace weapons on body") \
     X(ReplaceWeaponsInHands, "Заменять оружие в руках", "Replace weapons in hands") \
-    X(HideBaseHeldWeapon, "Скрыть штатное оружие в руках, рисовать замену после", "Hide stock held weapon, draw replacement after") \
-    X(HideBaseHeldWeaponHint, "Полезно в SA:MP, когда m_pWeaponObject ненадёжен. Освещение клона как у оружия на теле (без CPed::SetupLighting).", "Helps in SA:MP when m_pWeaponObject is unreliable. Clone lit like on-body weapons (no CPed::SetupLighting).") \
-    X(WeaponReplacementStatsFormat, "Guns: %d уникальных, %d random. GunsNick: %d.", "Guns: %d unique, %d random. GunsNick: %d.") \
+    X(WeaponReplacementRandomIncludeVanilla, "Добавлять штатное оружие в пул Guns random", "Include vanilla weapon in Guns random pools") \
+    X(WeaponReplacementRandomIncludeVanillaHint, "При выборе random из Guns вариантом может оказаться обычная модель игры (без замены по DFF).", "When random picks from Guns, one outcome can be the stock game weapon (no DFF replacement).") \
+    X(WeaponReplacementStatsFormat, "Guns: %d общий random, %d по скину. GunsNick: %d.", "Guns: %d weapon-random, %d skin-random. GunsNick: %d.") \
     X(RescanWeaponReplacement, "Пересканировать замену оружия", "Rescan weapon replacement") \
     X(EnableWeaponTextures, "Включить текстуры оружия", "Enable weapon textures") \
     X(WeaponTextureNickBinding, "Текстуры оружия по нику (SA:MP)", "Weapon textures by nick (SA:MP)") \
     X(WeaponTextureRandomMode, "Рандомные текстуры оружия", "Random weapon textures") \
-    X(WeaponTextureHint, "Текстуры применяются к оружию OrcOutFit на теле и к видимому оружию в руках. По нику: Weapons\\Textures\\Nick\\<weapon>_<nick>.txd. По скину: Weapons\\Textures\\<weapon>\\<dff>.txd или Weapons\\Textures\\<weapon>\\<dff>\\*.txd.", "Textures apply to OrcOutFit body weapons and visible weapons in hands. By nick: Weapons\\Textures\\Nick\\<weapon>_<nick>.txd. By skin: Weapons\\Textures\\<weapon>\\<dff>.txd or Weapons\\Textures\\<weapon>\\<dff>\\*.txd.") \
-    X(WeaponTextureStatsFormat, "Текстуры: %d уникальных, %d random, %d по нику.", "Textures: %d unique, %d random, %d by nick.") \
+    X(WeaponTextureStandardRemap, "Варианты *_remap из TXD модели оружия", "Use *_remap variants from the game's weapon TXD") \
+    X(WeaponTextureStandardRemapHint, "Как у скинов: в TXD загруженной модели ищутся пары base + base*_remap*; вариант случайно закрепляется за ped. Подмена идёт до кастомного TXD из Guns.", "PedFuncs-style: scanned from the streamed weapon model dictionary; one random variant sticks per ped before any custom TXD overlay from Guns.") \
+    X(WeaponTextureHint, "Кастомные TXD (имена текстур как в материалах меша оружия): ник Weapons\\GunsNick\\<weapon>_<nick>.txd; по скину Weapons\\Guns\\<weapon>\\<dff>.txd; запасной общий словарь Weapons\\Guns\\<weapon>\\<weapon>.txd если нет своего <dff>.txd; random Weapons\\Guns\\<weapon>\\<dff>\\*.txd. Замена геометрии отдельно (DFF). *_remap в TXD при первой загрузке.", "Custom TXDs (names match weapon materials): nick Weapons\\GunsNick\\<weapon>_<nick>.txd; skin Weapons\\Guns\\<weapon>\\<dff>.txd; fallback bundle Weapons\\Guns\\<weapon>\\<weapon>.txd when no per-skin file; random Weapons\\Guns\\<weapon>\\<dff>\\*.txd. Mesh = DFF replacement. *_remap parsed on TXD load.") \
+    X(WeaponTextureStatsRemapNote, "`*_remap` в Guns/GunsNick TXD не отдельные файлы: число слотов см. только после загрузки TXD (лог lvl 2), не в этой строке.", "`*_remap` inside Guns/GunsNick TXDs are not separate indexed files — slot counts appear only after TXD load (lvl 2 log), not in this stats line.") \
+    X(WeaponTextureStatsFormat, "TXD в индексе: %d; по скину (корень папки): %d; random-пулов: %d; по нику: %d.", "Indexed .txd files: %d; skin binding (weapon root): %d; random pool entries: %d; nick: %d.") \
     X(RescanWeaponTextures, "Пересканировать текстуры оружия", "Rescan weapon textures") \
     X(EnableTextureRemaps, "Включить замену текстур (*_remap)", "Enable texture remaps (*_remap)") \
     X(UnsupportedSampTextureNickBinding, "Неподдерживаемая сборка SA:MP - привязка текстур по нику неактивна.", "Unsupported SA:MP build - texture nick binding inactive.") \

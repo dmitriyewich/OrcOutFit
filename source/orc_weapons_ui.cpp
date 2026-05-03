@@ -348,13 +348,15 @@ void OrcWeaponsUiDrawWeaponsTab() {
             OrcUiCheckbox("weapon_replacement_enabled", WT(OrcTextId::EnableWeaponReplacement), &g_weaponReplacementEnabled);
             OrcUiCheckbox("weapon_replacement_body", WT(OrcTextId::ReplaceWeaponsOnBody), &g_weaponReplacementOnBody);
             OrcUiCheckbox("weapon_replacement_hands", WT(OrcTextId::ReplaceWeaponsInHands), &g_weaponReplacementInHands);
-            OrcUiCheckbox("weapon_replacement_hide_base_held", WT(OrcTextId::HideBaseHeldWeapon), &g_weaponReplacementHideBaseHeld);
-            ImGui::TextWrapped("%s", WT(OrcTextId::HideBaseHeldWeaponHint));
+            OrcUiCheckbox("weapon_replacement_rand_vanilla",
+                WT(OrcTextId::WeaponReplacementRandomIncludeVanilla),
+                &g_weaponReplacementRandomIncludeVanilla);
+            ImGui::TextWrapped("%s", WT(OrcTextId::WeaponReplacementRandomIncludeVanillaHint));
             ImGui::TextWrapped("%s", WT(OrcTextId::WeaponReplacementHint));
             WeaponReplacementStats stats = OrcGetWeaponReplacementStats();
             ImGui::Text("%s", OrcFormat(
                 OrcTextId::WeaponReplacementStatsFormat,
-                stats.uniqueSkinWeapons,
+                stats.randomWeaponWeapons,
                 stats.randomSkinWeapons,
                 stats.nickWeapons).c_str());
             ImGui::TextWrapped("%s", g_gameWeaponGunsDir);
@@ -378,14 +380,21 @@ void OrcWeaponsUiDrawWeaponsTab() {
             OrcUiCheckbox("weapon_texture_nick", WT(OrcTextId::WeaponTextureNickBinding), &g_weaponTextureNickMode);
             ImGui::EndDisabled();
             OrcUiCheckbox("weapon_texture_random", WT(OrcTextId::WeaponTextureRandomMode), &g_weaponTextureRandomMode);
+            OrcUiCheckbox("weapon_texture_std_remap",
+                WT(OrcTextId::WeaponTextureStandardRemap),
+                &g_weaponTextureStandardRemap);
+            ImGui::TextWrapped("%s", WT(OrcTextId::WeaponTextureStandardRemapHint));
             ImGui::TextWrapped("%s", WT(OrcTextId::WeaponTextureHint));
             WeaponTextureStats stats = OrcGetWeaponTextureStats();
             ImGui::Text("%s", OrcFormat(
                 OrcTextId::WeaponTextureStatsFormat,
+                stats.indexedTxdFiles,
                 stats.uniqueSkinTextures,
                 stats.randomSkinTextures,
                 stats.nickTextures).c_str());
-            ImGui::TextWrapped("%s", g_gameWeaponTexturesDir);
+            ImGui::TextDisabled("%s", WT(OrcTextId::WeaponTextureStatsRemapNote));
+            ImGui::TextWrapped("%s", g_gameWeaponGunsDir);
+            ImGui::TextWrapped("%s", g_gameWeaponGunsNickDir);
 
             bool save = false, rescan = false;
             OrcUiButtonPair(WT(OrcTextId::SaveMainFeatures), WT(OrcTextId::RescanWeaponTextures), &save, &rescan);

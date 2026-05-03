@@ -66,7 +66,6 @@ char    g_gameSkinDir[MAX_PATH] = {};
 char    g_gameTextureDir[MAX_PATH] = {};
 char    g_gameWeaponGunsDir[MAX_PATH] = {};
 char    g_gameWeaponGunsNickDir[MAX_PATH] = {};
-char    g_gameWeaponTexturesDir[MAX_PATH] = {};
 
 static void LogInit() {
     char modPath[MAX_PATH] = {};
@@ -86,7 +85,6 @@ static void LogInit() {
     _snprintf_s(g_gameWeaponsDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons", moduleDir);
     _snprintf_s(g_gameWeaponGunsDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons\\Guns", moduleDir);
     _snprintf_s(g_gameWeaponGunsNickDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons\\GunsNick", moduleDir);
-    _snprintf_s(g_gameWeaponTexturesDir, _TRUNCATE, "%s\\OrcOutFit\\Weapons\\Textures", moduleDir);
     _snprintf_s(g_gameSkinDir, _TRUNCATE, "%s\\OrcOutFit\\Skins", moduleDir);
     _snprintf_s(g_gameTextureDir, _TRUNCATE, "%s\\OrcOutFit\\Skins\\Textures", moduleDir);
 
@@ -112,10 +110,11 @@ bool g_renderStandardObjects = true;
 bool g_weaponReplacementEnabled = true;
 bool g_weaponReplacementOnBody = true;
 bool g_weaponReplacementInHands = true;
-bool g_weaponReplacementHideBaseHeld = false;
+bool g_weaponReplacementRandomIncludeVanilla = false;
 bool g_weaponTexturesEnabled = true;
 bool g_weaponTextureNickMode = true;
 bool g_weaponTextureRandomMode = true;
+bool g_weaponTextureStandardRemap = true;
 std::vector<WeaponCfg> g_cfg;
 std::vector<WeaponCfg> g_cfg2; // secondary dual-wield placement
 bool g_livePreviewWeaponsActive = false;
@@ -617,11 +616,12 @@ void LoadConfig() {
     g_weaponReplacementEnabled = GetPrivateProfileIntA("Features", "WeaponReplacement", 1, g_iniPath) != 0;
     g_weaponReplacementOnBody = GetPrivateProfileIntA("Features", "WeaponReplacementOnBody", 1, g_iniPath) != 0;
     g_weaponReplacementInHands = GetPrivateProfileIntA("Features", "WeaponReplacementInHands", 1, g_iniPath) != 0;
-    g_weaponReplacementHideBaseHeld =
-        GetPrivateProfileIntA("Features", "WeaponReplacementHideBaseHeld", 0, g_iniPath) != 0;
+    g_weaponReplacementRandomIncludeVanilla =
+        GetPrivateProfileIntA("Features", "WeaponReplacementRandomIncludeVanilla", 0, g_iniPath) != 0;
     g_weaponTexturesEnabled = GetPrivateProfileIntA("Features", "WeaponTextures", 1, g_iniPath) != 0;
     g_weaponTextureNickMode = GetPrivateProfileIntA("Features", "WeaponTextureNickMode", 1, g_iniPath) != 0;
     g_weaponTextureRandomMode = GetPrivateProfileIntA("Features", "WeaponTextureRandomMode", 1, g_iniPath) != 0;
+    g_weaponTextureStandardRemap = GetPrivateProfileIntA("Features", "WeaponTextureStandardRemap", 1, g_iniPath) != 0;
     for (int wt : g_availableWeaponTypes) {
         if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
         auto& c = g_cfg[wt];
@@ -716,10 +716,12 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "WeaponReplacement", g_weaponReplacementEnabled ? 1 : 0);
     AddIniInt(values, "Features", "WeaponReplacementOnBody", g_weaponReplacementOnBody ? 1 : 0);
     AddIniInt(values, "Features", "WeaponReplacementInHands", g_weaponReplacementInHands ? 1 : 0);
-    AddIniInt(values, "Features", "WeaponReplacementHideBaseHeld", g_weaponReplacementHideBaseHeld ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponReplacementRandomIncludeVanilla",
+        g_weaponReplacementRandomIncludeVanilla ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextures", g_weaponTexturesEnabled ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextureNickMode", g_weaponTextureNickMode ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextureRandomMode", g_weaponTextureRandomMode ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponTextureStandardRemap", g_weaponTextureStandardRemap ? 1 : 0);
     OrcAppendSkinFeatureIniValues(values);
     AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
     AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
@@ -764,11 +766,12 @@ static void SaveDefaultConfig() {
           "WeaponReplacement=1\n"
           "WeaponReplacementOnBody=1\n"
           "WeaponReplacementInHands=1\n"
-          "; WeaponReplacementHideBaseHeld=1: hide stock m_pWeaponObject for this ped render, draw replacement after (SA:MP-friendly). Default 0 (swap path).\n"
-          "WeaponReplacementHideBaseHeld=0\n"
+          "; WeaponReplacementRandomIncludeVanilla=1: vanilla game weapon can be picked in Guns random pools.\n"
+          "WeaponReplacementRandomIncludeVanilla=0\n"
           "WeaponTextures=1\n"
           "WeaponTextureNickMode=1\n"
           "WeaponTextureRandomMode=1\n"
+          "WeaponTextureStandardRemap=1\n"
           "SkinMode=0\n"
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
@@ -1036,10 +1039,12 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "WeaponReplacement=%d\n", g_weaponReplacementEnabled ? 1 : 0);
     AppendFormat(out, "WeaponReplacementOnBody=%d\n", g_weaponReplacementOnBody ? 1 : 0);
     AppendFormat(out, "WeaponReplacementInHands=%d\n", g_weaponReplacementInHands ? 1 : 0);
-    AppendFormat(out, "WeaponReplacementHideBaseHeld=%d\n", g_weaponReplacementHideBaseHeld ? 1 : 0);
+    AppendFormat(out, "WeaponReplacementRandomIncludeVanilla=%d\n",
+        g_weaponReplacementRandomIncludeVanilla ? 1 : 0);
     AppendFormat(out, "WeaponTextures=%d\n", g_weaponTexturesEnabled ? 1 : 0);
     AppendFormat(out, "WeaponTextureNickMode=%d\n", g_weaponTextureNickMode ? 1 : 0);
     AppendFormat(out, "WeaponTextureRandomMode=%d\n", g_weaponTextureRandomMode ? 1 : 0);
+    AppendFormat(out, "WeaponTextureStandardRemap=%d\n", g_weaponTextureStandardRemap ? 1 : 0);
     AppendFormat(out, "SkinMode=%d\n", g_skinModeEnabled ? 1 : 0);
     AppendFormat(out, "SkinHideBasePed=%d\n", g_skinHideBasePed ? 1 : 0);
     AppendFormat(out, "SkinNickMode=%d\n", g_skinNickMode ? 1 : 0);
@@ -1216,6 +1221,7 @@ static void SyncAndRender() {
     if (!g_enabled) {
         OrcWeaponClearLocalRendered();
         OrcWeaponClearOtherPedsRendered();
+        OrcRestoreWeaponHeldTextureOverrides();
         OrcDestroyAllHeldWeaponReplacementInstances();
         OrcRestoreWeaponTextureOverrides();
         OrcSkinsReleaseAllInstancesAndPreview();
@@ -1227,6 +1233,7 @@ static void SyncAndRender() {
     if (!player) {
         OrcWeaponClearLocalRendered();
         OrcWeaponClearOtherPedsRendered();
+        OrcRestoreWeaponHeldTextureOverrides();
         OrcDestroyAllHeldWeaponReplacementInstances();
         OrcRestoreWeaponTextureOverrides();
         OrcSkinsReleaseAllInstancesAndPreview();
@@ -1335,12 +1342,14 @@ static void OnPedRenderAfter(CPed* ped);
 static void OnD3dLost() {
     OrcSkinsDestroyPreview();
     OrcRestoreWeaponTextureOverrides();
+    OrcRestoreWeaponHeldTextureOverrides();
     OrcTextureRemapRestoreAfter();
     overlay::OnResetBefore();
 }
 static void OnD3dReset() {
     OrcSkinsDestroyPreview();
     OrcRestoreWeaponTextureOverrides();
+    OrcRestoreWeaponHeldTextureOverrides();
     OrcTextureRemapRestoreAfter();
     overlay::OnResetBefore();
     overlay::OnResetAfter();
@@ -1385,15 +1394,19 @@ static void OnDrawingEvent() {
 
 static void OnPedRenderBefore(CPed* ped) {
     OrcTextureRemapApplyBefore(ped);
-    OrcPrepareHeldWeaponTextureBefore(ped);
+    // Replacement must run first: PrepareHeldWeaponTextureBefore targets `m_pWeaponObject`.
+    // If we textured the stock mesh then swapped the slot to the replacement clone,
+    // the held model would render without Guns/GunsNick TXD / stock remap.
     OrcPrepareHeldWeaponReplacementBefore(ped);
+    OrcPrepareHeldWeaponTextureBefore(ped);
     OrcSkinsOnPedRenderBefore(ped);
 }
 
 static void OnPedRenderAfter(CPed* ped) {
     OrcTextureRemapRestoreAfter();
     OrcRestoreHeldWeaponReplacementAfter(ped);
-    OrcRestoreWeaponTextureOverrides();
+    // Held weapon RwMaterial swaps are deferred to EndScene (see OrcFlushDeferredHeldWeaponSlotRestore): this
+    // hook runs before CPed draws the held mesh, so immediate restore would revert textures before GPU draw.
     OrcSkinsOnPedRenderAfter(ped);
 }
 

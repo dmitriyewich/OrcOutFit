@@ -180,8 +180,12 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
 
     CVector lightPos = { bone->pos.x, bone->pos.y, bone->pos.z };
     OrcApplyAttachmentLightingForPed(ped, lightPos);
-    WeaponTextureAsset* textureAsset = OrcResolveUsableWeaponTextureAssetForPed(ped, r.weaponType, true);
-    OrcApplyWeaponTextureToRwObject(r.rwObject, textureAsset);
+    WeaponTextureAsset* textureAsset = OrcResolveUsableWeaponTextureAssetForPed(ped,
+        r.weaponType,
+        true,
+        r.replacementKey.empty() ? nullptr : &r.replacementKey);
+    const bool meshIsReplacement = !r.replacementKey.empty();
+    OrcApplyWeaponTexturesCombined(ped, r.weaponType, r.rwObject, textureAsset, meshIsReplacement);
     if (!r.replacementKey.empty())
         SyncWeaponReplacementMuzzleFlashAlpha(ped, r.rwObject);
 
@@ -293,13 +297,29 @@ struct HeldWeaponReplacementState {
 
 static std::unordered_map<int, HeldWeaponReplacementState> g_heldWeaponReplacements;
 
+/// True when `obj` is the held-weapon clone from Guns/GunsNick replacement (`g_heldWeaponReplacements`).
+static bool HeldWeaponRwObjectIsReplacementClone(CPed* ped, RwObject* obj) {
+    if (!ped || !obj)
+        return false;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return false;
+    auto it = g_heldWeaponReplacements.find(pedRef);
+    if (it == g_heldWeaponReplacements.end())
+        return false;
+    return it->second.rwObject == obj;
+}
+
 // `Events::pedRenderEvent` wraps an inner CALL inside `CPed::Render`, not the whole function. Restoring the
 // stock `m_pWeaponObject` in the event's "after" callback runs *before* the rest of `CPed::Render` draws the
 // vanilla held weapon, so the engine paints stock on top. Queue the stock pointer and write it in
 // `OrcFlushDeferredHeldWeaponSlotRestore` (D3D EndScene = after the scene is submitted for the frame).
+// Same timing applies to Guns TXD RwMaterial swaps: they are queued in a held defer list and restored at flush.
 static std::unordered_map<int, RwObject*> g_deferredHeldWeaponStockRestore;
 
 void OrcFlushDeferredHeldWeaponSlotRestore() {
+    /// `pedRenderEvent.after` fires before GTA draws held `m_pWeaponObject`; restores here (EndScene/Present).
+    OrcRestoreWeaponHeldTextureOverrides();
     if (g_deferredHeldWeaponStockRestore.empty())
         return;
     if (!CPools::ms_pPedPool) {
@@ -436,8 +456,21 @@ void OrcPrepareHeldWeaponTextureBefore(CPed* ped) {
     const int wt = ResolveWeaponTypeForHeldReplacement(ped);
     if (wt <= 0)
         return;
-    WeaponTextureAsset* asset = OrcResolveUsableWeaponTextureAssetForPed(ped, wt, true);
-    OrcApplyWeaponTextureToRwObject(ped->m_pWeaponObject, asset);
+    const std::string* heldReplHint = nullptr;
+    const int heldPref = CPools::GetPedRef(ped);
+    if (heldPref > 0) {
+        auto hit = g_heldWeaponReplacements.find(heldPref);
+        if (hit != g_heldWeaponReplacements.end() &&
+            hit->second.rwObject == ped->m_pWeaponObject &&
+            !hit->second.replacementKey.empty()) {
+            heldReplHint = &hit->second.replacementKey;
+        }
+    }
+    WeaponTextureAsset* asset = OrcResolveUsableWeaponTextureAssetForPed(ped, wt, true, heldReplHint);
+    const bool meshIsReplacement = HeldWeaponRwObjectIsReplacementClone(ped, ped->m_pWeaponObject);
+    OrcWeaponHeldTextureDeferBegin();
+    OrcApplyWeaponTexturesCombined(ped, wt, ped->m_pWeaponObject, asset, meshIsReplacement);
+    OrcWeaponHeldTextureDeferEnd();
 }
 
 void OrcDestroyAllHeldWeaponReplacementInstances() {
@@ -549,8 +582,11 @@ static void RenderHeldReplacementHideBaseForPed(CPed* ped, HeldWeaponReplacement
     }
 
     if (g_weaponTexturesEnabled) {
-        WeaponTextureAsset* tex = OrcResolveUsableWeaponTextureAssetForPed(ped, wt, true);
-        OrcApplyWeaponTextureToRwObject(state.rwObject, tex);
+        WeaponTextureAsset* tex = OrcResolveUsableWeaponTextureAssetForPed(ped,
+            wt,
+            true,
+            state.replacementKey.empty() ? nullptr : &state.replacementKey);
+        OrcApplyWeaponTexturesCombined(ped, wt, state.rwObject, tex, true);
     }
     SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
     OrcApplyAttachmentLightingForPed(ped, lightPos, 0.5f);
@@ -579,7 +615,6 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
         return;
     }
 
-    const bool hideBase = g_weaponReplacementHideBaseHeld;
     const int wt = ResolveWeaponTypeForHeldReplacement(ped);
     if (wt <= 0) {
         OrcLogInfoThrottled(22, 1200u, "held wr: wtRes<=0 pedRef=%d mid=%d", pedRefEarly, ped ? ped->m_nWeaponModelId : -1);
@@ -599,13 +634,13 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
             OrcLogInfoThrottled(24, 2500u,
                 "held wr: mapping present but unusable (load?) pedRef=%d wt=%d key=%s weapon=%s skin=\"%s\"",
                 pedRefEarly, wt, resolvedOnly->key.c_str(), wLower.c_str(), skinRaw.c_str());
-        } else {
+        } else if (!OrcWeaponReplacementIsStickyVanillaChoice(ped, wt)) {
             OrcLogInfoThrottled(23, 2500u,
-                "held wr: no mapping pedRef=%d wt=%d weapon=%s skin=\"%s\" sampKnown=%d nick=%d nick=\"%.48s\" skinKeys=%zu nickKeys=%zu randomPools=%zu",
+                "held wr: no mapping pedRef=%d wt=%d weapon=%s skin=\"%s\" sampKnown=%d nick=%d nick=\"%.48s\" wrPools=%zu srPools=%zu nickKeys=%zu",
                 pedRefEarly, wt, wLower.c_str(), skinRaw.c_str(),
                 samp_bridge::IsSampBuildKnown() ? 1 : 0, gotNick ? 1 : 0, nick,
-                OrcWeaponAssetsDbgReplacementSkinKeys(), OrcWeaponAssetsDbgReplacementNickKeys(),
-                OrcWeaponAssetsDbgRandomReplacementPools());
+                OrcWeaponAssetsDbgRandomReplacementWeaponPools(), OrcWeaponAssetsDbgRandomReplacementSkinPools(),
+                OrcWeaponAssetsDbgReplacementNickKeys());
         }
         return;
     }
@@ -634,11 +669,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
 
     // After CPed::Render ends we restore the stock mesh into the slot; next frame `m_pWeaponObject` is stock again.
     // Same-frame AddWeaponModel hook may leave the clone in the slot — sync pose from stock either way.
-    if (hideBase) {
-        if (state.captureActive && state.hideBaseMode && state.weaponType == wt && state.replacementKey == asset->key &&
-            state.rwObject)
-            return;
-    } else if (state.rwObject && state.originalObject && state.weaponType == wt && state.replacementKey == asset->key) {
+    if (state.rwObject && state.originalObject && state.weaponType == wt && state.replacementKey == asset->key) {
         if (ped->m_pWeaponObject == state.originalObject) {
             CopyRwObjectRootMatrix(state.originalObject, state.rwObject);
             SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
@@ -654,26 +685,15 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
         }
     }
 
-    // INI may request swap-in-slot, but SA:MP often leaves m_pWeaponObject null during ped render while wt still resolves.
-    // Re-use hide-base draw path (clone in pedRenderEvent.after) until a stock clump exists.
-    if (!hideBase && state.hideBaseMode && !state.originalObject && state.rwObject && state.weaponType == wt &&
+    // SA:MP may leave `m_pWeaponObject` null during ped render while wt still resolves.
+    // Re-use after-draw path (clone in pedRenderEvent.after) until a stock clump exists.
+    if (state.hideBaseMode && !state.originalObject && state.rwObject && state.weaponType == wt &&
         state.replacementKey == asset->key) {
         if (!ped->m_pWeaponObject) {
             state.captureActive = true;
             return;
         }
         state.hideBaseMode = false;
-    }
-
-    if (hideBase) {
-        state.originalObject = ped->m_pWeaponObject;
-        state.hideBaseMode = true;
-        state.captureActive = true;
-        ped->m_pWeaponObject = nullptr;
-        OrcLogInfoThrottled(28, 3000u,
-            "held wr: hide-base clear slot pedRef=%d wt=%d stockWasNonNull=%d",
-            pedRefEarly, wt, state.originalObject ? 1 : 0);
-        return;
     }
 
     if (!ped->m_pWeaponObject) {
@@ -683,8 +703,8 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
         const int wtMid = WeaponTypeFromModelId(mid);
         const int wtRes = ResolveWeaponTypeForHeldReplacement(ped);
         OrcLogInfoThrottled(21, 1200u,
-            "held wr: m_pWeaponObject=null pedRef=%d hideBase=%d wt=%d wtRel=%d mid=%d wtMid=%d wtRes=%d",
-            pedRefEarly, g_weaponReplacementHideBaseHeld ? 1 : 0, wtStrict, wtRel, mid, wtMid, wtRes);
+            "held wr: m_pWeaponObject=null pedRef=%d wt=%d wtRel=%d mid=%d wtMid=%d wtRes=%d",
+            pedRefEarly, wtStrict, wtRel, mid, wtMid, wtRes);
         // After-draw on bone (same as hide-base render); no stock clump to copy pose from.
         state.originalObject = nullptr;
         state.hideBaseMode = true;
@@ -775,16 +795,6 @@ static void OrcApplyHeldWeaponReplacementAfterAddWeaponModel(CPed* ped, int mode
         state.replacementKey = asset->key;
         if (!state.rwObject)
             return;
-    }
-
-    const bool hideBase = g_weaponReplacementHideBaseHeld;
-
-    if (hideBase) {
-        state.originalObject = ped->m_pWeaponObject;
-        state.hideBaseMode = true;
-        state.captureActive = true;
-        ped->m_pWeaponObject = nullptr;
-        return;
     }
 
     if (!ped->m_pWeaponObject) {
