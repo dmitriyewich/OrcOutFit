@@ -1,5 +1,5 @@
-﻿// OrcOutFit вЂ” СЂРёСЃСѓРµС‚ РѕСЂСѓР¶РёРµ/РѕР±СЉРµРєС‚С‹/СЃРєРёРЅС‹ РЅР° Р»РѕРєР°Р»СЊРЅРѕРј РёРіСЂРѕРєРµ.
-// РСЃРїРѕР»СЊР·СѓРµС‚ plugin-sdk Рё Р»РѕРіРёРєСѓ BaseModelRender.
+﻿// OrcOutFit — рисует оружие/объекты/скины на локальном игроке.
+// Использует plugin-sdk и логику BaseModelRender.
 
 #include "plugin.h"
 #include "common.h"
@@ -94,7 +94,7 @@ static void LogInit() {
 }
 
 // ----------------------------------------------------------------------------
-// Config: per-weapon attachment (С‚РёРїС‹ Рё РєРѕСЃС‚Рё: orc_types.h)
+// Config: per-weapon attachment (типы и кости: orc_types.h)
 // ----------------------------------------------------------------------------
 bool g_enabled = true;
 bool g_renderAllPedsWeapons = false;
@@ -133,7 +133,7 @@ static int(__cdecl* g_LoadPedObject_Orig)(const char* line) = nullptr;
 std::vector<std::string> g_pedModelNameById; // modelId -> name
 static std::vector<std::string> g_pedDatTxdById; // modelId -> txd
 
-// CPed::AddWeaponModel / RemoveWeaponModel вЂ” GTA SA 1.0 US (plugin-sdk).
+// CPed::AddWeaponModel / RemoveWeaponModel — GTA SA 1.0 US (plugin-sdk).
 // Held weapon mesh is created here; hooking aligns replacement timing with the engine (SA:MP friendly).
 static bool g_pedWeaponModelHooksInstalled = false;
 using AddWeaponModel_t = void(__thiscall*)(CPed*, int);
@@ -213,8 +213,8 @@ const char* OrcTryGetPedModelNameById(int modelId) {
 }
 
 static void InitWeaponTypesAndStorage() {
-    // Р’Р°Р¶РЅРѕ: `WeaponCfg::name` С…СЂР°РЅРёС‚ `const char*` РЅР° СЃС‚СЂРѕРєРѕРІС‹Рµ Р±СѓС„РµСЂС‹ `g_weaponNameStore`.
-    // РџРѕСЌС‚РѕРјСѓ СЃРєР°РЅ РґРµР»Р°РµРј РѕРґРЅРѕРєСЂР°С‚РЅРѕ, С‡С‚РѕР±С‹ РЅРµ РёРЅРІР°Р»РёРґРёСЂРѕРІР°С‚СЊ СЌС‚Рё СѓРєР°Р·Р°С‚РµР»Рё РїСЂРё РїРѕРІС‚РѕСЂРЅС‹С… `SetupDefaults()`.
+    // Важно: `WeaponCfg::name` хранит `const char*` на строковые буферы `g_weaponNameStore`.
+    // Поэтому скан делаем однократно, чтобы не инвалидировать эти указатели при повторных `SetupDefaults()`.
     if (g_weaponTypesReady) return;
     g_weaponTypesReady = false;
 
@@ -290,9 +290,9 @@ static void InitWeaponTypesAndStorage() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         OrcLogError("InitWeaponTypesAndStorage: SEH ex=0x%08X, using fallback weapon list",
             GetExceptionCode());
-        // Р•СЃР»Рё СЃРїРёСЃРѕРє СѓР¶Рµ С‡Р°СЃС‚РёС‡РЅРѕ Р·Р°РїРѕР»РЅРµРЅ (С‡Р°СЃС‚Рѕ Р±С‹РІР°РµС‚ РёР·-Р·Р° SEH РІ extra-СЃРєР°РЅРµ),
-        // РЅРµ РѕР±РЅСѓР»СЏРµРј РµРіРѕ РѕР±СЂР°С‚РЅРѕ РІ `1..68`. РћСЃС‚Р°РІР»СЏРµРј С‚Рѕ, С‡С‚Рѕ СѓСЃРїРµР»Рѕ РЅР°Р№С‚РёСЃСЊ,
-        // Рё РїСЂРѕСЃС‚Рѕ СЃС‚СЂРѕРёРј cfg РїРѕРґ С‚РµРєСѓС‰РёР№ maxId.
+        // Если список уже частично заполнен (часто бывает из-за SEH в extra-скане),
+        // не обнуляем его обратно в `1..68`. Оставляем то, что успело найтись,
+        // и просто строим cfg под текущий maxId.
         if (!g_availableWeaponTypes.empty()) {
             int maxId = 0;
             for (int wt : g_availableWeaponTypes) if (wt > maxId) maxId = wt;
@@ -354,10 +354,10 @@ std::string g_skinSelectedName;
 int g_skinSelectedSource = SKIN_SELECTED_CUSTOM;
 int g_standardSkinSelectedModelId = -1;
 
-// РЎРµРєС†РёСЏ INI в†’ РёРЅРґРµРєСЃ РѕСЂСѓР¶РёСЏ. Р”РµС„РѕР»С‚РЅС‹Рµ СЂР°СЃРїРѕР»РѕР¶РµРЅРёСЏ РІ СЃС‚РёР»Рµ С‚Р°РєС‚РёС‡РµСЃРєРѕР№ РІС‹РєР»Р°РґРєРё.
-// РћСЃРё РєРѕСЃС‚Рё (РЅР°Р±Р»СЋРґРµРЅРёРµ): X = РІРґРѕР»СЊ "right", Y = РІРґРѕР»СЊ "up" (spine) / "at" (Р±РµРґСЂРѕ), Z = "at/up".
-// РџР°СЂР°РјРµС‚СЂС‹ РїРѕРґР±РёСЂР°Р»РёСЃСЊ С‚Р°Рє, С‡С‚РѕР±С‹ РґР»РёРЅРЅС‹Рµ СЃС‚РІРѕР»С‹ С€Р»Рё РїРѕ РґРёР°РіРѕРЅР°Р»Рё Р·Р° СЃРїРёРЅРѕР№,
-// РїРёСЃС‚РѕР»РµС‚С‹ РІРёСЃРµР»Рё РІ Р±РµРґСЂРµРЅРЅС‹С… РєРѕР±СѓСЂР°С…, SMG вЂ” РїРѕРґ Р»РµРІРѕР№ СЂСѓРєРѕР№ Сѓ РїРѕСЏСЃР°.
+// Секция INI → индекс оружия. Дефолтные расположения в стиле тактической выкладки.
+// Оси кости (наблюдение): X = вдоль "right", Y = вдоль "up" (spine) / "at" (бедро), Z = "at/up".
+// Параметры подбирались так, чтобы длинные стволы шли по диагонали за спиной,
+// пистолеты висели в бедренных кобурах, SMG — под левой рукой у пояса.
 static void Set(int wt, const char* name, int bone,
                 float x, float y, float z,
                 float rxDeg = 0, float ryDeg = 0, float rzDeg = 0,
@@ -386,9 +386,9 @@ static void Set2(int wt, int bone,
     c.scale = scale;
 }
 
-// 10 СЃР»РѕС‚РѕРІ SA в†’ СЂР°СЃРїСЂРµРґРµР»РµРЅРёРµ РїРѕ СЂР°Р·РЅС‹Рј РєРѕСЃС‚СЏРј.
+// 10 слотов SA → распределение по разным костям.
 // Slot 1 melee / Slot 2 pistols / Slot 3 shotguns / Slot 4 SMG /
-// Slot 5 assault / Slot 6 rifles / Slot 7 heavy / Slot 8 thrown Рё С‚.Рґ.
+// Slot 5 assault / Slot 6 rifles / Slot 7 heavy / Slot 8 thrown и т.д.
 static void SetupDefaults() {
     InitWeaponTypesAndStorage();
 
@@ -405,7 +405,7 @@ static void SetupDefaults() {
         g_cfg[wt].name = g_weaponNameStore[wt].c_str();
     }
 
-    // --- Slot 1: С…РѕР»РѕРґРЅРѕРµ РѕСЂСѓР¶РёРµ ---
+    // --- Slot 1: холодное оружие ---
     Set(WEAPONTYPE_KNIFE,        "Knife",        BONE_R_CALF,   0.02f, -0.08f,  0.05f,   0, 0,   0);
     Set(WEAPONTYPE_BASEBALLBAT,  "BaseballBat",  BONE_SPINE1,   0.25f, -0.05f,  0.00f,  15, 0,   0);
     Set(WEAPONTYPE_GOLFCLUB,     "GolfClub",     BONE_SPINE1,   0.25f, -0.05f,  0.00f,  15, 0,   0);
@@ -415,7 +415,7 @@ static void SetupDefaults() {
     Set(WEAPONTYPE_KATANA,       "Katana",       BONE_SPINE1,   0.27f, -0.08f,  0.00f, -20, 0,   0);
     Set(WEAPONTYPE_CHAINSAW,     "Chainsaw",     BONE_SPINE1,   0.28f, -0.18f,  0.00f,   0, 0,  90);
 
-    // --- Slot 2: РїРёСЃС‚РѕР»РµС‚С‹ вЂ” РїСЂР°РІР°СЏ Р±РµРґСЂРµРЅРЅР°СЏ РєРѕР±СѓСЂР° ---
+    // --- Slot 2: пистолеты — правая бедренная кобура ---
     Set(WEAPONTYPE_PISTOL,          "Pistol",          BONE_R_THIGH, 0.05f, -0.08f, 0.08f);
     Set(WEAPONTYPE_PISTOL_SILENCED, "PistolSilenced",  BONE_R_THIGH, 0.05f, -0.08f, 0.08f);
     Set(WEAPONTYPE_DESERT_EAGLE,    "DesertEagle",     BONE_R_THIGH, 0.06f, -0.08f, 0.10f);
@@ -424,44 +424,44 @@ static void SetupDefaults() {
     Set2(WEAPONTYPE_PISTOL_SILENCED, BONE_L_THIGH, 0.05f, -0.08f, -0.08f);
     Set2(WEAPONTYPE_DESERT_EAGLE,    BONE_L_THIGH, 0.06f, -0.08f, -0.10f);
 
-    // --- Slot 3: РґСЂРѕР±РѕРІРёРєРё ---
+    // --- Slot 3: дробовики ---
     Set(WEAPONTYPE_SHOTGUN, "Shotgun", BONE_SPINE1,  0.27f, -0.13f,  0.00f,  20, 0, 0);
-    Set(WEAPONTYPE_SAWNOFF, "Sawnoff", BONE_L_CALF,  0.00f, -0.10f,  0.06f,   0, 0, 0);  // РЅР° РЅРѕРіРµ
+    Set(WEAPONTYPE_SAWNOFF, "Sawnoff", BONE_L_CALF,  0.00f, -0.10f,  0.06f,   0, 0, 0);  // на ноге
     Set(WEAPONTYPE_SPAS12,  "Spas12",  BONE_SPINE1,  0.27f, -0.13f,  0.00f, -20, 0, 0);
 
-    // --- Slot 4: SMG вЂ” Р»РµРІРѕРµ РїР»РµС‡Рѕ/Р±РѕРє ---
+    // --- Slot 4: SMG — левое плечо/бок ---
     Set(WEAPONTYPE_MICRO_UZI, "MicroUzi", BONE_L_CLAVIC, 0.05f, -0.12f,  0.08f, 0, 0, -15);
     Set(WEAPONTYPE_MP5,       "MP5",      BONE_L_UPARM,  0.00f, -0.15f,  0.08f, 0, 0,   0);
     Set(WEAPONTYPE_TEC9,      "Tec9",     BONE_L_THIGH,  0.06f, -0.08f, -0.06f, 0, 0,   0);
 
-    // --- Slot 5: С€С‚СѓСЂРјРѕРІС‹Рµ РІРёРЅС‚РѕРІРєРё вЂ” РїРµСЂРµРІСЏР·СЊ С‡РµСЂРµР· СЃРїРёРЅСѓ ---
+    // --- Slot 5: штурмовые винтовки — перевязь через спину ---
     Set(WEAPONTYPE_AK47, "AK47", BONE_SPINE1, 0.28f, -0.10f, 0.05f,  10, 0,  0);
     Set(WEAPONTYPE_M4,   "M4",   BONE_SPINE1, 0.28f, -0.10f, 0.05f,  10, 0,  0);
 
-    // --- Slot 6: СЂСѓР¶СЊСЏ/СЃРЅР°Р№РїРµСЂРєРё вЂ” РїСЂР°РІРѕРµ РїР»РµС‡Рѕ ---
+    // --- Slot 6: ружья/снайперки — правое плечо ---
     Set(WEAPONTYPE_COUNTRYRIFLE, "CountryRifle", BONE_R_CLAVIC, 0.05f, -0.12f, -0.06f, 0, 0,  15);
     Set(WEAPONTYPE_SNIPERRIFLE,  "SniperRifle",  BONE_R_CLAVIC, 0.05f, -0.12f, -0.06f, 0, 0,  15);
 
-    // --- Slot 7: С‚СЏР¶С‘Р»РѕРµ вЂ” С†РµРЅС‚СЂ СЃРїРёРЅС‹ ---
+    // --- Slot 7: тяжёлое — центр спины ---
     Set(WEAPONTYPE_RLAUNCHER,    "RocketLauncher",   BONE_SPINE1, 0.30f, -0.08f, 0.00f);
     Set(WEAPONTYPE_RLAUNCHER_HS, "HeatseekLauncher", BONE_SPINE1, 0.30f, -0.08f, 0.00f);
     Set(WEAPONTYPE_FTHROWER,     "Flamethrower",     BONE_SPINE1, 0.30f, -0.08f, 0.00f);
     Set(WEAPONTYPE_MINIGUN,      "Minigun",          BONE_SPINE1, 0.32f, -0.08f, 0.00f, 0, 0, 0, 0.9f);
 
-    // --- Slot 8: РјРµС‚Р°С‚РµР»СЊРЅРѕРµ вЂ” РїРѕСЏСЃ ---
+    // --- Slot 8: метательное — пояс ---
     Set(WEAPONTYPE_GRENADE,        "Grenade",  BONE_PELVIS, 0.10f, -0.05f,  0.08f);
     Set(WEAPONTYPE_TEARGAS,        "Teargas",  BONE_PELVIS, 0.10f, -0.05f, -0.08f);
     Set(WEAPONTYPE_MOLOTOV,        "Molotov",  BONE_PELVIS,-0.10f, -0.05f,  0.08f);
     Set(WEAPONTYPE_SATCHEL_CHARGE, "Satchel",  BONE_PELVIS,-0.10f, -0.05f, -0.08f);
 
-    // --- Slot 9: gift (СЂРµРґРєРѕ) вЂ” РІС‹РєР»СЋС‡РµРЅРѕ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ ---
-    // --- Slot 10: СЃРїРµС†РёР°Р»СЊРЅС‹Рµ (РєР°РјРµСЂР°/spraycan/РѕРіРЅРµС‚СѓС€РёС‚РµР»СЊ/РїР°СЂР°С€СЋС‚) ---
+    // --- Slot 9: gift (редко) — выключено по умолчанию ---
+    // --- Slot 10: специальные (камера/spraycan/огнетушитель/парашют) ---
     Set(WEAPONTYPE_EXTINGUISHER,  "Extinguisher", BONE_SPINE1, 0.30f, -0.08f, 0.00f);
     Set(WEAPONTYPE_SPRAYCAN,      "Spraycan",     BONE_PELVIS,  0.00f, -0.05f, 0.10f);
     Set(WEAPONTYPE_CAMERA,        "Camera",       BONE_PELVIS,  0.00f, -0.05f, 0.10f);
     Set(WEAPONTYPE_PARACHUTE,     "Parachute",    BONE_SPINE1,  0.25f, -0.05f, 0.00f, 0, 0, 0, 1.0f);
 
-    // --- Slot 11: РґРµС‚РѕРЅР°С‚РѕСЂ вЂ” РЅР° РїРѕСЏСЃРµ ---
+    // --- Slot 11: детонатор — на поясе ---
     Set(WEAPONTYPE_DETONATOR, "Detonator", BONE_PELVIS, 0.12f, -0.02f, 0.00f);
 }
 
@@ -626,7 +626,7 @@ void LoadConfig() {
         if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
         auto& c = g_cfg[wt];
         if (c.name && c.name[0] && HasWeaponSection(c.name, g_iniPath)) ReadSection(c, c.name);
-        // Fallback РґР»СЏ РєР°СЃС‚РѕРјРЅРѕРіРѕ РѕСЂСѓР¶РёСЏ: СЃРµРєС†РёСЏ [WeaponNN].
+        // Fallback для кастомного оружия: секция [WeaponNN].
         char sec[32];
         _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
         if (HasWeaponSection(sec, g_iniPath)) {
@@ -743,8 +743,8 @@ static void SaveDefaultConfig() {
           "; Offsets are in meters along bone local axes (X=right, Y=up, Z=at).\n"
           "; Rotations are in degrees, applied pre-concat in model space.\n"
           ";   RX tilts around bone right, RY around up, RZ around at.\n"
-          "; Р”Р»СЏ РЅРµСЃС‚Р°РЅРґР°СЂС‚РЅРѕРіРѕ РѕСЂСѓР¶РёСЏ (РјРѕРґ) РјРѕР¶РЅРѕ РґРѕР±Р°РІРёС‚СЊ СЃРµРєС†РёСЋ [WeaponNN],\n"
-          "; РіРґРµ NN = С‡РёСЃР»РѕРІРѕР№ eWeaponType (РЅР°РїСЂРёРјРµСЂ [Weapon50]).\n\n"
+          "; Для нестандартного оружия (мод) можно добавить секцию [WeaponNN],\n"
+          "; где NN = числовой eWeaponType (например [Weapon50]).\n\n"
           "[Main]\n"
           "Enabled=1\n"
           "Language=ru\n"
@@ -1423,8 +1423,8 @@ static void OnShutdownRw() {
 class OrcOutFit {
 public:
     OrcOutFit() {
-        // LoadConfig РѕС‚РєР»Р°РґС‹РІР°РµРј РґРѕ РїРµСЂРІРѕРіРѕ РєР°РґСЂР°: Рє СЌС‚РѕРјСѓ РјРѕРјРµРЅС‚Сѓ DllMain СѓР¶Рµ
-        // РїСЂРѕСЃС‚Р°РІРёС‚ g_iniPath С‡РµСЂРµР· LogInit().
+        // LoadConfig откладываем до первого кадра: к этому моменту DllMain уже
+        // проставит g_iniPath через LogInit().
         Events::initRwEvent.after += &OnInitRw;
         Events::drawingEvent += &OnDrawingEvent;
         OrcSkinsRegisterPreviewHook();
@@ -1434,10 +1434,10 @@ public:
         Events::pedRenderEvent.after += &OnPedRenderAfter;
         Events::d3dLostEvent += &OnD3dLost;
         Events::d3dResetEvent += &OnD3dReset;
-        // РџСЂРё shutdownRwEvent СЃС†РµРЅР° СѓР¶Рµ С‡Р°СЃС‚РёС‡РЅРѕ СЂР°Р·РѕР±СЂР°РЅР°, RpClumpDestroy РЅР°
-        // РєР»РѕРЅРёСЂРѕРІР°РЅРЅС‹С… РјР°С‚РµСЂРёР°Р»Р°С… РїР°РґР°РµС‚ РІ CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB
-        // (env map plugin data СЃСЃС‹Р»Р°РµС‚СЃСЏ РЅР° СѓР¶Рµ РѕСЃРІРѕР±РѕР¶РґС‘РЅРЅСѓСЋ С‚РµРєСЃС‚СѓСЂСѓ).
-        // РџР°С‚С‡РёРј СЃР°Рј РґРµСЃС‚СЂСѓРєС‚РѕСЂ РЅР° RET вЂ” Р±РµР·РІСЂРµРґРЅРѕ С‚.Рє. РїСЂРѕС†РµСЃСЃ РІСЃС‘ СЂР°РІРЅРѕ Р·Р°РІРµСЂС€Р°РµС‚СЃСЏ.
+        // При shutdownRwEvent сцена уже частично разобрана, RpClumpDestroy на
+        // клонированных материалах падает в CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB
+        // (env map plugin data ссылается на уже освобождённую текстуру).
+        // Патчим сам деструктор на RET — безвредно т.к. процесс всё равно завершается.
         Events::shutdownRwEvent += &OnShutdownRw;
     }
 } g_plugin;

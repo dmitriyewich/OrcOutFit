@@ -124,7 +124,7 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
     }
     if (!inst) return false;
 
-    // РЎР±СЂРѕСЃ render-callback РЅР° РґРµС„РѕР»С‚РЅС‹Р№ RW + leak РјР°С‚РµСЂРёР°Р»РѕРІ (СЃРј. InitAtomicCB).
+    // Сброс render-callback на дефолтный RW + leak материалов (см. InitAtomicCB).
     if (inst->type == rpCLUMP) {
         RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), OrcInitAttachmentAtomicCB, nullptr);
     } else if (inst->type == rpATOMIC) {
@@ -211,7 +211,7 @@ static RwFrame* GetRwObjectRootFrame(RwObject* object) {
 }
 
 // Align replacement clone root to stock weapon pose before handing it to CPed as m_pWeaponObject,
-// so the engine continues IK from the same basis as vanilla (reduces вЂњfloatingвЂќ vs hand).
+// so the engine continues IK from the same basis as vanilla (reduces “floating” vs hand).
 static void CopyRwObjectRootMatrix(RwObject* src, RwObject* dst) {
     if (!src || !dst)
         return;
@@ -484,10 +484,10 @@ void OrcPruneHeldWeaponReplacementInstances() {
     }
 }
 
-// R_Hand (RpHAnim node id) вЂ” fallback when weapon has no enabled body slot in OrcOutFit.ini.
+// R_Hand (RpHAnim node id) — fallback when weapon has no enabled body slot in OrcOutFit.ini.
 static constexpr int kHeldReplacementFallbackBoneId = 24;
 
-// Same placement math as RenderOneWeapon / body attachments (no SetupLighting вЂ” avoids breaking scene lights).
+// Same placement math as RenderOneWeapon / body attachments (no SetupLighting — avoids breaking scene lights).
 // If [weapon] is disabled or Bone=0 in INI, uses kHeldReplacementFallbackBoneId so hide-base still draws.
 static bool PositionHeldReplacementLikeBodyWeapon(CPed* ped, int wt, RwObject* rwObject) {
     if (!ped || !rwObject || wt <= 0 || wt >= (int)g_cfg.size())
@@ -633,7 +633,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
         return;
 
     // After CPed::Render ends we restore the stock mesh into the slot; next frame `m_pWeaponObject` is stock again.
-    // Same-frame AddWeaponModel hook may leave the clone in the slot вЂ” sync pose from stock either way.
+    // Same-frame AddWeaponModel hook may leave the clone in the slot — sync pose from stock either way.
     if (hideBase) {
         if (state.captureActive && state.hideBaseMode && state.weaponType == wt && state.replacementKey == asset->key &&
             state.rwObject)
@@ -696,7 +696,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     }
 
     // Do not assign stock weapon renderCallBack onto the clone: CVisibilityPlugins::RenderWeaponCB
-    // expects weapon visibility-plugin data on each RpAtomic; replacement clones don't have it в†’ AV (+0x18).
+    // expects weapon visibility-plugin data on each RpAtomic; replacement clones don't have it → AV (+0x18).
     // InitAttachmentAtomicCB clears callbacks so RpClumpRender uses the default atomic path.
     CopyRwObjectRootMatrix(ped->m_pWeaponObject, state.rwObject);
     SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);

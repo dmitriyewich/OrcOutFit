@@ -190,6 +190,12 @@
 
 Зависимости: **plugin-sdk**, **imgui**, **MinHook** в `source\external\`.
 
+### Кодировка исходников (UTF-8)
+
+- Файлы **`source\*.cpp`** и **`source\*.h`**, кроме vendored **`source\external\`**, храните в **UTF-8** (в Visual Studio: «Сохранить с кодировкой…» → UTF-8; в VS Code: кодировка UTF-8). Проект компилируется с **`/utf-8`**. Сохранение в **Windows-1251** или другой **ANSI**-странице портит русские комментарии (двойная «перекодировка»).
+- Пользовательский текст интерфейса — только через **`source/orc_locale.cpp`**, а не новыми строками в произвольных модулях.
+- Скрипт ручного восстановления: **`tools/fix_mojibake.py`** (нужен Python 3 и пакет `ftfy`: `py -3 -m pip install ftfy`).
+
 ### GitHub Actions (Release Win32)
 
 - Workflow: **`.github/workflows/build-release-win32.yml`**.
@@ -344,6 +350,7 @@ TXD должен содержать текстуры с теми же имена
 | `source/orc_ui.cpp` | ImGui (кроме вынесенного UI оружия) |
 | `source/overlay.cpp` | D3D9 hooks + ввод/курсор |
 | `source/samp_bridge.cpp` | SA:MP |
+| `tools/fix_mojibake.py` | Опционально: исправление случайно испорченной UTF-8 в исходниках (см. «Кодировка исходников») |
 
 ---
 
