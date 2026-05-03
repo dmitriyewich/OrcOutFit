@@ -154,6 +154,8 @@
     X(EnableWeaponReplacement, "Включить замену оружия", "Enable weapon replacement") \
     X(ReplaceWeaponsOnBody, "Заменять оружие на теле", "Replace weapons on body") \
     X(ReplaceWeaponsInHands, "Заменять оружие в руках", "Replace weapons in hands") \
+    X(WeaponHudIconFromGunsTxd, "HUD: иконка оружия из Guns/замены (`<оружие>icon`)", "HUD: weapon icon from Guns/replacement (`<weapon>icon`)") \
+    X(WeaponHudIconFromGunsTxdHint, "Только локальный игрок. В TXD Guns логично называть иконку «папка_типа + icon» — например desert_eagleicon в любом файле под Weapons\\Guns\\desert_eagle\\ (в т.ч. malorianarms3516.txd), без привязки к basename варианта. Если в weapon.dat/Ide худ запрашивает другое имя (например colt45icon), плагин делает ремап на вашу текстуру.", "Local player only. In Guns TXDs, name the HUD icon as the Guns weapon-folder name plus icon — e.g. desert_eagleicon inside any file under Weapons\\Guns\\desert_eagle\\ (including malorianarms3516.txd), regardless of variant basename. If weapon.dat/Ide requests another sprite name (e.g. colt45icon), the plugin remaps to your desert_eagleicon.") \
     X(WeaponReplacementRandomIncludeVanilla, "Добавлять штатное оружие в пул Guns random", "Include vanilla weapon in Guns random pools") \
     X(WeaponReplacementRandomIncludeVanillaHint, "При выборе random из Guns вариантом может оказаться обычная модель игры (без замены по DFF).", "When random picks from Guns, one outcome can be the stock game weapon (no DFF replacement).") \
     X(WeaponReplacementStatsFormat, "Guns: %d общий random, %d по скину. GunsNick: %d.", "Guns: %d weapon-random, %d skin-random. GunsNick: %d.") \

@@ -38,6 +38,11 @@ void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* 
 int OrcRenderPedWeapons(CPed* ped, RenderedWeapon* arr);
 
 void OrcWeaponEnsurePedModelHooksInstalled();
+/// Same weapon-type resolution path as held replacement / Guns TXD (`m_aWeapons`, `m_nWeaponModelId`, saved weapon).
+int OrcResolveWeaponHeldVisualWeaponType(CPed* ped);
+/// If ped slots read empty but Guns held clone exists (SA:MP), reuse its weapon type for HUD icon resolution.
+int OrcWeaponHudGetHeldReplacementWeaponTypeIfAny(CPed* ped);
+void OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
 
 void OrcPrepareHeldWeaponTextureBefore(CPed* ped);
 void OrcPrepareHeldWeaponReplacementBefore(CPed* ped);

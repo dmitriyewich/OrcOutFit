@@ -115,6 +115,7 @@ bool g_weaponTexturesEnabled = true;
 bool g_weaponTextureNickMode = true;
 bool g_weaponTextureRandomMode = true;
 bool g_weaponTextureStandardRemap = true;
+bool g_weaponHudIconFromGunsTxd = true;
 std::vector<WeaponCfg> g_cfg;
 std::vector<WeaponCfg> g_cfg2; // secondary dual-wield placement
 bool g_livePreviewWeaponsActive = false;
@@ -622,6 +623,7 @@ void LoadConfig() {
     g_weaponTextureNickMode = GetPrivateProfileIntA("Features", "WeaponTextureNickMode", 1, g_iniPath) != 0;
     g_weaponTextureRandomMode = GetPrivateProfileIntA("Features", "WeaponTextureRandomMode", 1, g_iniPath) != 0;
     g_weaponTextureStandardRemap = GetPrivateProfileIntA("Features", "WeaponTextureStandardRemap", 1, g_iniPath) != 0;
+    g_weaponHudIconFromGunsTxd = GetPrivateProfileIntA("Features", "WeaponHudIconFromGunsTxd", 1, g_iniPath) != 0;
     for (int wt : g_availableWeaponTypes) {
         if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
         auto& c = g_cfg[wt];
@@ -722,6 +724,7 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "WeaponTextureNickMode", g_weaponTextureNickMode ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextureRandomMode", g_weaponTextureRandomMode ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextureStandardRemap", g_weaponTextureStandardRemap ? 1 : 0);
+    AddIniInt(values, "Features", "WeaponHudIconFromGunsTxd", g_weaponHudIconFromGunsTxd ? 1 : 0);
     OrcAppendSkinFeatureIniValues(values);
     AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
     AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
@@ -772,6 +775,8 @@ static void SaveDefaultConfig() {
           "WeaponTextureNickMode=1\n"
           "WeaponTextureRandomMode=1\n"
           "WeaponTextureStandardRemap=1\n"
+          "; HUD weapon icon uses `<weapon>icon` from Orc Guns texture / replacement dictionary when present (local player).\n"
+          "WeaponHudIconFromGunsTxd=1\n"
           "SkinMode=0\n"
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
@@ -1045,6 +1050,7 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "WeaponTextureNickMode=%d\n", g_weaponTextureNickMode ? 1 : 0);
     AppendFormat(out, "WeaponTextureRandomMode=%d\n", g_weaponTextureRandomMode ? 1 : 0);
     AppendFormat(out, "WeaponTextureStandardRemap=%d\n", g_weaponTextureStandardRemap ? 1 : 0);
+    AppendFormat(out, "WeaponHudIconFromGunsTxd=%d\n", g_weaponHudIconFromGunsTxd ? 1 : 0);
     AppendFormat(out, "SkinMode=%d\n", g_skinModeEnabled ? 1 : 0);
     AppendFormat(out, "SkinHideBasePed=%d\n", g_skinHideBasePed ? 1 : 0);
     AppendFormat(out, "SkinNickMode=%d\n", g_skinNickMode ? 1 : 0);
@@ -1382,6 +1388,9 @@ static void OnDrawingEvent() {
         }
     }
     samp_bridge::Poll(g_toggleCommand.c_str(), &ToggleOverlayFromSamp);
+    // `CHud::DrawAmmo` / `DrawWeaponIcon`: push Orc Guns/replacement TXD for `CSprite2d::SetTexture` during HUD draw.
+    // for `SetTexture` + refresh intercept cache on `drawingEvent`.
+    OrcWeaponHudRefreshSampSpriteInterceptCache();
     RefreshActivationRouting();
     overlay::Init();  // no-op after first time
     ApplyPendingLocalPlayerModel();
@@ -1465,6 +1474,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         OrcWeaponsEnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();
         OrcWeaponEnsurePedModelHooksInstalled();
+        OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
         OrcTextureRemapInstallHooks();
     }
     return TRUE;

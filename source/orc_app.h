@@ -43,6 +43,8 @@ extern bool g_weaponTextureNickMode;
 extern bool g_weaponTextureRandomMode;
 /// Use `*_remap` pairs inside the game's loaded weapon model TXD (PedFuncs-style per slot).
 extern bool g_weaponTextureStandardRemap;
+/// HUD `DrawWeaponIcon`: if Guns/replacement dictionary has `<weapon>icon`, use as current TXD for the call (local player).
+extern bool g_weaponHudIconFromGunsTxd;
 
 extern std::vector<WeaponCfg> g_cfg;
 extern std::vector<WeaponCfg> g_cfg2;

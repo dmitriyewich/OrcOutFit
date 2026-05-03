@@ -316,6 +316,8 @@ void OrcWeaponsUiDrawWeaponsTab() {
             OrcUiCheckbox("weapon_replacement_enabled", WT(OrcTextId::EnableWeaponReplacement), &g_weaponReplacementEnabled);
             OrcUiCheckbox("weapon_replacement_body", WT(OrcTextId::ReplaceWeaponsOnBody), &g_weaponReplacementOnBody);
             OrcUiCheckbox("weapon_replacement_hands", WT(OrcTextId::ReplaceWeaponsInHands), &g_weaponReplacementInHands);
+            OrcUiCheckbox("weapon_hud_icon_guns_txd", WT(OrcTextId::WeaponHudIconFromGunsTxd), &g_weaponHudIconFromGunsTxd);
+            ImGui::TextWrapped("%s", WT(OrcTextId::WeaponHudIconFromGunsTxdHint));
             OrcUiCheckbox("weapon_replacement_rand_vanilla",
                 WT(OrcTextId::WeaponReplacementRandomIncludeVanilla),
                 &g_weaponReplacementRandomIncludeVanilla);
