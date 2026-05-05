@@ -1284,6 +1284,30 @@ void OrcTextureRemapClearRuntimeState() {
     g_clumpTextureRemaps.clear();
 }
 
+int OrcTextureRemapQueryMaxLinkedVariantsForTxd(int txdIndex) {
+    if (!g_enabled || txdIndex < 0)
+        return 0;
+    RwTexDictionary* dict = GetTxdDictionaryByIndex(txdIndex);
+    if (!dict)
+        return 0;
+    PedTextureRemapState out{};
+    out.modelId = -1;
+    out.txdIndex = txdIndex;
+    TextureRemapScanCtx ctx;
+    ctx.state = &out;
+    ctx.dict = dict;
+    __try {
+        RwTexDictionaryForAllTextures(dict, TextureRemapCollectTextureCB, &ctx);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("texture remap txd query: SEH ex=0x%08X txd=%d", GetExceptionCode(), txdIndex);
+        return 0;
+    }
+    int maxVariants = 0;
+    for (int i = 0; i < out.slotCount; ++i)
+        maxVariants = std::max(maxVariants, (int)out.slots[(size_t)i].remaps.size());
+    return maxVariants;
+}
+
 void OrcTextureRemapOnProcessScripts() {
     if (CCutsceneMgr::ms_running)
         g_textureRemapCutsceneLastTime = CTimer::m_snTimeInMilliseconds;

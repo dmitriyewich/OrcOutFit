@@ -25,7 +25,6 @@
     X(TabCustomSkins, "Кастомные скины", "Custom skins") \
     X(TabStandardSkins, "Стандартные скины", "Standard skins") \
     X(TabRandomSkins, "Рандомные скины", "Random skins") \
-    X(TabSkinPreview, "Предпросмотр скинов", "Skin preview") \
     X(TabTexture, "Текстуры", "Texture") \
     X(TabWeaponTextures, "Текстуры", "Textures") \
     X(BoneNone, "(нет)", "(none)") \
@@ -126,15 +125,6 @@
     X(RescanObjectsFolder, "Пересканировать папку Objects", "Rescan Objects folder") \
     X(CustomSkinsHint, "Кастомные скины - DFF/TXD в папке Skins.", "Custom skins - DFF/TXD in Skins folder.") \
     X(StandardSkinsHint, "Стандартные скины используют модели ped из игры: overlay поверх ped или примерка через SetModelIndex.", "Standard skins use game ped models: overlay on ped or preview via SetModelIndex.") \
-    X(StandardSkinPreview, "Предпросмотр", "Preview") \
-    X(StandardSkinPreviewUnavailable, "Предпросмотр пока недоступен.", "Preview is not available yet.") \
-    X(SkinPreviewSource, "Источник предпросмотра", "Preview source") \
-    X(SkinPreviewStandard, "Стандартный скин", "Standard skin") \
-    X(SkinPreviewCustom, "Кастомный скин", "Custom skin") \
-    X(SkinPreviewRandom, "Рандомный скин", "Random skin") \
-    X(SkinPreviewVariant, "Вариант", "Variant") \
-    X(SkinPreviewYaw, "Поворот", "Yaw") \
-    X(SkinPreviewHint, "Предпросмотр рендерится в отдельную D3D9-текстуру перед основным RenderWare-рендером и использует ту же позу/цепочку света, что overlay-скины.", "Preview renders into a separate D3D9 texture before the main RenderWare pass and uses the same pose/lighting path as overlay skins.") \
     X(RandomSkinsHint, "Пулы берутся из OrcOutFit\\Skins\\Random\\<dff>\\*.dff и выбираются для ped с тем же DFF из ped.dat.", "Pools are read from OrcOutFit\\Skins\\Random\\<dff>\\*.dff and selected for peds with the same ped.dat DFF.") \
     X(EnableRandomSkins, "Включить рандомные скины", "Enable random skins") \
     X(RandomSkinPoolsFormat, "Пулов: %d, вариантов: %d", "Pools: %d, variants: %d") \

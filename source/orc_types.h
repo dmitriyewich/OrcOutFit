@@ -119,19 +119,6 @@ struct SkinRandomPoolInfo {
     int variants = 0;
 };
 
-enum SkinPreviewSource {
-    SKIN_PREVIEW_STANDARD = 0,
-    SKIN_PREVIEW_CUSTOM = 1,
-    SKIN_PREVIEW_RANDOM = 2,
-};
-
-struct SkinPreviewRandomVariantInfo {
-    std::string label;
-    std::string poolDffName;
-    int modelId = -1;
-    int variantIndex = -1;
-};
-
 struct WeaponReplacementStats {
     /// Entries under `Weapons\\Guns\\<weapon>\\*.dff` (per-weapon random pool).
     int randomWeaponWeapons = 0;

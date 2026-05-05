@@ -1346,14 +1346,12 @@ static void OnDrawingEvent();
 static void OnPedRenderBefore(CPed* ped);
 static void OnPedRenderAfter(CPed* ped);
 static void OnD3dLost() {
-    OrcSkinsDestroyPreview();
     OrcRestoreWeaponTextureOverrides();
     OrcRestoreWeaponHeldTextureOverrides();
     OrcTextureRemapRestoreAfter();
     overlay::OnResetBefore();
 }
 static void OnD3dReset() {
-    OrcSkinsDestroyPreview();
     OrcRestoreWeaponTextureOverrides();
     OrcRestoreWeaponHeldTextureOverrides();
     OrcTextureRemapRestoreAfter();
@@ -1449,7 +1447,6 @@ public:
         // проставит g_iniPath через LogInit().
         Events::initRwEvent.after += &OnInitRw;
         Events::drawingEvent += &OnDrawingEvent;
-        OrcSkinsRegisterPreviewHook();
         Events::processScriptsEvent += &OrcTextureRemapOnProcessScripts;
         Events::pedSetModelEvent += &OrcTextureRemapOnPedSetModel;
         Events::pedRenderEvent.before += &OnPedRenderBefore;
