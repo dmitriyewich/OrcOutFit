@@ -1,10 +1,11 @@
 name: Build OrcOutFit Win32
 # run-name (приоритет):
 # 1) release — сначала название релиза, иначе tag_name;
-# 2) push в main — первая строка сообщения коммита (head_commit.message) · ветка (#run);
+# 2) push в main — head_commit.message · ветка (#run); в выражениях GHA нет replace() — многострочные
+#    сообщения могут дать перенос в заголовке run (ограничение платформы).
 # 3) workflow_dispatch — у payload нет head_commit: «manual · ветка · полный SHA (#run)»;
 # 4) иначе — ветка (#run).
-run-name: ${{ github.event_name == 'release' && (github.event.release.name || github.event.release.tag_name) || github.event_name == 'push' && github.event.head_commit && github.event.head_commit.message && format('{0} · {1} (#{2})', replace(github.event.head_commit.message, '\n', ' · '), github.ref_name, github.run_number) || github.event_name == 'workflow_dispatch' && format('manual · {0} · {1} (#{2})', github.ref_name, github.sha, github.run_number) || format('{0} (#{1})', github.ref_name, github.run_number) }}
+run-name: ${{ github.event_name == 'release' && (github.event.release.name || github.event.release.tag_name) || github.event_name == 'push' && github.event.head_commit && github.event.head_commit.message && format('{0} · {1} (#{2})', github.event.head_commit.message, github.ref_name, github.run_number) || github.event_name == 'workflow_dispatch' && format('manual · {0} · {1} (#{2})', github.ref_name, github.sha, github.run_number) || format('{0} (#{1})', github.ref_name, github.run_number) }}
 
 on:
   workflow_dispatch:
