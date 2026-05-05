@@ -325,6 +325,26 @@ struct DeferredHeldWeaponSlotRestore {
 };
 static std::unordered_map<int, DeferredHeldWeaponSlotRestore> g_deferredHeldWeaponStockRestore;
 
+// After `pedRenderEvent.after` we queue stock+clone and leave the clone in `m_pWeaponObject` until
+// EndScene/Present so vanilla can draw the held mesh. If the game swaps weapons before flush
+// (`SetCurrentWeapon` → `AddWeaponModel` → internal `RemoveWeaponModel`), vanilla must see the stock
+// clump in the slot — otherwise `RemoveWeaponModel` can hit a null `CBaseModelInfo` in `AddRef`.
+static void OrcRestoreDeferredHeldStockIfSlotStillHasClone(CPed* ped) {
+    if (!ped)
+        return;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return;
+    auto d = g_deferredHeldWeaponStockRestore.find(pedRef);
+    if (d == g_deferredHeldWeaponStockRestore.end())
+        return;
+    const DeferredHeldWeaponSlotRestore& r = d->second;
+    if (r.stock && r.clone && ped->m_pWeaponObject == r.clone) {
+        ped->m_pWeaponObject = r.stock;
+        g_deferredHeldWeaponStockRestore.erase(pedRef);
+    }
+}
+
 void OrcFlushDeferredHeldWeaponSlotRestore() {
     /// `pedRenderEvent.after` fires before GTA draws held `m_pWeaponObject`; restores here (EndScene/Present).
     OrcRestoreWeaponHeldTextureOverrides();
@@ -845,6 +865,7 @@ static void OrcApplyHeldWeaponReplacementAfterAddWeaponModel(CPed* ped, int mode
 // `__thiscall` cannot be used on static free functions in MSVC; `__fastcall` matches the register ABI
 // (this in ECX) and matches the pattern used in `samp_bridge.cpp` for thiscall detours.
 static void __fastcall AddWeaponModel_Hook(CPed* ped, void* /*edx*/, int modelIndex) {
+    OrcRestoreDeferredHeldStockIfSlotStillHasClone(ped);
     if (g_AddWeaponModel_Orig)
         g_AddWeaponModel_Orig(ped, modelIndex);
     __try {
@@ -860,6 +881,7 @@ static void __fastcall RemoveWeaponModel_Hook(CPed* ped, void* /*edx*/, int mode
             g_RemoveWeaponModel_Orig(ped, modelIndex);
         return;
     }
+    OrcRestoreDeferredHeldStockIfSlotStillHasClone(ped);
     const int pedRef = CPools::GetPedRef(ped);
     auto it = (pedRef > 0) ? g_heldWeaponReplacements.find(pedRef) : g_heldWeaponReplacements.end();
     if (it != g_heldWeaponReplacements.end()) {

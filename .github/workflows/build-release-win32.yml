@@ -1,13 +1,19 @@
 name: Build OrcOutFit Win32
-# Для release — заголовок/тег релиза. Для workflow_dispatch/push — ветка и номер run (иначе GitHub
-# часто показывал только SHA: у workflow_dispatch нет head_commit.message, release.* пустые.)
-run-name: ${{ github.event.release.name || github.event.release.tag_name || format('{0} (#{1})', github.ref_name, github.run_number) }}
+# run-name (приоритет):
+# 1) release — сначала название релиза, иначе tag_name;
+# 2) push в main — первая строка сообщения коммита (head_commit.message) · ветка (#run);
+# 3) workflow_dispatch — у payload нет head_commit: «manual · ветка · полный SHA (#run)»;
+# 4) иначе — ветка (#run).
+run-name: ${{ github.event_name == 'release' && (github.event.release.name || github.event.release.tag_name) || github.event_name == 'push' && github.event.head_commit && github.event.head_commit.message && format('{0} · {1} (#{2})', replace(github.event.head_commit.message, '\n', ' · '), github.ref_name, github.run_number) || github.event_name == 'workflow_dispatch' && format('manual · {0} · {1} (#{2})', github.ref_name, github.sha, github.run_number) || format('{0} (#{1})', github.ref_name, github.run_number) }}
 
 on:
   workflow_dispatch:
   release:
     types:
       - published
+  push:
+    branches:
+      - main
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
