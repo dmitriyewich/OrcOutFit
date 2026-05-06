@@ -119,8 +119,8 @@ static bool CreateWeaponInstance(RenderedWeapon* arr, int wt, bool secondary, in
             if (mid > 0 && !CStreaming::HasModelLoaded(mid)) {
                 static std::unordered_set<int> requested;
                 if (requested.insert(mid).second) {
+                    // Только запрос: синхронный LoadAllRequestedModels на drawingEvent давал длинный стоп-кадр.
                     CStreaming::RequestModel(mid, 0);
-                    CStreaming::LoadAllRequestedModels(false);
                 }
             }
             return false;
@@ -808,6 +808,17 @@ static uint64_t s_heldRwpfcBatchCounter = 0;
 /// Один раз за игровой тик на педа: несколько вызовов RpClumpRender за кадр (тени/зеркала) не накапливают дельту.
 static std::unordered_set<int> s_heldPreRwDrawAppliedPedRefs;
 
+/// Педы в радиусе для held pre-Rw / RWCB при `RenderAllPedsWeapons` — строится в `OrcHeldPoseBeginSimFrame`, без O(n) на каждый `RpClumpRender`.
+static std::vector<CPed*> s_heldPreRwNearbyPeds;
+
+/// Дедуп второго `pedRenderEvent.before` на том же `gameProcess`-тике (ветка `repl:reSync`).
+static unsigned s_heldPrepSimSerial = 0;
+static int s_heldReSyncDupPedRef = -1;
+static unsigned s_heldReSyncDupSerial = 0;
+
+/// Защита от цикла/битой иерархии `RwFrame` при обходе родителя.
+static constexpr int kOrcMaxRwFrameAncestors = 64;
+
 static RwFrame* OrcRwFrameGetParent(RwFrame* f) {
     if (!f)
         return nullptr;
@@ -821,7 +832,8 @@ static bool OrcAtomicBelongsToClump(RpAtomic* atomic, RpClump* clump) {
     RwFrame* af = RpAtomicGetFrame(atomic);
     if (!root || !af)
         return false;
-    for (RwFrame* x = af; x; x = OrcRwFrameGetParent(x)) {
+    int steps = 0;
+    for (RwFrame* x = af; x && steps < kOrcMaxRwFrameAncestors; x = OrcRwFrameGetParent(x), ++steps) {
         if (x == root)
             return true;
     }
@@ -841,7 +853,8 @@ static bool OrcHeldAtomicMatchesPedWeaponObject(RpAtomic* atomic, RwObject* wo) 
 static bool OrcRwFrameHasAncestor(RwFrame* f, RwFrame* ancestor) {
     if (!f || !ancestor)
         return false;
-    for (RwFrame* x = f; x; x = OrcRwFrameGetParent(x)) {
+    int steps = 0;
+    for (RwFrame* x = f; x && steps < kOrcMaxRwFrameAncestors; x = OrcRwFrameGetParent(x), ++steps) {
         if (x == ancestor)
             return true;
     }
@@ -967,7 +980,7 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel)
     const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wtSel, false);
     if (g_heldPoseDebug) {
         OrcLogInfoThrottled(
-            492 + wtSel % 5, 400u,
+            492 + wtSel % 5, 4000u,
             "held chain: cfg phase=renderWeaponCbAtomic pedRef=%d wt=%d heldEn=%d atomic=%p frame=%p", pedRef, wtSel,
             h.enabled ? 1 : 0, static_cast<void*>(atomic), static_cast<void*>(af));
     }
@@ -983,7 +996,7 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel)
     if (g_heldPoseDebug) {
         RwMatrix* mm = RwFrameGetMatrix(af);
         const float r2d = 180.0f / kOrcPi;
-        OrcLogInfoThrottled(437, 450u,
+        OrcLogInfoThrottled(437, 4000u,
             "held pose: apply phase=renderWeaponCbAtomic wt=%d tgt=rwcbAtomic xyz=%.3f %.3f %.3f deg=%.2f %.2f %.2f sc=%.3f | at=%.3f %.3f %.3f",
             wtSel, h.x, h.y, h.z, h.rx * r2d, h.ry * r2d, h.rz * r2d, h.scale, mm ? mm->pos.x : 0.0f, mm ? mm->pos.y : 0.0f,
             mm ? mm->pos.z : 0.0f);
@@ -995,7 +1008,7 @@ static void OrcHeldLogPreRwSkipThrottled(int slot, CPed* ped, const char* reason
     if (!g_heldPoseDebug)
         return;
     const int pr = ped ? CPools::GetPedRef(ped) : 0;
-    OrcLogInfoThrottled(slot, 750u, "held preRw: skip reason=%s ped=%p pedRef=%d", reason ? reason : "?", ped, pr);
+    OrcLogInfoThrottled(slot, 8000u, "held preRw: skip reason=%s ped=%p pedRef=%d", reason ? reason : "?", ped, pr);
 }
 
 static bool OrcHeldPosePedEligibleForPreRwDraw(CPed* ped) {
@@ -1023,6 +1036,14 @@ static bool OrcHeldWeaponClumpUsesRenderWeaponCbOnly(RpClump* clump) {
         return true;
     if (!g_renderAllPedsWeapons || !CPools::ms_pPedPool)
         return false;
+    if (!s_heldPreRwNearbyPeds.empty()) {
+        for (CPed* p : s_heldPreRwNearbyPeds) {
+            if (p->m_pWeaponObject && p->m_pWeaponObject->type == rpCLUMP &&
+                reinterpret_cast<RpClump*>(p->m_pWeaponObject) == clump)
+                return true;
+        }
+        return false;
+    }
     const int n = CPools::ms_pPedPool->m_nSize;
     for (int i = 0; i < n; ++i) {
         CPed* p = CPools::ms_pPedPool->GetAt(i);
@@ -1044,6 +1065,14 @@ static bool OrcHeldWeaponAtomicUsesRenderWeaponCbOnly(RpAtomic* atomic) {
         return true;
     if (!g_renderAllPedsWeapons || !CPools::ms_pPedPool)
         return false;
+    if (!s_heldPreRwNearbyPeds.empty()) {
+        for (CPed* p : s_heldPreRwNearbyPeds) {
+            if (p->m_pWeaponObject && p->m_pWeaponObject->type == rpATOMIC &&
+                reinterpret_cast<RpAtomic*>(p->m_pWeaponObject) == atomic)
+                return true;
+        }
+        return false;
+    }
     const int n = CPools::ms_pPedPool->m_nSize;
     for (int i = 0; i < n; ++i) {
         CPed* p = CPools::ms_pPedPool->GetAt(i);
@@ -1083,21 +1112,34 @@ static bool OrcTryApplyHeldPoseForRenderWeaponAtomic(RpAtomic* atomic, bool* out
     }
     if (!g_renderAllPedsWeapons || !CPools::ms_pPedPool)
         return false;
+    auto tryPed = [&](CPed* p) -> bool {
+        if (!p)
+            return false;
+        const int wtSel = GetPedSelectedWeaponTypeForReplace(p);
+        if (wtSel <= 0)
+            return false;
+        const int pr = CPools::GetPedRef(p);
+        if (pr <= 0)
+            return false;
+        RwObject* wo = OrcResolveHeldWeaponRwObject(p);
+        if (!OrcHeldRwcbShouldApplyAtomicImpl(p, atomic, wtSel, wo))
+            return false;
+        return OrcApplyHeldPoseToRwcbAtomic(p, atomic, wtSel);
+    };
+    if (!s_heldPreRwNearbyPeds.empty()) {
+        for (CPed* p : s_heldPreRwNearbyPeds) {
+            if (tryPed(p))
+                return true;
+        }
+        return false;
+    }
     const int n = CPools::ms_pPedPool->m_nSize;
     for (int i = 0; i < n; ++i) {
         CPed* p = CPools::ms_pPedPool->GetAt(i);
         if (!p || !OrcHeldPosePedEligibleForPreRwDraw(p))
             continue;
-        const int wtSel = GetPedSelectedWeaponTypeForReplace(p);
-        if (wtSel <= 0)
-            continue;
-        const int pr = CPools::GetPedRef(p);
-        if (pr <= 0)
-            continue;
-        RwObject* wo = OrcResolveHeldWeaponRwObject(p);
-        if (!OrcHeldRwcbShouldApplyAtomicImpl(p, atomic, wtSel, wo))
-            continue;
-        return OrcApplyHeldPoseToRwcbAtomic(p, atomic, wtSel);
+        if (tryPed(p))
+            return true;
     }
     return false;
 }
@@ -1105,7 +1147,7 @@ static bool OrcTryApplyHeldPoseForRenderWeaponAtomic(RpAtomic* atomic, bool* out
 static void OrcHeldTraceLogRenderWeaponCb(RpAtomic* atomic, bool appliedHeldPose, bool rwcbMatchLocalPl) {
     if (g_heldWeaponTrace < 1 || g_orcLogLevel < OrcLogLevel::Info)
         return;
-    const unsigned iv = (g_heldWeaponTrace >= 2) ? 80u : 350u;
+    const unsigned iv = (g_heldWeaponTrace >= 2) ? 600u : 350u;
     if (!atomic) {
         OrcLogInfoThrottled(504, iv, "held hook RenderWeaponCB(0x733670): atomic=null");
         return;
@@ -1192,13 +1234,23 @@ static void OrcTryApplyHeldPoseIfClumpMatches(RpClump* clump) {
     if (pl && pl->m_pWeaponObject && pl->m_pWeaponObject->type == rpCLUMP &&
         reinterpret_cast<RpClump*>(pl->m_pWeaponObject) == clump) {
         if (g_heldPoseDebug)
-            OrcLogInfoThrottled(488, 400u, "held preRw: rwMatch mesh=clump clump=%p pedRef=%d", clump,
+            OrcLogInfoThrottled(488, 4000u, "held preRw: rwMatch mesh=clump clump=%p pedRef=%d", clump,
                 CPools::GetPedRef(pl));
         OrcTryApplyHeldPoseBeforeRwDrawForPed(pl);
         return;
     }
     if (!g_renderAllPedsWeapons || !CPools::ms_pPedPool)
         return;
+    if (!s_heldPreRwNearbyPeds.empty()) {
+        for (CPed* p : s_heldPreRwNearbyPeds) {
+            if (p->m_pWeaponObject && p->m_pWeaponObject->type == rpCLUMP &&
+                reinterpret_cast<RpClump*>(p->m_pWeaponObject) == clump) {
+                OrcTryApplyHeldPoseBeforeRwDrawForPed(p);
+                return;
+            }
+        }
+        return;
+    }
     const int n = CPools::ms_pPedPool->m_nSize;
     for (int i = 0; i < n; ++i) {
         CPed* p = CPools::ms_pPedPool->GetAt(i);
@@ -1221,13 +1273,23 @@ static void OrcTryApplyHeldPoseIfAtomicMatches(RpAtomic* atomic) {
     if (pl && pl->m_pWeaponObject && pl->m_pWeaponObject->type == rpATOMIC &&
         reinterpret_cast<RpAtomic*>(pl->m_pWeaponObject) == atomic) {
         if (g_heldPoseDebug)
-            OrcLogInfoThrottled(489, 400u, "held preRw: rwMatch mesh=atomic atomic=%p pedRef=%d", atomic,
+            OrcLogInfoThrottled(489, 4000u, "held preRw: rwMatch mesh=atomic atomic=%p pedRef=%d", atomic,
                 CPools::GetPedRef(pl));
         OrcTryApplyHeldPoseBeforeRwDrawForPed(pl);
         return;
     }
     if (!g_renderAllPedsWeapons || !CPools::ms_pPedPool)
         return;
+    if (!s_heldPreRwNearbyPeds.empty()) {
+        for (CPed* p : s_heldPreRwNearbyPeds) {
+            if (p->m_pWeaponObject && p->m_pWeaponObject->type == rpATOMIC &&
+                reinterpret_cast<RpAtomic*>(p->m_pWeaponObject) == atomic) {
+                OrcTryApplyHeldPoseBeforeRwDrawForPed(p);
+                return;
+            }
+        }
+        return;
+    }
     const int n = CPools::ms_pPedPool->m_nSize;
     for (int i = 0; i < n; ++i) {
         CPed* p = CPools::ms_pPedPool->GetAt(i);
@@ -1243,10 +1305,14 @@ static void OrcTryApplyHeldPoseIfAtomicMatches(RpAtomic* atomic) {
 
 static RpClump* __cdecl RpClumpRender_Detour(RpClump* clump) {
     if (g_enabled) {
-        __try {
-            OrcTryApplyHeldPoseIfClumpMatches(clump);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            OrcLogError("RpClumpRender_Detour: SEH ex=0x%08X", GetExceptionCode());
+        const bool allPeds = g_renderAllPedsWeapons;
+        CPlayerPed* pl = FindPlayerPed(0);
+        if (allPeds || (pl && pl->m_pWeaponObject)) {
+            __try {
+                OrcTryApplyHeldPoseIfClumpMatches(clump);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                OrcLogError("RpClumpRender_Detour: SEH ex=0x%08X", GetExceptionCode());
+            }
         }
     }
     return g_RpClumpRender_Orig ? g_RpClumpRender_Orig(clump) : nullptr;
@@ -1254,10 +1320,14 @@ static RpClump* __cdecl RpClumpRender_Detour(RpClump* clump) {
 
 static RpAtomic* __cdecl AtomicDefaultRenderCallBack_Detour(RpAtomic* atomic) {
     if (g_enabled) {
-        __try {
-            OrcTryApplyHeldPoseIfAtomicMatches(atomic);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            OrcLogError("AtomicDefaultRenderCallBack_Detour: SEH ex=0x%08X", GetExceptionCode());
+        const bool allPeds = g_renderAllPedsWeapons;
+        CPlayerPed* pl = FindPlayerPed(0);
+        if (allPeds || (pl && pl->m_pWeaponObject)) {
+            __try {
+                OrcTryApplyHeldPoseIfAtomicMatches(atomic);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                OrcLogError("AtomicDefaultRenderCallBack_Detour: SEH ex=0x%08X", GetExceptionCode());
+            }
         }
     }
     return g_AtomicDefaultRender_Orig ? g_AtomicDefaultRender_Orig(atomic) : nullptr;
@@ -1267,11 +1337,18 @@ static void __cdecl RenderWeaponCB_Detour(RpAtomic* atomic) {
     bool appliedPose = false;
     bool rwcbMatchLocal = false;
     if (g_enabled) {
-        __try {
-            const bool needMatchForTrace = g_heldWeaponTrace >= 1 && g_orcLogLevel >= OrcLogLevel::Info;
-            appliedPose = OrcTryApplyHeldPoseForRenderWeaponAtomic(atomic, needMatchForTrace ? &rwcbMatchLocal : nullptr);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            OrcLogError("RenderWeaponCB_Detour: SEH ex=0x%08X", GetExceptionCode());
+        const bool needRemote = g_renderAllPedsWeapons && CPools::ms_pPedPool != nullptr;
+        CPlayerPed* plrw = FindPlayerPed(0);
+        const bool localHeldGate =
+            plrw && GetPedSelectedWeaponTypeForReplace(plrw) > 0 && OrcHeldPosePedEligibleForPreRwDraw(plrw);
+        if (localHeldGate || needRemote) {
+            __try {
+                const bool needMatchForTrace = g_heldWeaponTrace >= 1 && g_orcLogLevel >= OrcLogLevel::Info;
+                appliedPose =
+                    OrcTryApplyHeldPoseForRenderWeaponAtomic(atomic, needMatchForTrace ? &rwcbMatchLocal : nullptr);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                OrcLogError("RenderWeaponCB_Detour: SEH ex=0x%08X", GetExceptionCode());
+            }
         }
     }
     if (g_heldWeaponTrace >= 1 && g_orcLogLevel >= OrcLogLevel::Info)
@@ -1281,7 +1358,7 @@ static void __cdecl RenderWeaponCB_Detour(RpAtomic* atomic) {
 }
 
 void OrcHeldWeaponTraceGameProcessTick() {
-    if (g_heldWeaponTrace < 1 || g_orcLogLevel < OrcLogLevel::Info)
+    if (g_heldWeaponTrace < 2 || g_orcLogLevel < OrcLogLevel::Info)
         return;
     if (g_heldWeaponStatusIntervalMs <= 0)
         return;
@@ -1292,10 +1369,8 @@ void OrcHeldWeaponTraceGameProcessTick() {
     s_lastHeldStatusMs = now;
 
     CPlayerPed* pl = FindPlayerPed(0);
-    if (!pl) {
-        OrcLogInfo("held status: interval=%dms localPed=null pluginEn=%d", g_heldWeaponStatusIntervalMs, g_enabled ? 1 : 0);
+    if (!pl)
         return;
-    }
     const int pr = CPools::GetPedRef(pl);
     const std::string skinRaw = GetPedStdSkinDffName(pl);
     const std::string skinIni = GetWeaponSkinIniLookupName(pl);
@@ -1349,8 +1424,26 @@ void OrcHeldWeaponTraceGameProcessTick() {
 }
 
 void OrcHeldPoseBeginSimFrame() {
+    ++s_heldPrepSimSerial;
     s_heldPreRwDrawAppliedPedRefs.clear();
     s_heldPoseEngineBaselineByFrame.clear();
+    s_heldPreRwNearbyPeds.clear();
+    s_heldReSyncDupPedRef = -1;
+    s_heldReSyncDupSerial = 0;
+
+    if (!g_enabled || !g_renderAllPedsWeapons || !CPools::ms_pPedPool)
+        return;
+    CPlayerPed* pl = FindPlayerPed(0);
+    if (!pl)
+        return;
+    s_heldPreRwNearbyPeds.reserve(32);
+    const int n = CPools::ms_pPedPool->m_nSize;
+    for (int i = 0; i < n; ++i) {
+        CPed* p = CPools::ms_pPedPool->GetAt(i);
+        if (!p || !OrcHeldPosePedEligibleForPreRwDraw(p))
+            continue;
+        s_heldPreRwNearbyPeds.push_back(p);
+    }
 }
 
 static void __cdecl RenderWeaponPedsForPC_Detour() {
@@ -1529,10 +1622,6 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     const int pedRefEarly = ped ? CPools::GetPedRef(ped) : 0;
 
     if (!ShouldReplaceHeldWeaponForPed(ped)) {
-        OrcLogInfoThrottled(20, 3000u,
-            "held wr: gated pedRef=%d en=%d wrEn=%d inHands=%d allPeds=%d r=%.1f",
-            pedRefEarly, g_enabled ? 1 : 0, g_weaponReplacementEnabled ? 1 : 0,
-            g_weaponReplacementInHands ? 1 : 0, g_renderAllPedsWeapons ? 1 : 0, g_renderAllPedsRadius);
         if (g_heldWeaponTrace >= 1 && g_orcLogLevel >= OrcLogLevel::Info && pedRefEarly > 0) {
             OrcLogInfoThrottled(508, 5000u,
                 "held wr trace: gated detail pedRef=%d ped=%p m_pWeaponObject=%p visWt=%d slot=%d",
@@ -1580,7 +1669,12 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     HeldWeaponReplacementState& state = g_heldWeaponReplacements[pedRef];
     if (!state.rwObject || state.weaponType != wt || state.replacementKey != asset->key) {
         OrcDestroyRwObjectInstance(state.rwObject);
+        const DWORD tClone0 = GetTickCount();
         state.rwObject = OrcCloneWeaponReplacementObject(*asset);
+        const DWORD cloneMs = GetTickCount() - tClone0;
+        if (cloneMs > 80u)
+            OrcLogInfo("held wr: slow CloneWeaponReplacementObject %ums pedRef=%d wt=%d key=%s",
+                (unsigned)cloneMs, pedRef, wt, asset->key.c_str());
         state.weaponType = wt;
         state.replacementKey = asset->key;
         if (!state.rwObject) {
@@ -1588,8 +1682,6 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
                 pedRef, wt, asset->key.c_str());
             return;
         }
-        OrcLogInfo("held wr: clone ok pedRef=%d wt=%d key=%s skin=%s",
-            pedRef, wt, asset->key.c_str(), GetPedStdSkinDffName(ped).c_str());
     }
     if (!state.rwObject)
         return;
@@ -1608,6 +1700,11 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
             return;
         }
         if (ped->m_pWeaponObject == state.rwObject) {
+            // Два `pedRenderEvent.before` на кадр — повторный reSync тот же тик не даёт новой матрицы, только лишняя работа.
+            if (pedRef == s_heldReSyncDupPedRef && s_heldReSyncDupSerial == s_heldPrepSimSerial)
+                return;
+            s_heldReSyncDupPedRef = pedRef;
+            s_heldReSyncDupSerial = s_heldPrepSimSerial;
             OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
             CopyRwObjectRootMatrix(state.originalObject, state.rwObject);
             SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
@@ -1754,13 +1851,46 @@ static void OrcApplyHeldWeaponReplacementAfterAddWeaponModel(CPed* ped, int mode
 // `__thiscall` cannot be used on static free functions in MSVC; `__fastcall` matches the register ABI
 // (this in ECX) and matches the pattern used in `samp_bridge.cpp` for thiscall detours.
 static void __fastcall AddWeaponModel_Hook(CPed* ped, void* /*edx*/, int modelIndex) {
+    const bool logPerf = (g_orcLogLevel >= OrcLogLevel::Info);
+    LARGE_INTEGER fq{};
+    LARGE_INTEGER t0{};
+    LARGE_INTEGER tVan0{};
+    LARGE_INTEGER tVan1{};
+    LARGE_INTEGER t1{};
+    if (logPerf) {
+        QueryPerformanceFrequency(&fq);
+        QueryPerformanceCounter(&t0);
+    }
     OrcRestoreDeferredHeldStockIfSlotStillHasClone(ped);
+    if (logPerf)
+        QueryPerformanceCounter(&tVan0);
     if (g_AddWeaponModel_Orig)
         g_AddWeaponModel_Orig(ped, modelIndex);
+    if (logPerf)
+        QueryPerformanceCounter(&tVan1);
     __try {
         OrcApplyHeldWeaponReplacementAfterAddWeaponModel(ped, modelIndex);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         OrcLogError("AddWeaponModel hook: SEH ex=0x%08X", GetExceptionCode());
+    }
+    if (logPerf) {
+        QueryPerformanceCounter(&t1);
+        if (fq.QuadPart > 0) {
+            const double msTotal = (t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(fq.QuadPart);
+            const double msVanilla = (tVan1.QuadPart - tVan0.QuadPart) * 1000.0 / static_cast<double>(fq.QuadPart);
+            const double msPost = (t1.QuadPart - tVan1.QuadPart) * 1000.0 / static_cast<double>(fq.QuadPart);
+            if (msTotal >= 12.0 || msVanilla >= 12.0 || msPost >= 12.0) {
+                const int pedRef = ped ? CPools::GetPedRef(ped) : 0;
+                OrcLogInfo(
+                    "AddWeaponModel: SLOW ped=%p ref=%d mid=%d vanillaMs=%.1f postMs=%.1f totalMs=%.1f",
+                    ped,
+                    pedRef,
+                    modelIndex,
+                    msVanilla,
+                    msPost,
+                    msTotal);
+            }
+        }
     }
 }
 
@@ -2002,17 +2132,10 @@ static void __fastcall CSprite2d_SetTexture_HudWeaponOverlay(CSprite2d* self, vo
         g_CSprite2d_SetTexture_Orig(self, name);
         return;
     }
-    RwTexDictionary* cacheBefore = OrcWeaponHudGetSampSpriteInterceptDict();
-    OrcLogInfoThrottled(
-        431,
-        4000u,
-        "hud icon: SetTexture *icon name=\"%s\" ctxDict=%p cacheDict=%p",
-        name,
-        g_hudWeaponOrcTexDictDuringDrawWeaponIcon,
-        cacheBefore);
+    RwTexDictionary* interceptDict = OrcWeaponHudGetSampSpriteInterceptDict();
     RwTexDictionary* orcDict = g_hudWeaponOrcTexDictDuringDrawWeaponIcon;
     if (!orcDict)
-        orcDict = cacheBefore;
+        orcDict = interceptDict;
     // SA:MP can render the weapon slot before `drawingEvent` fills the intercept cache — build lazily once.
     if (!orcDict) {
         OrcWeaponHudRefreshSampSpriteInterceptCache();
@@ -2037,8 +2160,6 @@ static void __fastcall CSprite2d_SetTexture_HudWeaponOverlay(CSprite2d* self, vo
         }
         if (t) {
             self->m_pTexture = t;
-            OrcLogInfoThrottled(
-                404, 45000u, "hud weapon icon: sprite from Orc TXD (SetTexture \"%s\")", name);
             return;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -2064,13 +2185,6 @@ static void __fastcall CSprite2d_SetTextureMasked_HudWeaponOverlay(CSprite2d* se
         g_CSprite2d_SetTextureMasked_Orig(self, name, maskName);
         return;
     }
-    OrcLogInfoThrottled(
-        435,
-        4000u,
-        "hud icon: SetTexture(masked) *icon rgb=\"%s\" ctxDict=%p cacheDict=%p",
-        name,
-        g_hudWeaponOrcTexDictDuringDrawWeaponIcon,
-        OrcWeaponHudGetSampSpriteInterceptDict());
     RwTexDictionary* orcDict = g_hudWeaponOrcTexDictDuringDrawWeaponIcon;
     if (!orcDict)
         orcDict = OrcWeaponHudGetSampSpriteInterceptDict();
@@ -2097,8 +2211,6 @@ static void __fastcall CSprite2d_SetTextureMasked_HudWeaponOverlay(CSprite2d* se
         if (t) {
             self->m_pTexture = t;
             (void)maskName;
-            OrcLogInfoThrottled(
-                405, 45000u, "hud weapon icon: Orc TXD (SetTexture masked rgb \"%s\")", name);
             return;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -2117,45 +2229,11 @@ static void __cdecl CHud_DrawWeaponIcon_Detour(CPed* ped, int x, int y, float al
     if (!g_CHud_DrawWeaponIcon_Orig)
         return;
 
-    CPed* tryPed = ped;
-    if (!tryPed) {
-        CPlayerPed* lp = FindPlayerPed(0);
-        tryPed = lp ? static_cast<CPed*>(lp) : nullptr;
-    }
-
     int txdSlot = -1;
     RwTexDictionary* orcSpriteDict = nullptr;
     OrcWeaponHudTryGetIconOverrideTxdSlot(ped, &txdSlot);
     if (txdSlot >= 0)
         orcSpriteDict = OrcWeaponStreamingGetRwTxdDictionary(txdSlot);
-
-    CPlayerPed* localPl = FindPlayerPed(0);
-    const int refIn = ped ? CPools::GetPedRef(ped) : 0;
-    const int refTry = tryPed ? CPools::GetPedRef(tryPed) : 0;
-    const int refLoc = localPl ? CPools::GetPedRef(localPl) : 0;
-    int hudLastWt = 0;
-    __try {
-        volatile const int* pLast = reinterpret_cast<const volatile int*>(0xBAA410);
-        hudLastWt = *pLast;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    const int visualWt = tryPed ? OrcResolveWeaponHeldVisualWeaponType(tryPed) : 0;
-    const int heldReplWt = tryPed ? OrcWeaponHudGetHeldReplacementWeaponTypeIfAny(tryPed) : 0;
-    OrcLogInfoThrottled(
-        407,
-        15000u,
-        "hud icon: DrawWeaponIcon ped=%p tryPed=%p local=%p ref(in/try/local)=%d/%d/%d slot=%d orcDict=%p "
-        "visualWt=%d heldReplWt=%d hudLastWt=%d",
-        ped,
-        tryPed,
-        localPl,
-        refIn,
-        refTry,
-        refLoc,
-        txdSlot,
-        orcSpriteDict,
-        visualWt,
-        heldReplWt,
-        hudLastWt);
 
     // `DrawAmmo` / `DrawWeaponIcon` paths re-bind hud.txd and call `CSprite2d::SetTexture`; keep Orc dict scoped for
     // the whole ammo draw — SA:MP R1 sometimes never hits `DrawWeaponIcon` or binds textures earlier in `DrawAmmo`.
@@ -2176,14 +2254,6 @@ static void __cdecl CHud_DrawAmmo_Detour(CPed* ped, int x, int y, float alpha) {
     OrcWeaponHudTryGetIconOverrideTxdSlot(ped, &txdSlot);
     if (txdSlot >= 0)
         orcSpriteDict = OrcWeaponStreamingGetRwTxdDictionary(txdSlot);
-
-    OrcLogInfoThrottled(
-        470,
-        15000u,
-        "hud icon: DrawAmmo ped=%p slot=%d orcDict=%p",
-        ped,
-        txdSlot,
-        orcSpriteDict);
 
     HudPushOrcSpriteDictScope(orcSpriteDict);
     g_CHud_DrawAmmo_Orig(ped, x, y, alpha);

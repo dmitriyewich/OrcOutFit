@@ -38,12 +38,43 @@ static int g_uiWeaponSkinListIdx = 0;
 static bool g_uiWeaponBuffersReady = false;
 static bool g_uiWeaponSecondary = false;
 
+// Отложенный прогрев: не держать первый кадр вкладки «Оружие» на `OrcLoadWeaponPresetFile`.
+static constexpr int kWeaponUiPrewarmDelayFrames = 48;
+static int s_weaponUiPrewarmFramesLeft = -1;
+
+static void MarkWeaponUiBuffersReady() {
+    g_uiWeaponBuffersReady = true;
+    s_weaponUiPrewarmFramesLeft = -1;
+}
+
+static void SyncWeaponUiBuffersFromSkinPick();
+static void TryInitWeaponSkinListToLocalPed();
+
+void OrcWeaponsUiInvalidateCaches() {
+    g_uiWeaponBuffersReady = false;
+    s_weaponUiPrewarmFramesLeft = kWeaponUiPrewarmDelayFrames;
+}
+
+void OrcWeaponsUiPrewarmOnIdle() {
+    if (!g_enabled || g_uiWeaponBuffersReady)
+        return;
+    if (s_weaponUiPrewarmFramesLeft < 0)
+        return;
+    if (s_weaponUiPrewarmFramesLeft > 0) {
+        --s_weaponUiPrewarmFramesLeft;
+        if (s_weaponUiPrewarmFramesLeft != 0)
+            return;
+    }
+    TryInitWeaponSkinListToLocalPed();
+    SyncWeaponUiBuffersFromSkinPick();
+}
+
 static void SyncWeaponUiBuffersFromSkinPick() {
     std::vector<std::pair<std::string, int>> skins;
     OrcCollectPedSkins(skins);
     if (skins.empty()) {
         OrcLoadWeaponPresetFile("", g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
-        g_uiWeaponBuffersReady = true;
+        MarkWeaponUiBuffersReady();
         return;
     }
     if (g_uiWeaponSkinListIdx < 0 || g_uiWeaponSkinListIdx >= (int)skins.size())
@@ -57,7 +88,7 @@ static void SyncWeaponUiBuffersFromSkinPick() {
         OrcLoadWeaponPresetFile("", g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
     for (size_t i = 0; i < g_uiWeapon1.size() && i < g_cfg.size(); i++)
         g_uiWeapon1[i].name = g_cfg[i].name;
-    g_uiWeaponBuffersReady = true;
+    MarkWeaponUiBuffersReady();
 }
 
 static void TryInitWeaponSkinListToLocalPed() {
@@ -77,6 +108,10 @@ static void TryInitWeaponSkinListToLocalPed() {
 
 void OrcWeaponsUiDrawWeaponsTab() {
     if (!g_uiWeaponBuffersReady) {
+        if (s_weaponUiPrewarmFramesLeft > 0) {
+            ImGui::TextDisabled("%s", WT(OrcTextId::WeaponsPresetLoading));
+            return;
+        }
         TryInitWeaponSkinListToLocalPed();
         SyncWeaponUiBuffersFromSkinPick();
     }

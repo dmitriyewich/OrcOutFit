@@ -47,6 +47,7 @@
 #include "orc_ini.h"
 #include "orc_locale.h"
 #include "orc_ui.h"
+#include "orc_weapons_ui.h"
 #include "orc_texture_remap.h"
 #include "orc_render.h"
 #include "orc_weapons.h"
@@ -784,13 +785,7 @@ void LoadConfig() {
     InvalidateStandardSkinLookupCache();
     OrcLogReloadFromIni(g_iniPath);
     OrcLogInfo("LoadConfig: %s", g_iniPath);
-    if (g_orcLogLevel >= OrcLogLevel::Info) {
-        OrcLogInfo(
-            "config trace: DebugLogLevel=%d HeldPoseDebug=%d HeldWeaponTrace=%d HeldWeaponStatusIntervalMs=%d "
-            "SkinLocalPreferSelected=%d (1=recommended for Weapons\\<Selected>.ini)",
-            static_cast<int>(g_orcLogLevel), g_heldPoseDebug ? 1 : 0, g_heldWeaponTrace, g_heldWeaponStatusIntervalMs,
-            g_skinLocalPreferSelected ? 1 : 0);
-    }
+    OrcWeaponsUiInvalidateCaches();
     // Weapon types are discovered in SetupDefaults (InitWeaponTypesAndStorage).
 }
 
@@ -1018,7 +1013,6 @@ void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, s
         if (outHeld1) *outHeld1 = std::move(h1);
         if (outHeld2) *outHeld2 = std::move(h2);
     }
-    OrcLogInfo("weapon preset loaded: %s", fullPath);
 }
 
 static std::unordered_map<std::string, std::vector<WeaponCfg>> g_weaponSkinOv1;
@@ -1076,6 +1070,12 @@ static bool OrcWeaponUiPickerMatchesPedWeaponsIni(CPed* ped, const char* pickerD
     return false;
 }
 
+// Отложенный прогрев `g_weaponSkinOv*` / Held — тот же парсинг `Weapons\<skin>.ini`, что на первом `GetWeaponCfgForPed`
+// после выдачи оружия; UI уже грузит пресет в свои буферы, рантайм-кеш раньше оставался холодным.
+static constexpr int kWeaponSkinRuntimePrewarmDelayFrames = 12;
+static int s_weaponSkinRuntimePrewarmFramesLeft = -1;
+static DWORD s_runtimePrewarmPhaseStartedTick = 0;
+
 void InvalidatePerSkinWeaponCache() {
     g_weaponSkinOv1.clear();
     g_weaponSkinOv2.clear();
@@ -1084,6 +1084,8 @@ void InvalidatePerSkinWeaponCache() {
     g_weaponSkinIniPathCache.clear();
     g_weaponSkinIniLoadedWriteTime.clear();
     g_weaponSkinIniMtimeLastPollMs.clear();
+    s_weaponSkinRuntimePrewarmFramesLeft = kWeaponSkinRuntimePrewarmDelayFrames;
+    s_runtimePrewarmPhaseStartedTick = 0;
 }
 
 std::string GetPedStdSkinDffName(CPed* ped) {
@@ -1246,6 +1248,67 @@ static void EnsureWeaponSkinOverrideLoaded(const std::string& skinKeyLower, cons
     g_weaponSkinHeldOv2[skinKeyLower] = std::move(h2);
     if (wtimeForStore != 0)
         g_weaponSkinIniLoadedWriteTime[skinKeyLower] = wtimeForStore;
+}
+
+static void OrcWeaponSkinRuntimeCachesPrewarmOnIdle() {
+    if (!g_enabled)
+        return;
+    if (s_weaponSkinRuntimePrewarmFramesLeft < 0)
+        return;
+    if (s_weaponSkinRuntimePrewarmFramesLeft > 0) {
+        --s_weaponSkinRuntimePrewarmFramesLeft;
+        if (s_weaponSkinRuntimePrewarmFramesLeft != 0)
+            return;
+        s_runtimePrewarmPhaseStartedTick = GetTickCount();
+    }
+    if (s_runtimePrewarmPhaseStartedTick == 0)
+        s_runtimePrewarmPhaseStartedTick = GetTickCount();
+
+    const DWORD phaseElapsed = GetTickCount() - s_runtimePrewarmPhaseStartedTick;
+
+    CPlayerPed* ped = FindPlayerPed(0);
+    if (!ped) {
+        if (phaseElapsed > 120000u) {
+            OrcLogInfo("weapon skin runtime: prewarm abandoned (no local ped for 120s)");
+            s_weaponSkinRuntimePrewarmFramesLeft = -1;
+            s_runtimePrewarmPhaseStartedTick = 0;
+        }
+        return;
+    }
+
+    char wpath[MAX_PATH];
+    std::string presetKey;
+    if (!ResolveWeaponsPresetIniForPed(ped, wpath, sizeof(wpath), &presetKey)) {
+        OrcLogInfoThrottled(
+            507,
+            8000u,
+            "weapon skin runtime: prewarm waiting (no preset path yet) raw=%s sel=%s",
+            GetPedStdSkinDffName(ped).c_str(),
+            GetWeaponSkinIniLookupName(ped).c_str());
+        if (phaseElapsed > 60000u) {
+            OrcLogInfo(
+                "weapon skin runtime: prewarm abandoned after 60s (no Weapons\\<skin>.ini) raw=%s sel=%s",
+                GetPedStdSkinDffName(ped).c_str(),
+                GetWeaponSkinIniLookupName(ped).c_str());
+            s_weaponSkinRuntimePrewarmFramesLeft = -1;
+            s_runtimePrewarmPhaseStartedTick = 0;
+        }
+        return;
+    }
+
+    LARGE_INTEGER fq{};
+    LARGE_INTEGER t0{};
+    LARGE_INTEGER t1{};
+    QueryPerformanceFrequency(&fq);
+    QueryPerformanceCounter(&t0);
+    EnsureWeaponSkinOverrideLoaded(presetKey, wpath);
+    QueryPerformanceCounter(&t1);
+    const double parseMs =
+        fq.QuadPart ? (t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(fq.QuadPart) : 0.0;
+    if (parseMs >= 8.0)
+        OrcLogInfo("weapon skin runtime: prewarmed ini=%s key=%s parseMs=%.1f", wpath, presetKey.c_str(), parseMs);
+    s_weaponSkinRuntimePrewarmFramesLeft = -1;
+    s_runtimePrewarmPhaseStartedTick = 0;
 }
 
 const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
@@ -1770,6 +1833,7 @@ static void OnDrawingEvent() {
             overlay::SetOpen(false);
         }
     }
+    OrcWeaponsUiPrewarmOnIdle();
     samp_bridge::Poll(g_toggleCommand.c_str(), &ToggleOverlayFromSamp);
     // `CHud::DrawAmmo` / `DrawWeaponIcon`: push Orc Guns/replacement TXD for `CSprite2d::SetTexture` during HUD draw.
     // for `SetTexture` + refresh intercept cache on `drawingEvent`.
@@ -1777,6 +1841,8 @@ static void OnDrawingEvent() {
     RefreshActivationRouting();
     overlay::Init();  // no-op after first time
     ApplyPendingLocalPlayerModel();
+    // После смены модели педа (Invalidate) — финальный DFF/имя для `ResolveWeaponsPresetIniForPed`.
+    OrcWeaponSkinRuntimeCachesPrewarmOnIdle();
     __try { SyncAndRender(); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         OrcLogError("SyncAndRender: SEH ex=0x%08X", GetExceptionCode());

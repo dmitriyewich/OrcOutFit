@@ -186,7 +186,8 @@
     X(TextureBindingRowFormat, "#%d: %s (%d слот(ов))", "#%d: %s (%d slot(s))") \
     X(Delete, "Удалить", "Delete") \
     X(KnownRemapPedModelsFormat, "Известных ped-моделей с remap: %d", "Known remap ped models: %d") \
-    X(TextureStatsFormat, "%s [%d]: %d текстур, %d слот(ов)", "%s [%d]: %d texture(s), %d slot(s)")
+    X(TextureStatsFormat, "%s [%d]: %d текстур, %d слот(ов)", "%s [%d]: %d texture(s), %d slot(s)") \
+    X(WeaponsPresetLoading, "Загрузка пресета оружия…", "Loading weapon preset…")
 
 enum class OrcUiLanguage {
     Russian = 0,

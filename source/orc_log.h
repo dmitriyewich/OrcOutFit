@@ -1,6 +1,8 @@
 #pragma once
 
-// Лог в OrcOutFit.log рядом с INI. Уровни: только ошибки или полный trace.
+// Лог в OrcOutFit.log рядом с INI. `[Features] DebugLogLevel` из INI: 0 = Off (в файл ничего не пишется,
+// включая OrcLogError), 1 = только ошибки, 2 = полный trace (OrcLogInfo / OrcLogInfoThrottled).
+// Устаревший `[Features] DebugLog=1` без ключа DebugLogLevel включает уровень Info.
 enum class OrcLogLevel : int {
     Off = 0,
     Error = 1,
