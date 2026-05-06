@@ -268,6 +268,18 @@ static bool ResolveObjectSkinParamsCached(const std::string& iniPath, const std:
     return true;
 }
 
+// Как ResolveWeaponsPresetIniForPed: сначала DFF из LoadPedObject, иначе — имя из GetWeaponSkinIniLookupName
+// (при SkinLocalPreferSelected raw=TRUTH и sel=orc секции часто только под TRUTH).
+static bool ResolveObjectSkinParamsForPed(const std::string& iniPath, CPed* ped, CustomObjectSkinParams& out) {
+    if (!ped || iniPath.empty()) return false;
+    const std::string raw = GetPedStdSkinDffName(ped);
+    const std::string sel = GetWeaponSkinIniLookupName(ped);
+    if (!raw.empty() && ResolveObjectSkinParamsCached(iniPath, raw, out)) return true;
+    if (!sel.empty() && _stricmp(raw.c_str(), sel.c_str()) != 0 && ResolveObjectSkinParamsCached(iniPath, sel, out))
+        return true;
+    return false;
+}
+
 static std::vector<std::string> ParseCsvTokens(const char* csv) {
     std::vector<std::string> out;
     if (!csv || !csv[0]) return out;
@@ -513,6 +525,17 @@ static bool ResolveStandardObjectSkinParamsCached(int modelId, int slot, const s
     return true;
 }
 
+static bool ResolveStandardObjectSkinParamsForPed(int modelId, int slot, CPed* ped, CustomObjectSkinParams& out) {
+    if (!ped || modelId < 0 || slot <= 0) return false;
+    const std::string raw = GetPedStdSkinDffName(ped);
+    const std::string sel = GetWeaponSkinIniLookupName(ped);
+    if (!raw.empty() && ResolveStandardObjectSkinParamsCached(modelId, slot, raw, out)) return true;
+    if (!sel.empty() && _stricmp(raw.c_str(), sel.c_str()) != 0 &&
+        ResolveStandardObjectSkinParamsCached(modelId, slot, sel, out))
+        return true;
+    return false;
+}
+
 void SaveStandardObjectSkinParamsToIni(int modelId, int slot, const char* skinDffName, const CustomObjectSkinParams& p) {
     if (modelId < 0 || slot <= 0 || !skinDffName || !skinDffName[0]) return;
     if (!IsValidStandardObjectModel(modelId)) return;
@@ -755,8 +778,6 @@ static bool ShouldRenderObjectForPedWithParams(CPed* ped, const CustomObjectSkin
 
 static void ApplyObjectWeaponSuppression(CPed* ped, std::vector<char>* suppress) {
     if (!ped || !suppress || (!g_renderCustomObjects && !g_renderStandardObjects)) return;
-    const std::string skin = GetPedStdSkinDffName(ped);
-    if (skin.empty()) return;
     auto applyParams = [&](const CustomObjectSkinParams& p) {
         if (!p.hideSelectedWeapons) return;
         if (p.weaponTypes.empty()) return;
@@ -768,12 +789,12 @@ static void ApplyObjectWeaponSuppression(CPed* ped, std::vector<char>* suppress)
     };
     if (g_renderCustomObjects) for (const auto& o : g_customObjects) {
         CustomObjectSkinParams p;
-        if (!ResolveObjectSkinParamsCached(o.iniPath, skin, p)) continue;
+        if (!ResolveObjectSkinParamsForPed(o.iniPath, ped, p)) continue;
         applyParams(p);
     }
     if (g_renderStandardObjects) for (const auto& o : g_standardObjects) {
         CustomObjectSkinParams p;
-        if (!ResolveStandardObjectSkinParamsCached(o.modelId, o.slot, skin, p)) continue;
+        if (!ResolveStandardObjectSkinParamsForPed(o.modelId, o.slot, ped, p)) continue;
         applyParams(p);
     }
 }
@@ -947,7 +968,6 @@ void OrcObjectsApplyWeaponSuppression(CPed* ped, std::vector<char>* suppress) {
 }
 
 void OrcObjectsPrepassLocalPlayer(CPlayerPed* player, int& active, std::vector<char>& objectUsed) {
-    const std::string plSkin = GetPedStdSkinDffName(player);
     for (size_t oi = 0; oi < g_customObjects.size(); ++oi) {
         auto& o = g_customObjects[oi];
         if (!g_renderCustomObjects) {
@@ -955,7 +975,7 @@ void OrcObjectsPrepassLocalPlayer(CPlayerPed* player, int& active, std::vector<c
             continue;
         }
         CustomObjectSkinParams op;
-        if (plSkin.empty() || !ResolveObjectSkinParamsCached(o.iniPath, plSkin, op)) continue;
+        if (!ResolveObjectSkinParamsForPed(o.iniPath, player, op)) continue;
         if (ShouldRenderObjectForPedWithParams(player, op) && EnsureCustomInstance(o)) {
             active++;
             objectUsed[oi] = 1;
@@ -964,12 +984,11 @@ void OrcObjectsPrepassLocalPlayer(CPlayerPed* player, int& active, std::vector<c
 }
 
 void OrcObjectsRenderLocalPlayer(CPlayerPed* player, std::vector<char>& objectUsed) {
-    const std::string plSkin = GetPedStdSkinDffName(player);
     if (g_renderCustomObjects) {
         for (size_t oi = 0; oi < g_customObjects.size(); ++oi) {
             auto& o = g_customObjects[oi];
             CustomObjectSkinParams op;
-            if (plSkin.empty() || !ResolveObjectSkinParamsCached(o.iniPath, plSkin, op)) {
+            if (!ResolveObjectSkinParamsForPed(o.iniPath, player, op)) {
                 continue;
             }
             if (!ShouldRenderObjectForPedWithParams(player, op)) {
@@ -983,7 +1002,7 @@ void OrcObjectsRenderLocalPlayer(CPlayerPed* player, std::vector<char>& objectUs
     if (g_renderStandardObjects) {
         for (const auto& o : g_standardObjects) {
             CustomObjectSkinParams op;
-            if (plSkin.empty() || !ResolveStandardObjectSkinParamsCached(o.modelId, o.slot, plSkin, op))
+            if (!ResolveStandardObjectSkinParamsForPed(o.modelId, o.slot, player, op))
                 continue;
             if (!ShouldRenderObjectForPedWithParams(player, op))
                 continue;
@@ -995,33 +1014,27 @@ void OrcObjectsRenderLocalPlayer(CPlayerPed* player, std::vector<char>& objectUs
 void OrcObjectsRenderForRemotePed(CPed* ped, std::vector<char>& objectUsed) {
     if (!ped) return;
     if (g_renderAllPedsObjects && g_renderCustomObjects) {
-        const std::string pedSkin = GetPedStdSkinDffName(ped);
-        if (!pedSkin.empty()) {
-            for (size_t oi = 0; oi < g_customObjects.size(); ++oi) {
-                auto& o = g_customObjects[oi];
-                CustomObjectSkinParams op;
-                if (!ResolveObjectSkinParamsCached(o.iniPath, pedSkin, op))
-                    continue;
-                if (!ShouldRenderObjectForPedWithParams(ped, op))
-                    continue;
-                if (!EnsureCustomInstance(o))
-                    continue;
-                RenderCustomObject(ped, o, op);
-                objectUsed[oi] = 1;
-            }
+        for (size_t oi = 0; oi < g_customObjects.size(); ++oi) {
+            auto& o = g_customObjects[oi];
+            CustomObjectSkinParams op;
+            if (!ResolveObjectSkinParamsForPed(o.iniPath, ped, op))
+                continue;
+            if (!ShouldRenderObjectForPedWithParams(ped, op))
+                continue;
+            if (!EnsureCustomInstance(o))
+                continue;
+            RenderCustomObject(ped, o, op);
+            objectUsed[oi] = 1;
         }
     }
     if (g_renderAllPedsObjects && g_renderStandardObjects) {
-        const std::string pedSkin = GetPedStdSkinDffName(ped);
-        if (!pedSkin.empty()) {
-            for (const auto& o : g_standardObjects) {
-                CustomObjectSkinParams op;
-                if (!ResolveStandardObjectSkinParamsCached(o.modelId, o.slot, pedSkin, op))
-                    continue;
-                if (!ShouldRenderObjectForPedWithParams(ped, op))
-                    continue;
-                RenderStandardObject(ped, o, op);
-            }
+        for (const auto& o : g_standardObjects) {
+            CustomObjectSkinParams op;
+            if (!ResolveStandardObjectSkinParamsForPed(o.modelId, o.slot, ped, op))
+                continue;
+            if (!ShouldRenderObjectForPedWithParams(ped, op))
+                continue;
+            RenderStandardObject(ped, o, op);
         }
     }
 }

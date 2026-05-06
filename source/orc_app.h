@@ -154,8 +154,8 @@ void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, s
 // ped.dat DFF basename for ped (LoadPedObject hook); empty if unknown.
 const char* OrcTryGetPedModelNameById(int modelId);
 std::string GetPedStdSkinDffName(CPed* ped);
-/// Базовое имя для `OrcOutFit\Weapons\<name>.ini`: как `GetPedStdSkinDffName`, но в SA:MP при пустом DFF
-/// у локального игрока подставляет `[SkinMode] Selected` / стандартный выбранный скин при `SkinLocalPreferSelected`.
+/// Имя для пресета оружия / выбранного скина в UI. Для секций `[Skin.*]` объектов рантайм сначала пробует
+/// `GetPedStdSkinDffName`, затем (если отличается) это значение — как `ResolveWeaponsPresetIniForPed`.
 std::string GetWeaponSkinIniLookupName(CPed* ped);
 bool ResolveWeaponsIniForSkinDff(const char* skinDffName, char* outPath, size_t outPathChars);
 /// `Weapons\<>.ini` для пресета педа: сначала DFF из LoadPedObject (`GetPedStdSkinDffName`), иначе `GetWeaponSkinIniLookupName`.
