@@ -3,6 +3,8 @@
 // Лог в OrcOutFit.log рядом с INI. `[Features] DebugLogLevel` из INI: 0 = Off (в файл ничего не пишется,
 // включая OrcLogError), 1 = только ошибки, 2 = полный trace (OrcLogInfo / OrcLogInfoThrottled).
 // Устаревший `[Features] DebugLog=1` без ключа DebugLogLevel включает уровень Info.
+class OrcIniDocument;
+
 enum class OrcLogLevel : int {
     Off = 0,
     Error = 1,
@@ -14,6 +16,8 @@ extern OrcLogLevel g_orcLogLevel;
 void OrcLogSetIniPath(const char* iniPath);
 // Читает [Features] DebugLogLevel (0/1/2); если ключа нет — legacy DebugLog=1 -> Info.
 void OrcLogReloadFromIni(const char* iniPath);
+/// То же для уровня лога, без повторного парса файла (например сразу после `LoadConfig` / `g_mainIniDoc`).
+void OrcLogReloadFromIniDocument(const char* iniPathForLog, const OrcIniDocument& doc);
 const char* OrcLogGetPath();
 
 void OrcLogError(const char* fmt, ...);

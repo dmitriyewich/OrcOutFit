@@ -31,6 +31,7 @@
 #include "orc_app.h"
 #include "orc_attach.h"
 #include "orc_ini.h"
+#include "orc_ini_cache.h"
 #include "orc_log.h"
 #include "orc_path.h"
 #include "orc_render.h"
@@ -39,6 +40,8 @@
 #include "samp_bridge.h"
 
 using namespace plugin;
+
+static std::string StandardSkinsIniPath();
 
 std::vector<CustomSkinCfg> g_customSkins;
 std::vector<StandardSkinCfg> g_standardSkins;
@@ -56,6 +59,11 @@ static RpClump* g_hiddenClump = nullptr;
 static bool g_hideSnapshotValid = false;
 
 void InvalidateCustomSkinLookupCache() {
+    for (const auto& s : g_customSkins) {
+        if (!s.iniPath.empty())
+            OrcIniCacheInvalidatePath(s.iniPath.c_str());
+    }
+    OrcIniCacheInvalidatePath(StandardSkinsIniPath().c_str());
     g_customSkinLookupDirty = true;
     g_customSkinNickLookup.clear();
     g_selectedSkinCacheIdx = -1;
@@ -389,10 +397,15 @@ static void LoadSkinCfgFromIni(CustomSkinCfg& s) {
         s.nicknames.clear();
         return;
     }
-    s.bindToNick = GetPrivateProfileIntA("NickBinding", "Enabled", 0, s.iniPath.c_str()) != 0;
-    char buf[512] = {};
-    GetPrivateProfileStringA("NickBinding", "Nicks", "", buf, sizeof(buf), s.iniPath.c_str());
-    s.nickListCsv = buf;
+    const OrcIniDocument* doc = OrcIniCacheGet(s.iniPath.c_str());
+    if (!doc || !doc->IsLoaded()) {
+        s.bindToNick = false;
+        s.nickListCsv.clear();
+        s.nicknames.clear();
+        return;
+    }
+    s.bindToNick = doc->GetInt("NickBinding", "Enabled", 0) != 0;
+    s.nickListCsv = doc->GetString("NickBinding", "Nicks", "");
     s.nicknames = ParseNickCsv(s.nickListCsv);
 }
 
@@ -421,6 +434,7 @@ static bool g_standardSkinLookupDirty = true;
 static std::unordered_map<std::string, int> g_standardSkinNickLookup;
 
 void InvalidateStandardSkinLookupCache() {
+    OrcIniCacheInvalidatePath(StandardSkinsIniPath().c_str());
     g_standardSkinLookupDirty = true;
     g_standardSkinNickLookup.clear();
 }
@@ -464,26 +478,27 @@ void LoadStandardSkinsFromIni() {
     const std::string path = StandardSkinsIniPath();
     if (!OrcFileExistsA(path.c_str())) return;
 
-    char entries[4096] = {};
-    GetPrivateProfileStringA("StandardSkins", "Entries", "", entries, sizeof(entries), path.c_str());
+    const OrcIniDocument* pdoc = OrcIniCacheGet(path.c_str());
+    if (!pdoc || !pdoc->IsLoaded()) return;
+    const OrcIniDocument& doc = *pdoc;
+
+    const std::string entriesStr = doc.GetString("StandardSkins", "Entries", "");
     std::unordered_set<std::string> seen;
-    for (const std::string& token : ParseCsvTokens(entries)) {
+    for (const std::string& token : ParseCsvTokens(entriesStr.c_str())) {
         const std::string dff = TrimAscii(token);
         if (dff.empty()) continue;
         const std::string dffLower = ToLowerAscii(dff);
         if (!seen.insert(dffLower).second) continue;
 
         const std::string sec = StandardSkinIniSection(dff.c_str());
-        const int modelId = GetPrivateProfileIntA(sec.c_str(), "ModelId", -1, path.c_str());
+        const int modelId = doc.GetInt(sec.c_str(), "ModelId", -1);
         if (!OrcIsValidStandardSkinModel(modelId)) continue;
 
         StandardSkinCfg cfg;
         cfg.modelId = modelId;
         cfg.dffName = dff;
-        cfg.bindToNick = GetPrivateProfileIntA(sec.c_str(), "Enabled", 0, path.c_str()) != 0;
-        char nicks[512] = {};
-        GetPrivateProfileStringA(sec.c_str(), "Nicks", "", nicks, sizeof(nicks), path.c_str());
-        cfg.nickListCsv = nicks;
+        cfg.bindToNick = doc.GetInt(sec.c_str(), "Enabled", 0) != 0;
+        cfg.nickListCsv = doc.GetString(sec.c_str(), "Nicks", "");
         cfg.nicknames = ParseNickCsv(cfg.nickListCsv);
         g_standardSkins.push_back(std::move(cfg));
     }
@@ -523,9 +538,10 @@ void SaveStandardSkinCfgToIni(const StandardSkinCfg& s) {
     if (!OrcIsValidStandardSkinModel(s.modelId)) return;
     const std::string path = StandardSkinsIniPath();
 
-    char entriesBuf[4096] = {};
-    GetPrivateProfileStringA("StandardSkins", "Entries", "", entriesBuf, sizeof(entriesBuf), path.c_str());
-    std::vector<std::string> entries = ParseCsvTokens(entriesBuf);
+    std::string entriesBuf;
+    if (const OrcIniDocument* doc = OrcIniCacheGet(path.c_str()); doc && doc->IsLoaded())
+        entriesBuf = doc->GetString("StandardSkins", "Entries", "");
+    std::vector<std::string> entries = ParseCsvTokens(entriesBuf.c_str());
     const std::string wantLower = ToLowerAscii(s.dffName);
     bool found = false;
     for (std::string& entry : entries) {

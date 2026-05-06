@@ -1,5 +1,7 @@
 #include "orc_log.h"
 
+#include "orc_ini_document.h"
+
 #include <windows.h>
 
 #include <cstdio>
@@ -29,24 +31,43 @@ void OrcLogSetIniPath(const char* iniPath) {
     }
 }
 
-void OrcLogReloadFromIni(const char* iniPath) {
-    OrcLogSetIniPath(iniPath);
-    if (!iniPath || !iniPath[0]) {
-        g_orcLogLevel = OrcLogLevel::Off;
-        return;
-    }
+static void OrcLogApplyLevelFromFeaturesDoc(const OrcIniDocument& doc) {
     constexpr int kMissing = 99999;
-    const int lvl = GetPrivateProfileIntA("Features", "DebugLogLevel", kMissing, iniPath);
+    const int lvl = doc.GetInt("Features", "DebugLogLevel", kMissing);
     if (lvl != kMissing) {
         if (lvl <= 0) g_orcLogLevel = OrcLogLevel::Off;
         else if (lvl == 1) g_orcLogLevel = OrcLogLevel::Error;
         else g_orcLogLevel = OrcLogLevel::Info;
         return;
     }
-    if (GetPrivateProfileIntA("Features", "DebugLog", 0, iniPath) != 0)
+    if (doc.GetInt("Features", "DebugLog", 0) != 0)
         g_orcLogLevel = OrcLogLevel::Info;
     else
         g_orcLogLevel = OrcLogLevel::Off;
+}
+
+void OrcLogReloadFromIni(const char* iniPath) {
+    OrcLogSetIniPath(iniPath);
+    if (!iniPath || !iniPath[0]) {
+        g_orcLogLevel = OrcLogLevel::Off;
+        return;
+    }
+    OrcIniDocument doc;
+    (void)doc.LoadFromFile(iniPath);
+    OrcLogApplyLevelFromFeaturesDoc(doc);
+}
+
+void OrcLogReloadFromIniDocument(const char* iniPathForLog, const OrcIniDocument& doc) {
+    OrcLogSetIniPath(iniPathForLog);
+    if (!iniPathForLog || !iniPathForLog[0]) {
+        g_orcLogLevel = OrcLogLevel::Off;
+        return;
+    }
+    if (!doc.IsLoaded()) {
+        OrcLogReloadFromIni(iniPathForLog);
+        return;
+    }
+    OrcLogApplyLevelFromFeaturesDoc(doc);
 }
 
 static void OrcWriteLine(char tag, const char* fmt, va_list ap) {

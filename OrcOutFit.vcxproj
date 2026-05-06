@@ -58,6 +58,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -85,7 +86,7 @@
       <OmitFramePointers>true</OmitFramePointers>
       <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
       <AdditionalOptions>/utf-8 /Gw /GS- %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(PluginSdkDir)\plugin_sa;$(PluginSdkDir)\plugin_sa\game_sa;$(PluginSdkDir)\plugin_sa\game_sa\rw;$(PluginSdkDir)\shared;$(PluginSdkDir)\shared\game;$(PluginSdkDir)\shared\dxsdk;$(PluginSdkDir)\injector;$(PluginSdkDir)\hooking;$(PluginSdkDir)\safetyhook;$(ProjectDir)source\external\imgui;$(ProjectDir)source\external\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(PluginSdkDir)\plugin_sa;$(PluginSdkDir)\plugin_sa\game_sa;$(PluginSdkDir)\plugin_sa\game_sa\rw;$(PluginSdkDir)\shared;$(PluginSdkDir)\shared\game;$(PluginSdkDir)\shared\dxsdk;$(PluginSdkDir)\injector;$(PluginSdkDir)\hooking;$(PluginSdkDir)\safetyhook;$(ProjectDir)source\external\imgui;$(ProjectDir)source\external\imgui\backends;$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -110,6 +111,10 @@
     <ClCompile Include="source\orc_weapons.cpp" />
     <ClCompile Include="source\orc_weapons_ui.cpp" />
     <ClCompile Include="source\orc_ini.cpp" />
+    <ClCompile Include="source\orc_ini_document.cpp" />
+    <ClCompile Include="source\orc_ini_cache.cpp" />
+    <ClCompile Include="source\orc_ini_held.cpp" />
+    <ClCompile Include="source\orc_weapon_preset_async.cpp" />
     <ClCompile Include="source\orc_locale.cpp" />
     <ClCompile Include="source\orc_log.cpp" />
     <ClCompile Include="source\orc_texture_remap.cpp" />

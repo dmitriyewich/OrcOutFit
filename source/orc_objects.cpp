@@ -27,12 +27,15 @@
 #include "orc_app.h"
 #include "orc_attach.h"
 #include "orc_ini.h"
+#include "orc_ini_cache.h"
 #include "orc_log.h"
 #include "orc_path.h"
 #include "orc_render.h"
 #include "orc_types.h"
 
 using namespace plugin;
+
+static std::string StandardObjectsIniPath();
 
 static std::string TrimAscii(std::string s) {
     size_t b = 0, e = s.size();
@@ -144,27 +147,34 @@ static std::string ObjectSkinIniSection(const char* skinDffName) {
     return std::string("Skin.") + (skinDffName ? skinDffName : "");
 }
 
+static bool ObjectSkinIniSectionHasData(const OrcIniDocument& doc, const char* sec) {
+    if (!sec || !doc.IsLoaded()) return false;
+    if (!doc.GetString(sec, "Bone", "").empty()) return true;
+    return !doc.GetString(sec, "Enabled", "").empty();
+}
+
 static bool ObjectSkinIniSectionExists(const char* iniPath, const char* sec) {
     if (!iniPath || !sec) return false;
-    char b1[8] = {}, b2[8] = {};
-    GetPrivateProfileStringA(sec, "Bone", "", b1, sizeof(b1), iniPath);
-    GetPrivateProfileStringA(sec, "Enabled", "", b2, sizeof(b2), iniPath);
-    return (b1[0] != 0 || b2[0] != 0);
+    const OrcIniDocument* doc = OrcIniCacheGet(iniPath);
+    if (!doc || !doc->IsLoaded()) return false;
+    return ObjectSkinIniSectionHasData(*doc, sec);
 }
 
 bool LoadObjectSkinParamsFromIni(const char* iniPath, const char* skinDffName, CustomObjectSkinParams& out) {
     if (!iniPath || !iniPath[0] || !skinDffName || !skinDffName[0]) return false;
+    const OrcIniDocument* pdoc = OrcIniCacheGet(iniPath);
+    if (!pdoc || !pdoc->IsLoaded()) return false;
+    const OrcIniDocument& doc = *pdoc;
     const std::string sec = ObjectSkinIniSection(skinDffName);
-    if (!ObjectSkinIniSectionExists(iniPath, sec.c_str())) return false;
+    if (!ObjectSkinIniSectionHasData(doc, sec.c_str())) return false;
 
-    char buf[64];
-    auto F = [&](const char* key, float def)->float {
-        GetPrivateProfileStringA(sec.c_str(), key, "", buf, sizeof(buf), iniPath);
-        if (!buf[0]) return def;
-        return (float)atof(buf);
+    auto F = [&](const char* key, float def) -> float {
+        const std::string s = doc.GetString(sec.c_str(), key, "");
+        if (s.empty()) return def;
+        return static_cast<float>(atof(s.c_str()));
     };
-    out.enabled = GetPrivateProfileIntA(sec.c_str(), "Enabled", out.enabled ? 1 : 0, iniPath) != 0;
-    out.boneId = GetPrivateProfileIntA(sec.c_str(), "Bone", out.boneId, iniPath);
+    out.enabled = doc.GetInt(sec.c_str(), "Enabled", out.enabled ? 1 : 0) != 0;
+    out.boneId = doc.GetInt(sec.c_str(), "Bone", out.boneId);
     out.x = F("OffsetX", out.x);
     out.y = F("OffsetY", out.y);
     out.z = F("OffsetZ", out.z);
@@ -176,13 +186,11 @@ bool LoadObjectSkinParamsFromIni(const char* iniPath, const char* skinDffName, C
     out.scaleY = F("ScaleY", out.scaleY);
     out.scaleZ = F("ScaleZ", out.scaleZ);
 
-    char wcsv[256] = {};
-    GetPrivateProfileStringA(sec.c_str(), "Weapons", "", wcsv, sizeof(wcsv), iniPath);
-    out.weaponTypes = ParseWeaponTypesCsv(wcsv);
-    char mode[16] = {};
-    GetPrivateProfileStringA(sec.c_str(), "WeaponsMode", "any", mode, sizeof(mode), iniPath);
+    const std::string wcsv = doc.GetString(sec.c_str(), "Weapons", "");
+    out.weaponTypes = ParseWeaponTypesCsv(wcsv.c_str());
+    const std::string mode = doc.GetString(sec.c_str(), "WeaponsMode", "any");
     out.weaponRequireAll = (OrcToLowerAscii(mode) == "all");
-    out.hideSelectedWeapons = GetPrivateProfileIntA(sec.c_str(), "HideWeapons", out.hideSelectedWeapons ? 1 : 0, iniPath) != 0;
+    out.hideSelectedWeapons = doc.GetInt(sec.c_str(), "HideWeapons", out.hideSelectedWeapons ? 1 : 0) != 0;
     return true;
 }
 
@@ -198,6 +206,11 @@ std::string g_livePreviewObjectSkinDff;
 CustomObjectSkinParams g_livePreviewObjectParams{};
 
 void InvalidateObjectSkinParamCache() {
+    for (const auto& o : g_customObjects) {
+        if (!o.iniPath.empty())
+            OrcIniCacheInvalidatePath(o.iniPath.c_str());
+    }
+    OrcIniCacheInvalidatePath(StandardObjectsIniPath().c_str());
     g_objectSkinParamCache.clear();
 }
 
@@ -365,10 +378,11 @@ void LoadStandardObjectsFromIni() {
     const std::string path = StandardObjectsIniPath();
     if (!OrcFileExistsA(path.c_str())) return;
 
-    char entries[4096] = {};
-    GetPrivateProfileStringA("Objects", "Entries", "", entries, sizeof(entries), path.c_str());
+    const OrcIniDocument* doc = OrcIniCacheGet(path.c_str());
+    if (!doc || !doc->IsLoaded()) return;
+    const std::string entriesStr = doc->GetString("Objects", "Entries", "");
     std::unordered_set<std::string> seen;
-    for (const std::string& token : ParseCsvTokens(entries)) {
+    for (const std::string& token : ParseCsvTokens(entriesStr.c_str())) {
         int modelId = -1;
         int slot = 1;
         if (!ParseStandardObjectSlotKey(token, modelId, slot)) continue;
@@ -421,14 +435,17 @@ bool LoadStandardObjectSkinParamsFromIni(int modelId, int slot, const char* skin
     if (!StandardObjectSkinIniSectionExists(modelId, slot, skinDffName)) return false;
     const std::string sec = StandardObjectSkinIniSection(modelId, slot, skinDffName);
 
-    char buf[64];
-    auto F = [&](const char* key, float def)->float {
-        GetPrivateProfileStringA(sec.c_str(), key, "", buf, sizeof(buf), path.c_str());
-        if (!buf[0]) return def;
-        return (float)atof(buf);
+    const OrcIniDocument* pdoc = OrcIniCacheGet(path.c_str());
+    if (!pdoc || !pdoc->IsLoaded()) return false;
+    const OrcIniDocument& doc = *pdoc;
+
+    auto F = [&](const char* key, float def) -> float {
+        const std::string s = doc.GetString(sec.c_str(), key, "");
+        if (s.empty()) return def;
+        return static_cast<float>(atof(s.c_str()));
     };
-    out.enabled = GetPrivateProfileIntA(sec.c_str(), "Enabled", out.enabled ? 1 : 0, path.c_str()) != 0;
-    out.boneId = GetPrivateProfileIntA(sec.c_str(), "Bone", out.boneId, path.c_str());
+    out.enabled = doc.GetInt(sec.c_str(), "Enabled", out.enabled ? 1 : 0) != 0;
+    out.boneId = doc.GetInt(sec.c_str(), "Bone", out.boneId);
     out.x = F("OffsetX", out.x);
     out.y = F("OffsetY", out.y);
     out.z = F("OffsetZ", out.z);
@@ -440,13 +457,11 @@ bool LoadStandardObjectSkinParamsFromIni(int modelId, int slot, const char* skin
     out.scaleY = F("ScaleY", out.scaleY);
     out.scaleZ = F("ScaleZ", out.scaleZ);
 
-    char wcsv[256] = {};
-    GetPrivateProfileStringA(sec.c_str(), "Weapons", "", wcsv, sizeof(wcsv), path.c_str());
-    out.weaponTypes = ParseWeaponTypesCsv(wcsv);
-    char mode[16] = {};
-    GetPrivateProfileStringA(sec.c_str(), "WeaponsMode", "any", mode, sizeof(mode), path.c_str());
+    const std::string wcsv = doc.GetString(sec.c_str(), "Weapons", "");
+    out.weaponTypes = ParseWeaponTypesCsv(wcsv.c_str());
+    const std::string mode = doc.GetString(sec.c_str(), "WeaponsMode", "any");
     out.weaponRequireAll = (OrcToLowerAscii(mode) == "all");
-    out.hideSelectedWeapons = GetPrivateProfileIntA(sec.c_str(), "HideWeapons", out.hideSelectedWeapons ? 1 : 0, path.c_str()) != 0;
+    out.hideSelectedWeapons = doc.GetInt(sec.c_str(), "HideWeapons", out.hideSelectedWeapons ? 1 : 0) != 0;
     return true;
 }
 
@@ -463,6 +478,7 @@ std::string g_livePreviewStandardObjectSkinDff;
 CustomObjectSkinParams g_livePreviewStandardObjectParams{};
 
 void InvalidateStandardObjectSkinParamCache() {
+    OrcIniCacheInvalidatePath(StandardObjectsIniPath().c_str());
     g_standardObjectSkinParamCache.clear();
 }
 

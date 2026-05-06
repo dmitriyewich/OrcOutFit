@@ -30,6 +30,7 @@
 #include "orc_types.h"
 #include "orc_app.h"
 #include "orc_ini.h"
+#include "orc_ini_cache.h"
 #include "orc_log.h"
 #include "orc_weapon_assets.h"
 #include "samp_bridge.h"
@@ -434,51 +435,48 @@ static void LoadTextureRemapNickBindingsForDff(const char* dffName, int modelId)
     const std::string path = TextureRemapIniPathForDff(dffName, modelId);
     DWORD attr = GetFileAttributesA(path.c_str());
     if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        std::vector<char> names(8192, '\0');
-        DWORD chars = GetPrivateProfileSectionNamesA(names.data(), (DWORD)names.size(), path.c_str());
-        while (chars == names.size() - 2) {
-            names.assign(names.size() * 2, '\0');
-            chars = GetPrivateProfileSectionNamesA(names.data(), (DWORD)names.size(), path.c_str());
-        }
+        const OrcIniDocument* docPtr = OrcIniCacheGet(path.c_str());
+        if (docPtr && docPtr->IsLoaded()) {
+            const OrcIniDocument& doc = *docPtr;
+            std::vector<std::string> sections;
+            doc.GetAllSectionNames(sections);
 
-        for (const char* sec = names.data(); sec && *sec; sec += strlen(sec) + 1) {
-            if (_strnicmp(sec, "Binding.", 8) != 0)
-                continue;
-
-            TextureRemapNickBinding binding;
-            binding.id = atoi(sec + 8);
-            binding.enabled = GetPrivateProfileIntA(sec, "Enabled", 1, path.c_str()) != 0;
-            char nicks[512] = {};
-            GetPrivateProfileStringA(sec, "Nicks", "", nicks, sizeof(nicks), path.c_str());
-            binding.nickListCsv = nicks;
-            binding.nicknames = ParseNickCsv(binding.nickListCsv);
-
-            const int slotCount = GetPrivateProfileIntA(sec, "SlotCount", 0, path.c_str());
-            for (int i = 0; i < slotCount && i < kTextureRemapLimit; ++i) {
-                char keyOriginal[32], keyRemap[32];
-                _snprintf_s(keyOriginal, _TRUNCATE, "Slot%dOriginal", i);
-                _snprintf_s(keyRemap, _TRUNCATE, "Slot%dRemap", i);
-
-                char originalName[64] = {};
-                char remapName[64] = {};
-                GetPrivateProfileStringA(sec, keyOriginal, "", originalName, sizeof(originalName), path.c_str());
-                GetPrivateProfileStringA(sec, keyRemap, "", remapName, sizeof(remapName), path.c_str());
-                if (!originalName[0])
+            for (const std::string& secStr : sections) {
+                const char* sec = secStr.c_str();
+                if (_strnicmp(sec, "Binding.", 8) != 0)
                     continue;
 
-                TextureRemapBindingSlot slot;
-                slot.originalName = originalName;
-                slot.remapName = remapName;
-                binding.slots.push_back(std::move(slot));
+                TextureRemapNickBinding binding;
+                binding.id = atoi(sec + 8);
+                binding.enabled = doc.GetInt(sec, "Enabled", 1) != 0;
+                binding.nickListCsv = doc.GetString(sec, "Nicks", "");
+                binding.nicknames = ParseNickCsv(binding.nickListCsv);
+
+                const int slotCount = doc.GetInt(sec, "SlotCount", 0);
+                for (int i = 0; i < slotCount && i < kTextureRemapLimit; ++i) {
+                    char keyOriginal[32], keyRemap[32];
+                    _snprintf_s(keyOriginal, _TRUNCATE, "Slot%dOriginal", i);
+                    _snprintf_s(keyRemap, _TRUNCATE, "Slot%dRemap", i);
+
+                    const std::string originalName = doc.GetString(sec, keyOriginal, "");
+                    const std::string remapName = doc.GetString(sec, keyRemap, "");
+                    if (originalName.empty())
+                        continue;
+
+                    TextureRemapBindingSlot slot;
+                    slot.originalName = originalName;
+                    slot.remapName = remapName;
+                    binding.slots.push_back(std::move(slot));
+                }
+
+                if (!binding.nicknames.empty() && !binding.slots.empty())
+                    bindings.push_back(std::move(binding));
             }
 
-            if (!binding.nicknames.empty() && !binding.slots.empty())
-                bindings.push_back(std::move(binding));
+            std::sort(bindings.begin(), bindings.end(), [](const TextureRemapNickBinding& a, const TextureRemapNickBinding& b) {
+                return a.id < b.id;
+            });
         }
-
-        std::sort(bindings.begin(), bindings.end(), [](const TextureRemapNickBinding& a, const TextureRemapNickBinding& b) {
-            return a.id < b.id;
-        });
     }
 
     g_textureRemapNickBindingsByDff.insert_or_assign(key, std::move(bindings));
@@ -1152,7 +1150,8 @@ bool OrcSaveLocalPedTextureRemapNickBinding(const char* nickCsv) {
     const char* dff = OrcTryGetPedModelNameById(state->modelId);
     const std::string path = TextureRemapIniPathForDff(dff, state->modelId);
 
-    const int nextId = GetPrivateProfileIntA("Main", "NextBindingId", 0, path.c_str());
+    const OrcIniDocument* iniDoc = OrcIniCacheGet(path.c_str());
+    const int nextId = (iniDoc && iniDoc->IsLoaded()) ? iniDoc->GetInt("Main", "NextBindingId", 0) : 0;
     const int id = nextId;
     char nextBuf[32] = {};
     _snprintf_s(nextBuf, _TRUNCATE, "%d", nextId + 1);
@@ -1184,6 +1183,7 @@ bool OrcSaveLocalPedTextureRemapNickBinding(const char* nickCsv) {
     if (!OrcIniWriteValues(path.c_str(), "; OrcOutFit texture remap bindings.\n\n", values))
         return false;
 
+    OrcIniCacheInvalidatePath(path.c_str());
     const std::string key = TextureRemapDffKey(dff, state->modelId);
     g_textureRemapNickBindingsByDff.erase(key);
     return true;
@@ -1202,6 +1202,7 @@ bool OrcDeleteLocalPedTextureRemapNickBinding(int bindingId) {
     if (!OrcIniDeleteSection(path.c_str(), section))
         return false;
 
+    OrcIniCacheInvalidatePath(path.c_str());
     const std::string key = TextureRemapDffKey(dff, state->modelId);
     g_textureRemapNickBindingsByDff.erase(key);
     return true;

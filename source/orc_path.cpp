@@ -14,6 +14,15 @@ bool OrcFileExistsA(const char* path) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+uint64_t OrcFileLastWriteUtcTicks(const char* path) {
+    if (!path || !path[0]) return 0;
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad))
+        return 0;
+    return (uint64_t)fad.ftLastWriteTime.dwLowDateTime |
+           ((uint64_t)fad.ftLastWriteTime.dwHighDateTime << 32u);
+}
+
 std::string OrcBaseNameNoExt(const std::string& file) {
     size_t slash = file.find_last_of("\\/");
     size_t start = (slash == std::string::npos) ? 0 : (slash + 1);
