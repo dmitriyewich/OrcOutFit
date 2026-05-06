@@ -638,10 +638,12 @@ void OrcUiDraw() {
                     DiscoverCustomObjectsAndEnsureIni();
             } else {
                 if (g_uiCustomIdx < 0 || g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
-                auto& obj = g_customObjects[g_uiCustomIdx];
 
                 char oprev[160];
-                _snprintf_s(oprev, _TRUNCATE, "%s [%d/%d]", obj.name.c_str(), g_uiCustomIdx + 1, (int)g_customObjects.size());
+                {
+                    const CustomObjectCfg& pickPrev = g_customObjects[(size_t)g_uiCustomIdx];
+                    _snprintf_s(oprev, _TRUNCATE, "%s [%d/%d]", pickPrev.name.c_str(), g_uiCustomIdx + 1, (int)g_customObjects.size());
+                }
                 if (OrcUiBeginControlRow("objpick", T(OrcTextId::Object))) {
                     if (ImGui::BeginCombo("##value", oprev)) {
                         for (int i = 0; i < (int)g_customObjects.size(); i++) {
@@ -654,6 +656,9 @@ void OrcUiDraw() {
                     }
                     OrcUiEndControlRow();
                 }
+
+                if (g_uiCustomIdx < 0 || g_uiCustomIdx >= (int)g_customObjects.size()) g_uiCustomIdx = 0;
+                auto& obj = g_customObjects[g_uiCustomIdx];
 
                 std::vector<std::pair<std::string, int>> pedSkins;
                 OrcCollectPedSkins(pedSkins);
@@ -758,10 +763,12 @@ void OrcUiDraw() {
                     } else {
                         if (g_uiStdObjectIdx < 0 || g_uiStdObjectIdx >= (int)g_standardObjects.size())
                             g_uiStdObjectIdx = 0;
-                        const StandardObjectSlotCfg& obj = g_standardObjects[(size_t)g_uiStdObjectIdx];
                         char preview[80];
-                        _snprintf_s(preview, _TRUNCATE, "%d#%d [%d/%d]",
-                            obj.modelId, obj.slot, g_uiStdObjectIdx + 1, (int)g_standardObjects.size());
+                        {
+                            const StandardObjectSlotCfg& rowPrev = g_standardObjects[(size_t)g_uiStdObjectIdx];
+                            _snprintf_s(preview, _TRUNCATE, "%d#%d [%d/%d]",
+                                rowPrev.modelId, rowPrev.slot, g_uiStdObjectIdx + 1, (int)g_standardObjects.size());
+                        }
                         if (OrcUiBeginControlRow("std_obj_pick", T(OrcTextId::Object))) {
                             if (ImGui::BeginCombo("##value", preview)) {
                                 for (int i = 0; i < (int)g_standardObjects.size(); ++i) {
@@ -777,6 +784,10 @@ void OrcUiDraw() {
                             }
                             OrcUiEndControlRow();
                         }
+
+                        if (g_uiStdObjectIdx < 0 || g_uiStdObjectIdx >= (int)g_standardObjects.size())
+                            g_uiStdObjectIdx = 0;
+                        const StandardObjectSlotCfg& obj = g_standardObjects[(size_t)g_uiStdObjectIdx];
 
                         if (pedSkins.empty()) {
                             g_livePreviewStandardObjectActive = false;
