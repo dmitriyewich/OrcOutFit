@@ -35,7 +35,8 @@
 
 using namespace plugin;
 
-static void SyncWeaponReplacementMuzzleFlashAlpha(CPed* ped, RwObject* obj);
+// alphaOverride < 0: use ped gunflash MP1 (held weapon). Else explicit alpha for holstered body clones (0 = hide flash).
+static void SyncWeaponReplacementMuzzleFlashAlpha(CPed* ped, RwObject* obj, int alphaOverride = -1);
 
 static bool g_pedWeaponModelHooksInstalled = false;
 using AddWeaponModel_t = void(__thiscall*)(CPed*, int);
@@ -189,7 +190,7 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
     const bool meshIsReplacement = !r.replacementKey.empty();
     OrcApplyWeaponTexturesCombined(ped, r.weaponType, r.rwObject, textureAsset, meshIsReplacement);
     if (!r.replacementKey.empty())
-        SyncWeaponReplacementMuzzleFlashAlpha(ped, r.rwObject);
+        SyncWeaponReplacementMuzzleFlashAlpha(nullptr, r.rwObject, 0);
 
     if (r.rwObject->type == rpCLUMP) {
         auto* clump = reinterpret_cast<RpClump*>(r.rwObject);
@@ -237,6 +238,7 @@ static void CopyRwObjectRootMatrix(RwObject* src, RwObject* dst) {
 // Replacement DFFs often include a muzzle-flash mesh with the same texture names as vanilla.
 // The game drives visibility via CPed::m_nWeaponGunflashAlphaMP1 (and MP2) during held render;
 // our InitAttachmentAtomicCB forces material alpha to 255, so sync flash materials each frame.
+// Holster/body clones (RenderOneWeapon) must force alpha 0 — MP1 reflects the held gun, not the carried one.
 static bool IsWeaponMuzzleFlashTextureName(const char* name) {
     if (!name || !name[0])
         return false;
@@ -274,10 +276,17 @@ static RpAtomic* SyncHeldReplacementMuzzleFlashAtomicCB(RpAtomic* atomic, void* 
     return atomic;
 }
 
-static void SyncWeaponReplacementMuzzleFlashAlpha(CPed* ped, RwObject* obj) {
-    if (!ped || !obj)
+static void SyncWeaponReplacementMuzzleFlashAlpha(CPed* ped, RwObject* obj, int alphaOverride) {
+    if (!obj)
         return;
-    int a = static_cast<int>(ped->m_nWeaponGunflashAlphaMP1);
+    int a;
+    if (alphaOverride >= 0)
+        a = alphaOverride;
+    else {
+        if (!ped)
+            return;
+        a = static_cast<int>(ped->m_nWeaponGunflashAlphaMP1);
+    }
     __try {
         if (obj->type == rpCLUMP)
             RpClumpForAllAtomics(reinterpret_cast<RpClump*>(obj), SyncHeldReplacementMuzzleFlashAtomicCB, &a);
