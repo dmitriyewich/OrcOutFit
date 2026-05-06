@@ -476,6 +476,11 @@ static void WeaponFilterEditorParams(CustomObjectSkinParams& obj) {
     }
 }
 
+void OrcUiMarkObjectEditorsStale() {
+    g_uiObjParamsLoaded = false;
+    g_uiStdObjParamsLoaded = false;
+}
+
 void OrcUiDraw() {
     ImGuiIO& io = ImGui::GetIO();
     const float uiScale = UiLayoutScale();

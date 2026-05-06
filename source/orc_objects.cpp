@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "orc_app.h"
+#include "orc_ui.h"
 #include "orc_attach.h"
 #include "orc_ini.h"
 #include "orc_ini_cache.h"
@@ -212,6 +213,7 @@ void InvalidateObjectSkinParamCache() {
     }
     OrcIniCacheInvalidatePath(StandardObjectsIniPath().c_str());
     g_objectSkinParamCache.clear();
+    OrcUiMarkObjectEditorsStale();
 }
 
 void SaveObjectSkinParamsToIni(const char* iniPath, const char* skinDffName, const CustomObjectSkinParams& p) {
@@ -492,6 +494,7 @@ CustomObjectSkinParams g_livePreviewStandardObjectParams{};
 void InvalidateStandardObjectSkinParamCache() {
     OrcIniCacheInvalidatePath(StandardObjectsIniPath().c_str());
     g_standardObjectSkinParamCache.clear();
+    OrcUiMarkObjectEditorsStale();
 }
 
 static bool ResolveStandardObjectSkinParamsCached(int modelId, int slot, const std::string& skinDff, CustomObjectSkinParams& out) {
