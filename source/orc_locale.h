@@ -16,6 +16,10 @@
     X(TabMain, "Главная", "Main") \
     X(TabWeapons, "Оружие", "Weapons") \
     X(TabWeaponRender, "Рендер оружия", "Weapon render") \
+    X(TabWeaponHeld, "В руке", "Held") \
+    X(WeaponHeldTabHint, "Коррекция позы оружия в руках (смещение/поворот/масштаб поверх IK) хранится в том же файле OrcOutFit\\Weapons\\<скин>.ini, ключи Held*. Только для ped с DFF этого скина; в OrcOutFit.ini не пишется. Оси как у «Рендер оружия» на теле.", "Held-weapon pose tweak (offset/rotation/scale on top of IK) is stored in the same OrcOutFit\\Weapons\\<skin>.ini using Held* keys. Only for peds whose skin DFF matches; not written to OrcOutFit.ini. Axes match body weapon offsets.") \
+    X(HeldAdjustEnabled, "Коррекция в руке", "Held adjustment") \
+    X(WeaponPresetOverwriteHint, "Сохранение из UI перезаписывает весь INI пресета скина — при ручных правках держите копию.", "Saving from the UI overwrites the whole skin preset .ini — keep a backup if you edit by hand.") \
     X(TabWeaponReplacement, "Замена оружия", "Weapon replacement") \
     X(TabObjects, "Объекты", "Objects") \
     X(TabSkins, "Скины", "Skins") \

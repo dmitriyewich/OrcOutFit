@@ -51,6 +51,7 @@
 #include "orc_render.h"
 #include "orc_weapons.h"
 #include "orc_path.h"
+#include "orc_log.h"
 #include "orc_attach.h"
 #include "orc_weapon_assets.h"
 #include "orc_weapon_runtime.h"
@@ -116,12 +117,20 @@ bool g_weaponTextureNickMode = true;
 bool g_weaponTextureRandomMode = true;
 bool g_weaponTextureStandardRemap = true;
 bool g_weaponHudIconFromGunsTxd = true;
+bool g_heldPoseDebug = false;
+int  g_heldWeaponTrace = 0;
+int  g_heldWeaponStatusIntervalMs = 10000;
 std::vector<WeaponCfg> g_cfg;
 std::vector<WeaponCfg> g_cfg2; // secondary dual-wield placement
 bool g_livePreviewWeaponsActive = false;
 std::string g_livePreviewWeaponSkinDff;
 std::vector<WeaponCfg> g_livePreviewWeapon1;
 std::vector<WeaponCfg> g_livePreviewWeapon2;
+bool g_livePreviewHeldActive = false;
+std::string g_livePreviewHeldSkinDff;
+std::vector<HeldWeaponPoseCfg> g_livePreviewHeld1;
+std::vector<HeldWeaponPoseCfg> g_livePreviewHeld2;
+bool g_livePreviewHeldUseSecondary = false;
 std::vector<int> g_availableWeaponTypes;
 std::vector<int> g_weaponModelId;
 std::vector<int> g_weaponModelId2;
@@ -487,6 +496,100 @@ static void ReadSection(WeaponCfg& c, const char* section) {
     ReadSectionFromIni(c, section, g_iniPath);
 }
 
+static bool OrcIniSectionHasAnyHeldKey(const char* section, const char* iniPath) {
+    if (!section || !section[0] || !iniPath || !iniPath[0]) return false;
+    const char* keys[] = {
+        "HeldEnabled", "HeldOffsetX", "HeldOffsetY", "HeldOffsetZ",
+        "HeldRotationX", "HeldRotationY", "HeldRotationZ", "HeldScale"
+    };
+    char buf[64];
+    for (const char* k : keys) {
+        GetPrivateProfileStringA(section, k, "", buf, sizeof(buf), iniPath);
+        if (buf[0]) return true;
+    }
+    return false;
+}
+
+static bool OrcIniSectionHasHeldTweakKey(const char* section, const char* iniPath) {
+    if (!section || !section[0] || !iniPath || !iniPath[0]) return false;
+    const char* keys[] = {
+        "HeldOffsetX", "HeldOffsetY", "HeldOffsetZ",
+        "HeldRotationX", "HeldRotationY", "HeldRotationZ", "HeldScale"
+    };
+    char buf[64];
+    for (const char* k : keys) {
+        GetPrivateProfileStringA(section, k, "", buf, sizeof(buf), iniPath);
+        if (buf[0]) return true;
+    }
+    return false;
+}
+
+static void ReadHeldSectionFromIni(HeldWeaponPoseCfg& h, const char* section, const char* iniPath) {
+    if (!section || !section[0] || !iniPath || !iniPath[0]) return;
+    if (!OrcIniSectionHasAnyHeldKey(section, iniPath)) return;
+
+    char buf[64];
+    GetPrivateProfileStringA(section, "HeldEnabled", "", buf, sizeof(buf), iniPath);
+    if (buf[0])
+        h.enabled = atoi(buf) != 0;
+    else
+        h.enabled = OrcIniSectionHasHeldTweakKey(section, iniPath);
+
+    auto F = [&](const char* key, float def) -> float {
+        GetPrivateProfileStringA(section, key, "", buf, sizeof(buf), iniPath);
+        if (!buf[0]) return def;
+        return (float)atof(buf);
+    };
+
+    h.x = F("HeldOffsetX", h.x);
+    h.y = F("HeldOffsetY", h.y);
+    h.z = F("HeldOffsetZ", h.z);
+    float rxDeg = F("HeldRotationX", h.rx / D2R);
+    float ryDeg = F("HeldRotationY", h.ry / D2R);
+    float rzDeg = F("HeldRotationZ", h.rz / D2R);
+    h.rx = rxDeg * D2R;
+    h.ry = ryDeg * D2R;
+    h.rz = rzDeg * D2R;
+    h.scale = F("HeldScale", h.scale);
+}
+
+static void LoadHeldWeaponPresetFromIni(const char* fullIni,
+                                       std::vector<HeldWeaponPoseCfg>& outHeld1,
+                                       std::vector<HeldWeaponPoseCfg>& outHeld2,
+                                       const std::vector<WeaponCfg>& nameSrc) {
+    outHeld1.assign(nameSrc.size(), HeldWeaponPoseCfg{});
+    outHeld2.assign(nameSrc.size(), HeldWeaponPoseCfg{});
+    for (size_t i = 0; i < outHeld1.size(); i++) {
+        outHeld1[i].scale = 1.0f;
+        outHeld2[i].scale = 1.0f;
+    }
+    if (!fullIni || !fullIni[0] || !OrcFileExistsA(fullIni)) return;
+
+    for (int wt = 1; wt < (int)nameSrc.size(); wt++) {
+        HeldWeaponPoseCfg h1{};
+        h1.scale = 1.0f;
+        const WeaponCfg& wc = nameSrc[(size_t)wt];
+        if (wc.name && wc.name[0])
+            ReadHeldSectionFromIni(h1, wc.name, fullIni);
+        char secNum[32];
+        _snprintf_s(secNum, _TRUNCATE, "Weapon%d", wt);
+        ReadHeldSectionFromIni(h1, secNum, fullIni);
+        outHeld1[(size_t)wt] = h1;
+
+        HeldWeaponPoseCfg h2{};
+        h2.scale = 1.0f;
+        if (wc.name && wc.name[0]) {
+            char sec2[64];
+            _snprintf_s(sec2, _TRUNCATE, "%s2", wc.name);
+            ReadHeldSectionFromIni(h2, sec2, fullIni);
+        }
+        char secNum2[32];
+        _snprintf_s(secNum2, _TRUNCATE, "Weapon%d_2", wt);
+        ReadHeldSectionFromIni(h2, secNum2, fullIni);
+        outHeld2[(size_t)wt] = h2;
+    }
+}
+
 static bool HasWeaponSection(const char* section, const char* iniPath) {
     if (!section || !section[0] || !iniPath || !iniPath[0]) return false;
     char buf[64] = {};
@@ -590,7 +693,9 @@ void LoadConfig() {
     g_skinModeEnabled = GetPrivateProfileIntA("Features", "SkinMode", 0, g_iniPath) != 0;
     g_skinHideBasePed = GetPrivateProfileIntA("Features", "SkinHideBasePed", 1, g_iniPath) != 0;
     g_skinNickMode = GetPrivateProfileIntA("Features", "SkinNickMode", 1, g_iniPath) != 0;
-    g_skinLocalPreferSelected = GetPrivateProfileIntA("Features", "SkinLocalPreferSelected", 0, g_iniPath) != 0;
+    // По умолчанию 1: пресеты `Weapons\<выбранный скин>.ini` для локального игрока, иначе часто остаётся basename модели
+    // из стриминга (не совпадает с кастомным DFF вроде TRUTH) — Held выглядит «мёртвым».
+    g_skinLocalPreferSelected = GetPrivateProfileIntA("Features", "SkinLocalPreferSelected", 1, g_iniPath) != 0;
     g_skinTextureRemapEnabled = GetPrivateProfileIntA("Features", "SkinTextureRemap", 0, g_iniPath) != 0;
     g_skinTextureRemapNickMode = GetPrivateProfileIntA("Features", "SkinTextureRemapNickMode", 1, g_iniPath) != 0;
     g_skinTextureRemapAutoNickMode = GetPrivateProfileIntA("Features", "SkinTextureRemapAutoNickMode", 1, g_iniPath) != 0;
@@ -624,6 +729,15 @@ void LoadConfig() {
     g_weaponTextureRandomMode = GetPrivateProfileIntA("Features", "WeaponTextureRandomMode", 1, g_iniPath) != 0;
     g_weaponTextureStandardRemap = GetPrivateProfileIntA("Features", "WeaponTextureStandardRemap", 1, g_iniPath) != 0;
     g_weaponHudIconFromGunsTxd = GetPrivateProfileIntA("Features", "WeaponHudIconFromGunsTxd", 1, g_iniPath) != 0;
+    g_heldPoseDebug = GetPrivateProfileIntA("Features", "HeldPoseDebug", 0, g_iniPath) != 0;
+    g_heldWeaponTrace = GetPrivateProfileIntA("Features", "HeldWeaponTrace", 0, g_iniPath);
+    if (g_heldWeaponTrace < 0)
+        g_heldWeaponTrace = 0;
+    if (g_heldWeaponTrace > 2)
+        g_heldWeaponTrace = 2;
+    g_heldWeaponStatusIntervalMs = GetPrivateProfileIntA("Features", "HeldWeaponStatusIntervalMs", 10000, g_iniPath);
+    if (g_heldWeaponStatusIntervalMs > 0 && g_heldWeaponStatusIntervalMs < 3000)
+        g_heldWeaponStatusIntervalMs = 3000;
     for (int wt : g_availableWeaponTypes) {
         if (wt <= 0 || wt >= (int)g_cfg.size()) continue;
         auto& c = g_cfg[wt];
@@ -670,6 +784,13 @@ void LoadConfig() {
     InvalidateStandardSkinLookupCache();
     OrcLogReloadFromIni(g_iniPath);
     OrcLogInfo("LoadConfig: %s", g_iniPath);
+    if (g_orcLogLevel >= OrcLogLevel::Info) {
+        OrcLogInfo(
+            "config trace: DebugLogLevel=%d HeldPoseDebug=%d HeldWeaponTrace=%d HeldWeaponStatusIntervalMs=%d "
+            "SkinLocalPreferSelected=%d (1=recommended for Weapons\\<Selected>.ini)",
+            static_cast<int>(g_orcLogLevel), g_heldPoseDebug ? 1 : 0, g_heldWeaponTrace, g_heldWeaponStatusIntervalMs,
+            g_skinLocalPreferSelected ? 1 : 0);
+    }
     // Weapon types are discovered in SetupDefaults (InitWeaponTypesAndStorage).
 }
 
@@ -728,6 +849,9 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     OrcAppendSkinFeatureIniValues(values);
     AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
     AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
+    AddIniInt(values, "Features", "HeldPoseDebug", g_heldPoseDebug ? 1 : 0);
+    AddIniInt(values, "Features", "HeldWeaponTrace", g_heldWeaponTrace);
+    AddIniInt(values, "Features", "HeldWeaponStatusIntervalMs", g_heldWeaponStatusIntervalMs);
     OrcAppendSkinModeIniValues(values);
 }
 
@@ -780,14 +904,20 @@ static void SaveDefaultConfig() {
           "SkinMode=0\n"
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
-          "SkinLocalPreferSelected=0\n"
+          "SkinLocalPreferSelected=1\n"
           "SkinTextureRemap=0\n"
           "SkinTextureRemapNickMode=1\n"
           "SkinTextureRemapAutoNickMode=1\n"
           "SkinTextureRemapRandomMode=1\n"
           "; DebugLogLevel: 0=off, 1=errors only, 2=info (full). Legacy DebugLog=1 equals level 2.\n"
           "DebugLogLevel=0\n"
-          "DebugLog=0\n\n"
+          "DebugLog=0\n"
+          "; HeldPoseDebug=1: короче throttle для held chain/pose (см. также HeldWeaponTrace).\n"
+          "HeldPoseDebug=0\n"
+          "; HeldWeaponTrace: 0=off, 1=held status по интервалу + лог хуков RWPFPC/RWCB, 2=чаще строки по хукам.\n"
+          "HeldWeaponTrace=0\n"
+          "; Интервал строки held status (мс), по умолчанию 10000; 0=выкл только блок status (хуки при trace>=1 остаются).\n"
+          "HeldWeaponStatusIntervalMs=10000\n\n"
           "[SkinMode]\n"
           "Selected=\n"
           "SelectedSource=custom\n"
@@ -867,16 +997,34 @@ static bool LoadWeaponOverridesFromIni2(const char* fullIni,
     return any1 || any2;
 }
 
-void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2) {
+void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2,
+                            std::vector<HeldWeaponPoseCfg>* outHeld1,
+                            std::vector<HeldWeaponPoseCfg>* outHeld2) {
     w1 = g_cfg;
     w2 = g_cfg2;
-    if (!fullPath || !fullPath[0] || !OrcFileExistsA(fullPath)) return;
+    if (!fullPath || !fullPath[0] || !OrcFileExistsA(fullPath)) {
+        if (outHeld1 || outHeld2) {
+            std::vector<HeldWeaponPoseCfg> h1, h2;
+            LoadHeldWeaponPresetFromIni("", h1, h2, w1);
+            if (outHeld1) *outHeld1 = std::move(h1);
+            if (outHeld2) *outHeld2 = std::move(h2);
+        }
+        return;
+    }
     LoadWeaponOverridesFromIni2(fullPath, &w1, &w2);
+    if (outHeld1 || outHeld2) {
+        std::vector<HeldWeaponPoseCfg> h1, h2;
+        LoadHeldWeaponPresetFromIni(fullPath, h1, h2, w1);
+        if (outHeld1) *outHeld1 = std::move(h1);
+        if (outHeld2) *outHeld2 = std::move(h2);
+    }
     OrcLogInfo("weapon preset loaded: %s", fullPath);
 }
 
 static std::unordered_map<std::string, std::vector<WeaponCfg>> g_weaponSkinOv1;
 static std::unordered_map<std::string, std::vector<WeaponCfg>> g_weaponSkinOv2;
+static std::unordered_map<std::string, std::vector<HeldWeaponPoseCfg>> g_weaponSkinHeldOv1;
+static std::unordered_map<std::string, std::vector<HeldWeaponPoseCfg>> g_weaponSkinHeldOv2;
 
 struct WeaponSkinIniPathCacheEntry {
     bool found = false;
@@ -884,11 +1032,58 @@ struct WeaponSkinIniPathCacheEntry {
 };
 
 static std::unordered_map<std::string, WeaponSkinIniPathCacheEntry> g_weaponSkinIniPathCache;
+/// Время последней записи INI при загрузке в `g_weaponSkin*Ov*` (для перечитывания после правок на диске).
+static std::unordered_map<std::string, uint64_t> g_weaponSkinIniLoadedWriteTime;
+/// Снижает `GetFileAttributesEx` на горячем пути `GetHeldPoseForPed` / `GetWeaponCfgForPed`.
+static std::unordered_map<std::string, DWORD> g_weaponSkinIniMtimeLastPollMs;
+static constexpr DWORD kWeaponSkinIniMtimePollIntervalMs = 750u;
+
+static uint64_t OrcWeaponSkinIniLastWriteTicks(const char* iniPath) {
+    if (!iniPath || !iniPath[0])
+        return 0;
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExA(iniPath, GetFileExInfoStandard, &fad))
+        return 0;
+    return (uint64_t)fad.ftLastWriteTime.dwLowDateTime | ((uint64_t)fad.ftLastWriteTime.dwHighDateTime << 32);
+}
+
+/// Выбранный в UI `Weapons\<picker>.ini` тот же файл, что и у ped (`lookup` / сырой DFF), даже при рассинхроне строк
+/// (`SkinAlwaysSelected` → «orc», `LoadPedObject` → «TRUTH»).
+static bool OrcWeaponUiPickerMatchesPedWeaponsIni(CPed* ped, const char* pickerDffRaw) {
+    if (!ped || !pickerDffRaw || !pickerDffRaw[0])
+        return false;
+    const std::string pickLower = OrcToLowerAscii(std::string(pickerDffRaw));
+    const std::string lookupLower = OrcToLowerAscii(GetWeaponSkinIniLookupName(ped));
+    const std::string rawLower = OrcToLowerAscii(GetPedStdSkinDffName(ped));
+    if (!pickLower.empty() && !lookupLower.empty() && pickLower == lookupLower)
+        return true;
+    if (!pickLower.empty() && !rawLower.empty() && pickLower == rawLower)
+        return true;
+
+    char pathPick[MAX_PATH]{};
+    if (!ResolveWeaponsIniForSkinDff(pickerDffRaw, pathPick, sizeof(pathPick)))
+        return false;
+
+    char pathOther[MAX_PATH]{};
+    if (!lookupLower.empty() && ResolveWeaponsIniForSkinDff(lookupLower.c_str(), pathOther, sizeof(pathOther))) {
+        if (_stricmp(pathPick, pathOther) == 0)
+            return true;
+    }
+    if (!rawLower.empty() && ResolveWeaponsIniForSkinDff(rawLower.c_str(), pathOther, sizeof(pathOther))) {
+        if (_stricmp(pathPick, pathOther) == 0)
+            return true;
+    }
+    return false;
+}
 
 void InvalidatePerSkinWeaponCache() {
     g_weaponSkinOv1.clear();
     g_weaponSkinOv2.clear();
+    g_weaponSkinHeldOv1.clear();
+    g_weaponSkinHeldOv2.clear();
     g_weaponSkinIniPathCache.clear();
+    g_weaponSkinIniLoadedWriteTime.clear();
+    g_weaponSkinIniMtimeLastPollMs.clear();
 }
 
 std::string GetPedStdSkinDffName(CPed* ped) {
@@ -902,6 +1097,32 @@ std::string GetPedStdSkinDffName(CPed* ped) {
             return std::string(pi->m_szSkinName);
     }
     return {};
+}
+
+std::string GetWeaponSkinIniLookupName(CPed* ped) {
+    std::string dff = GetPedStdSkinDffName(ped);
+    CPlayerPed* pl = FindPlayerPed(0);
+    const bool isLocal = ped && pl && ped == pl;
+
+    if (isLocal && g_skinLocalPreferSelected) {
+        if (g_skinSelectedSource == SKIN_SELECTED_CUSTOM) {
+            if (!g_skinSelectedName.empty())
+                return g_skinSelectedName;
+        } else if (g_skinSelectedSource == SKIN_SELECTED_STANDARD && g_standardSkinSelectedModelId >= 0) {
+            if (const char* n = OrcTryGetPedModelNameById(g_standardSkinSelectedModelId))
+                return std::string(n);
+        }
+    }
+
+    if (dff.empty() && isLocal && !g_skinSelectedName.empty() && g_skinSelectedSource == SKIN_SELECTED_CUSTOM)
+        return g_skinSelectedName;
+
+    if (dff.empty() && isLocal && g_skinSelectedSource == SKIN_SELECTED_STANDARD && g_standardSkinSelectedModelId >= 0) {
+        if (const char* n = OrcTryGetPedModelNameById(g_standardSkinSelectedModelId))
+            return std::string(n);
+    }
+
+    return dff;
 }
 
 bool ResolveWeaponsIniForSkinDff(const char* skinDffName, char* outPath, size_t outPathChars) {
@@ -951,52 +1172,191 @@ bool ResolveWeaponsIniForSkinDff(const char* skinDffName, char* outPath, size_t 
     return ok;
 }
 
+bool ResolveWeaponsPresetIniForPed(CPed* ped, char* outPath, size_t outPathChars, std::string* outKeyLower) {
+    if (!ped || !outPath || outPathChars == 0)
+        return false;
+    outPath[0] = 0;
+    if (outKeyLower)
+        outKeyLower->clear();
+
+    const std::string raw = GetPedStdSkinDffName(ped);
+    const std::string sel = GetWeaponSkinIniLookupName(ped);
+
+    auto tryName = [&](const char* name) -> bool {
+        if (!name || !name[0])
+            return false;
+        return ResolveWeaponsIniForSkinDff(name, outPath, outPathChars) && outPath[0];
+    };
+
+    // Приоритет DFF из LoadPedObject: иначе при `SkinLocalPreferSelected` берётся только orc.ini, а правки в TRUTH.ini
+    // (и live preview по пути TRUTH) перестают совпадать с рантаймом после закрытия ImGui.
+    if (!raw.empty() && tryName(raw.c_str())) {
+        if (outKeyLower)
+            *outKeyLower = OrcToLowerAscii(OrcBaseNameNoExt(std::string(outPath)));
+        return true;
+    }
+    if (!sel.empty() && tryName(sel.c_str())) {
+        if (outKeyLower)
+            *outKeyLower = OrcToLowerAscii(OrcBaseNameNoExt(std::string(outPath)));
+        return true;
+    }
+    return false;
+}
+
 static void EnsureWeaponSkinOverrideLoaded(const std::string& skinKeyLower, const char* iniPath) {
     if (skinKeyLower.empty() || !iniPath || !iniPath[0]) return;
-    if (g_weaponSkinOv1.find(skinKeyLower) != g_weaponSkinOv1.end()) return;
+
+    const bool cached = g_weaponSkinOv1.find(skinKeyLower) != g_weaponSkinOv1.end();
+    uint64_t wtimeForStore = 0;
+
+    if (cached) {
+        const DWORD now = GetTickCount();
+        auto pollIt = g_weaponSkinIniMtimeLastPollMs.find(skinKeyLower);
+        if (pollIt != g_weaponSkinIniMtimeLastPollMs.end() &&
+            (DWORD)(now - pollIt->second) < kWeaponSkinIniMtimePollIntervalMs)
+            return;
+        g_weaponSkinIniMtimeLastPollMs[skinKeyLower] = now;
+
+        const uint64_t wtime = OrcWeaponSkinIniLastWriteTicks(iniPath);
+        if (wtime == 0)
+            return;
+        auto itWt = g_weaponSkinIniLoadedWriteTime.find(skinKeyLower);
+        if (itWt != g_weaponSkinIniLoadedWriteTime.end() && itWt->second == wtime)
+            return;
+
+        g_weaponSkinOv1.erase(skinKeyLower);
+        g_weaponSkinOv2.erase(skinKeyLower);
+        g_weaponSkinHeldOv1.erase(skinKeyLower);
+        g_weaponSkinHeldOv2.erase(skinKeyLower);
+        g_weaponSkinIniLoadedWriteTime.erase(skinKeyLower);
+        wtimeForStore = wtime;
+    } else {
+        wtimeForStore = OrcWeaponSkinIniLastWriteTicks(iniPath);
+        g_weaponSkinIniMtimeLastPollMs[skinKeyLower] = GetTickCount();
+    }
+
     std::vector<WeaponCfg> a = g_cfg;
     std::vector<WeaponCfg> b = g_cfg2;
     (void)LoadWeaponOverridesFromIni2(iniPath, &a, &b);
+    std::vector<HeldWeaponPoseCfg> h1, h2;
+    LoadHeldWeaponPresetFromIni(iniPath, h1, h2, a);
     g_weaponSkinOv1[skinKeyLower] = std::move(a);
     g_weaponSkinOv2[skinKeyLower] = std::move(b);
+    g_weaponSkinHeldOv1[skinKeyLower] = std::move(h1);
+    g_weaponSkinHeldOv2[skinKeyLower] = std::move(h2);
+    if (wtimeForStore != 0)
+        g_weaponSkinIniLoadedWriteTime[skinKeyLower] = wtimeForStore;
 }
 
 const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt) {
     if (!ped || wt < 0 || wt >= (int)g_cfg.size()) return g_cfg[0];
-    const std::string dff = GetPedStdSkinDffName(ped);
     if (g_livePreviewWeaponsActive &&
-        !dff.empty() &&
-        _stricmp(g_livePreviewWeaponSkinDff.c_str(), dff.c_str()) == 0 &&
+        OrcWeaponUiPickerMatchesPedWeaponsIni(ped, g_livePreviewWeaponSkinDff.c_str()) &&
         wt < (int)g_livePreviewWeapon1.size()) {
         return g_livePreviewWeapon1[wt];
     }
-    if (dff.empty()) return g_cfg[wt];
     char wpath[MAX_PATH];
-    if (!ResolveWeaponsIniForSkinDff(dff.c_str(), wpath, sizeof(wpath))) return g_cfg[wt];
-    const std::string key = OrcToLowerAscii(dff);
-    EnsureWeaponSkinOverrideLoaded(key, wpath);
-    auto it = g_weaponSkinOv1.find(key);
+    std::string presetKey;
+    if (!ResolveWeaponsPresetIniForPed(ped, wpath, sizeof(wpath), &presetKey))
+        return g_cfg[wt];
+    EnsureWeaponSkinOverrideLoaded(presetKey, wpath);
+    auto it = g_weaponSkinOv1.find(presetKey);
     if (it == g_weaponSkinOv1.end() || wt >= (int)it->second.size()) return g_cfg[wt];
     return it->second[wt];
 }
 
 const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt) {
     if (!ped || wt < 0 || wt >= (int)g_cfg2.size()) return g_cfg2[0];
-    const std::string dff = GetPedStdSkinDffName(ped);
     if (g_livePreviewWeaponsActive &&
-        !dff.empty() &&
-        _stricmp(g_livePreviewWeaponSkinDff.c_str(), dff.c_str()) == 0 &&
+        OrcWeaponUiPickerMatchesPedWeaponsIni(ped, g_livePreviewWeaponSkinDff.c_str()) &&
         wt < (int)g_livePreviewWeapon2.size()) {
         return g_livePreviewWeapon2[wt];
     }
-    if (dff.empty()) return g_cfg2[wt];
     char wpath[MAX_PATH];
-    if (!ResolveWeaponsIniForSkinDff(dff.c_str(), wpath, sizeof(wpath))) return g_cfg2[wt];
-    const std::string key = OrcToLowerAscii(dff);
-    EnsureWeaponSkinOverrideLoaded(key, wpath);
-    auto it = g_weaponSkinOv2.find(key);
+    std::string presetKey;
+    if (!ResolveWeaponsPresetIniForPed(ped, wpath, sizeof(wpath), &presetKey))
+        return g_cfg2[wt];
+    EnsureWeaponSkinOverrideLoaded(presetKey, wpath);
+    auto it = g_weaponSkinOv2.find(presetKey);
     if (it == g_weaponSkinOv2.end() || wt >= (int)it->second.size()) return g_cfg2[wt];
     return it->second[wt];
+}
+
+static HeldWeaponPoseCfg g_heldPoseFallback{};
+
+const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
+    g_heldPoseFallback = HeldWeaponPoseCfg{};
+    g_heldPoseFallback.scale = 1.0f;
+    if (!ped || wt < 0 || wt >= (int)g_cfg.size())
+        return g_heldPoseFallback;
+    if (g_livePreviewHeldActive &&
+        OrcWeaponUiPickerMatchesPedWeaponsIni(ped, g_livePreviewHeldSkinDff.c_str())) {
+        const std::vector<HeldWeaponPoseCfg>& buf = g_livePreviewHeldUseSecondary ? g_livePreviewHeld2 : g_livePreviewHeld1;
+        // Живое превью только если в UI включена коррекция; иначе — пресет с диска (буфер с enabled=0 не должен затирать INI).
+        if (wt < (int)buf.size() && buf[(size_t)wt].enabled)
+            return buf[(size_t)wt];
+    }
+    char wpath[MAX_PATH];
+    std::string presetKey;
+    if (!ResolveWeaponsPresetIniForPed(ped, wpath, sizeof(wpath), &presetKey))
+        return g_heldPoseFallback;
+    EnsureWeaponSkinOverrideLoaded(presetKey, wpath);
+    const std::unordered_map<std::string, std::vector<HeldWeaponPoseCfg>>& map =
+        secondary ? g_weaponSkinHeldOv2 : g_weaponSkinHeldOv1;
+    auto it = map.find(presetKey);
+    if (it == map.end() || wt >= (int)it->second.size())
+        return g_heldPoseFallback;
+    return it->second[(size_t)wt];
+}
+
+void OrcClearWeaponUiLivePreviewWhenMenuClosed() {
+    g_livePreviewWeaponsActive = false;
+    g_livePreviewWeaponSkinDff.clear();
+    g_livePreviewWeapon1.clear();
+    g_livePreviewWeapon2.clear();
+    g_livePreviewHeldActive = false;
+    g_livePreviewHeldSkinDff.clear();
+    g_livePreviewHeld1.clear();
+    g_livePreviewHeld2.clear();
+    g_livePreviewHeldUseSecondary = false;
+}
+
+void OrcLogHeldPoseCfgDisabled(CPed* ped, int wt) {
+    if (!ped)
+        return;
+    if (!g_heldPoseDebug)
+        return;
+    CPlayerPed* pl = FindPlayerPed(0);
+    const int isLocal = (pl && ped == pl) ? 1 : 0;
+    const std::string dffRaw = GetPedStdSkinDffName(ped);
+    const std::string dff = GetWeaponSkinIniLookupName(ped);
+    char wpath[MAX_PATH] = {};
+    std::string presetKey;
+    const bool hasIni = ResolveWeaponsPresetIniForPed(ped, wpath, sizeof(wpath), &presetKey);
+    size_t heldCacheSz = 0;
+    int diskWtEnabled = -1; // -1: нет строки / кеш не загружен
+    if (hasIni) {
+        EnsureWeaponSkinOverrideLoaded(presetKey, wpath);
+        auto it = g_weaponSkinHeldOv1.find(presetKey);
+        if (it != g_weaponSkinHeldOv1.end()) {
+            heldCacheSz = it->second.size();
+            if (wt >= 0 && wt < (int)it->second.size())
+                diskWtEnabled = it->second[(size_t)wt].enabled ? 1 : 0;
+        }
+    }
+    int liveMatch = 0;
+    if (g_livePreviewHeldActive)
+        liveMatch = OrcWeaponUiPickerMatchesPedWeaponsIni(ped, g_livePreviewHeldSkinDff.c_str()) ? 1 : 0;
+    const char* wsec = (wt > 0 && wt < (int)g_cfg.size() && g_cfg[(size_t)wt].name) ? g_cfg[(size_t)wt].name : "";
+    const int pedRef = CPools::GetPedRef(ped);
+    const int modelId = ped ? (int)ped->m_nModelIndex : -1;
+    OrcLogInfoThrottled(
+        436, g_heldPoseDebug ? 800u : 2200u,
+        "held pose: cfg disabled pedRef=%d isLocal=%d modelId=%d prefSel=%d skinRaw=%s skinIni=%s wt=%d wsec=%s wpnMid=%d slot=%d savedWt=%d liveAct=%d liveMatch=%d liveBuf=%u "
+        "hasIni=%d heldCacheSz=%zu diskWtHeldEn=%d ini=%s",
+        pedRef, isLocal, modelId, g_skinLocalPreferSelected ? 1 : 0, dffRaw.c_str(), dff.c_str(), wt, wsec,
+        ped->m_nWeaponModelId, (int)ped->m_nSelectedWepSlot, (int)ped->m_nSavedWeapon, g_livePreviewHeldActive ? 1 : 0,
+        liveMatch, (unsigned)g_livePreviewHeld1.size(), hasIni ? 1 : 0, heldCacheSz, diskWtEnabled, hasIni ? wpath : "(none)");
 }
 
 // Queued from UI; applied at the start of drawingEvent (see ApplyPendingLocalPlayerModel).
@@ -1069,7 +1429,8 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "RandomFromPools=%d\n\n", g_skinRandomFromPools ? 1 : 0);
 }
 
-static void AppendWeaponSectionText(std::string& out, const char* section, const WeaponCfg& c) {
+static void AppendWeaponSectionText(std::string& out, const char* section, const WeaponCfg& c,
+                                   const HeldWeaponPoseCfg* held, bool writeHeld) {
     out += "[";
     out += section ? section : "";
     out += "]\n";
@@ -1082,16 +1443,37 @@ static void AppendWeaponSectionText(std::string& out, const char* section, const
         "RotationX=%.2f\n"
         "RotationY=%.2f\n"
         "RotationZ=%.2f\n"
-        "Scale=%.3f\n\n",
+        "Scale=%.3f\n",
         c.enabled ? 1 : 0,
         c.boneId,
         c.x, c.y, c.z,
         c.rx / D2R, c.ry / D2R, c.rz / D2R,
         c.scale);
+    if (writeHeld && held) {
+        AppendFormat(out,
+            "HeldEnabled=%d\n"
+            "HeldOffsetX=%.3f\n"
+            "HeldOffsetY=%.3f\n"
+            "HeldOffsetZ=%.3f\n"
+            "HeldRotationX=%.2f\n"
+            "HeldRotationY=%.2f\n"
+            "HeldRotationZ=%.2f\n"
+            "HeldScale=%.3f\n",
+            held->enabled ? 1 : 0,
+            held->x, held->y, held->z,
+            held->rx / D2R, held->ry / D2R, held->rz / D2R,
+            held->scale);
+    }
+    out += "\n";
 }
 
-void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& w1, const std::vector<WeaponCfg>& w2) {
+void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& w1, const std::vector<WeaponCfg>& w2,
+                            const std::vector<HeldWeaponPoseCfg>* held1,
+                            const std::vector<HeldWeaponPoseCfg>* held2) {
     if (!iniPath || !iniPath[0]) return;
+    const bool writeHeld = held1 && held2 &&
+        _stricmp(iniPath, g_iniPath) != 0 &&
+        held1->size() >= w1.size() && held2->size() >= w2.size();
     std::string text;
     text.reserve(8192 + (w1.size() + w2.size()) * 256);
     if (_stricmp(iniPath, g_iniPath) == 0)
@@ -1101,24 +1483,26 @@ void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& 
 
     for (int wt = 1; wt < (int)w1.size() && wt < (int)w2.size(); wt++) {
         const WeaponCfg& c = w1[wt];
+        const HeldWeaponPoseCfg* ph1 = (writeHeld && wt < (int)held1->size()) ? &(*held1)[(size_t)wt] : nullptr;
         char sec[96];
         if (c.name && c.name[0]) _snprintf_s(sec, _TRUNCATE, "%s", c.name);
         else _snprintf_s(sec, _TRUNCATE, "Weapon%d", wt);
         char secNum[32];
         _snprintf_s(secNum, _TRUNCATE, "Weapon%d", wt);
-        AppendWeaponSectionText(text, sec, c);
+        AppendWeaponSectionText(text, sec, c, ph1, writeHeld);
         if (lstrcmpiA(sec, secNum) != 0)
-            AppendWeaponSectionText(text, secNum, c);
+            AppendWeaponSectionText(text, secNum, c, ph1, writeHeld);
 
         const WeaponCfg& c2 = w2[wt];
+        const HeldWeaponPoseCfg* ph2 = (writeHeld && wt < (int)held2->size()) ? &(*held2)[(size_t)wt] : nullptr;
         char sec2[96];
         if (w1[wt].name && w1[wt].name[0]) _snprintf_s(sec2, _TRUNCATE, "%s2", w1[wt].name);
         else _snprintf_s(sec2, _TRUNCATE, "Weapon%d_2", wt);
         char secNum2[32];
         _snprintf_s(secNum2, _TRUNCATE, "Weapon%d_2", wt);
-        AppendWeaponSectionText(text, sec2, c2);
+        AppendWeaponSectionText(text, sec2, c2, ph2, writeHeld);
         if (lstrcmpiA(sec2, secNum2) != 0)
-            AppendWeaponSectionText(text, secNum2, c2);
+            AppendWeaponSectionText(text, secNum2, c2, ph2, writeHeld);
     }
     if (!OrcWriteTextFileAtomic(iniPath, text))
         OrcLogError("SaveAllWeaponsToIniFile: cannot write %s", iniPath);
@@ -1345,6 +1729,7 @@ static void OnInitRw() {}
 static void OnDrawingEvent();
 static void OnPedRenderBefore(CPed* ped);
 static void OnPedRenderAfter(CPed* ped);
+static void OnGameProcessBegin();
 static void OnD3dLost() {
     OrcRestoreWeaponTextureOverrides();
     OrcRestoreWeaponHeldTextureOverrides();
@@ -1417,6 +1802,11 @@ static void OnPedRenderAfter(CPed* ped) {
     OrcSkinsOnPedRenderAfter(ped);
 }
 
+static void OnGameProcessBegin() {
+    OrcHeldPoseBeginSimFrame();
+    OrcHeldWeaponTraceGameProcessTick();
+}
+
 static void OnShutdownRw() {
     OrcLogInfo("shutdownRw: releasing hooks and instances");
     overlay::Shutdown();
@@ -1446,6 +1836,7 @@ public:
         // LoadConfig откладываем до первого кадра: к этому моменту DllMain уже
         // проставит g_iniPath через LogInit().
         Events::initRwEvent.after += &OnInitRw;
+        Events::gameProcessEvent += &OnGameProcessBegin;
         Events::drawingEvent += &OnDrawingEvent;
         Events::processScriptsEvent += &OrcTextureRemapOnProcessScripts;
         Events::pedSetModelEvent += &OrcTextureRemapOnPedSetModel;
@@ -1466,7 +1857,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_module = module;
         DisableThreadLibraryCalls(module);
         LogInit();
-        OrcLogInfo("DllMain PROCESS_ATTACH ini=%s", g_iniPath);
+        OrcLogInfo("DllMain PROCESS_ATTACH build=%s %s ini=%s", __DATE__, __TIME__, g_iniPath);
         // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon.dat load.
         OrcWeaponsEnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();

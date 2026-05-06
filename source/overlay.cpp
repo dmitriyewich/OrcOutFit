@@ -1059,6 +1059,8 @@ void RenderImGuiFrame(IDirect3DDevice9* device) {
         g_hadNoOverlayUi = true;
         g_stickyMouseCapture = false;
         ApplyCursorState(device, false);
+        // Без вызова OrcUiDraw флаги live-preview не обновляются — сбрасываем, чтобы held читался из INI.
+        OrcClearWeaponUiLivePreviewWhenMenuClosed();
         return;
     }
 

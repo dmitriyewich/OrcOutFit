@@ -47,3 +47,8 @@ void OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
 void OrcPrepareHeldWeaponTextureBefore(CPed* ped);
 void OrcPrepareHeldWeaponReplacementBefore(CPed* ped);
 void OrcRestoreHeldWeaponReplacementAfter(CPed* ped);
+/// Сброс «уже применили preRwDraw Held» на игровой тик (`gameProcessEvent`).
+void OrcHeldPoseBeginSimFrame();
+/// Периодический `held status:` + при `HeldWeaponTrace` уже логируются хуки из `orc_weapon_runtime.cpp`.
+void OrcHeldWeaponTraceGameProcessTick();
+bool OrcApplyHeldWeaponPoseAdjust(CPed* ped);

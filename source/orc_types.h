@@ -34,6 +34,18 @@ struct WeaponCfg {
     const char* name = nullptr;
 };
 
+/// Дельта поверх позы оружия в руке **после** того, как движок (или CopyRwObjectRootMatrix при замене) выставил LTW.
+/// - x,y,z — метры в локальной базе оружия (right/up/at), как у навесного [weapon] на теле.
+/// - rx,ry,rz — радианы (в UI часто вводят как градусы — при сохранении из редактора учитывать).
+/// - scale — единый множитель; 1.0 = без изменения.
+/// Ключи только в пресете скина `OrcOutFit\Weapons\<dff>.ini` (секции Held*), не в корневом OrcOutFit.ini.
+struct HeldWeaponPoseCfg {
+    bool  enabled = false;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    float rx = 0.0f, ry = 0.0f, rz = 0.0f;
+    float scale = 1.0f;
+};
+
 struct CustomObjectCfg {
     std::string name;
     std::string dffPath;

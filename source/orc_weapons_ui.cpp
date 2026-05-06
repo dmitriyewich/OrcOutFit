@@ -32,15 +32,17 @@ static const char* WT(OrcTextId id) {
 static int g_uiWeaponIdx = WEAPONTYPE_M4;
 static std::vector<WeaponCfg> g_uiWeapon1;
 static std::vector<WeaponCfg> g_uiWeapon2;
+static std::vector<HeldWeaponPoseCfg> g_uiHeld1;
+static std::vector<HeldWeaponPoseCfg> g_uiHeld2;
 static int g_uiWeaponSkinListIdx = 0;
 static bool g_uiWeaponBuffersReady = false;
+static bool g_uiWeaponSecondary = false;
 
 static void SyncWeaponUiBuffersFromSkinPick() {
     std::vector<std::pair<std::string, int>> skins;
     OrcCollectPedSkins(skins);
     if (skins.empty()) {
-        g_uiWeapon1 = g_cfg;
-        g_uiWeapon2 = g_cfg2;
+        OrcLoadWeaponPresetFile("", g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
         g_uiWeaponBuffersReady = true;
         return;
     }
@@ -50,11 +52,9 @@ static void SyncWeaponUiBuffersFromSkinPick() {
     const std::string& dff = skins[(size_t)g_uiWeaponSkinListIdx].first;
     char wpath[MAX_PATH];
     if (ResolveWeaponsIniForSkinDff(dff.c_str(), wpath, sizeof(wpath)))
-        OrcLoadWeaponPresetFile(wpath, g_uiWeapon1, g_uiWeapon2);
-    else {
-        g_uiWeapon1 = g_cfg;
-        g_uiWeapon2 = g_cfg2;
-    }
+        OrcLoadWeaponPresetFile(wpath, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
+    else
+        OrcLoadWeaponPresetFile("", g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
     for (size_t i = 0; i < g_uiWeapon1.size() && i < g_cfg.size(); i++)
         g_uiWeapon1[i].name = g_cfg[i].name;
     g_uiWeaponBuffersReady = true;
@@ -76,54 +76,65 @@ static void TryInitWeaponSkinListToLocalPed() {
 }
 
 void OrcWeaponsUiDrawWeaponsTab() {
+    if (!g_uiWeaponBuffersReady) {
+        TryInitWeaponSkinListToLocalPed();
+        SyncWeaponUiBuffersFromSkinPick();
+    }
+
+    if (OrcUiButtonFullWidth(WT(OrcTextId::ReloadIni))) {
+        LoadConfig();
+        DiscoverCustomObjectsAndEnsureIni();
+        LoadStandardObjectsFromIni();
+        DiscoverCustomSkins();
+        LoadStandardSkinsFromIni();
+        SyncWeaponUiBuffersFromSkinPick();
+    }
+
+    ImGui::Separator();
+    std::vector<std::pair<std::string, int>> pedSkins;
+    OrcCollectPedSkins(pedSkins);
+    if (pedSkins.empty()) {
+        ImGui::TextDisabled("%s", WT(OrcTextId::NoPedModelsInCacheReconnect));
+    } else {
+        if (g_uiWeaponSkinListIdx < 0 || g_uiWeaponSkinListIdx >= (int)pedSkins.size())
+            g_uiWeaponSkinListIdx = 0;
+        if (OrcUiPedSkinPickerRowWithMySkin("wskinpick", WT(OrcTextId::PedSkinEditingTarget), pedSkins, &g_uiWeaponSkinListIdx))
+            SyncWeaponUiBuffersFromSkinPick();
+    }
+
+    const bool skinRowOk = !pedSkins.empty() &&
+        g_uiWeaponSkinListIdx >= 0 &&
+        g_uiWeaponSkinListIdx < (int)pedSkins.size();
+
+    g_livePreviewWeaponsActive = false;
+    g_livePreviewWeaponSkinDff.clear();
+    g_livePreviewWeapon1.clear();
+    g_livePreviewWeapon2.clear();
+    g_livePreviewHeldActive = false;
+    g_livePreviewHeldSkinDff.clear();
+    g_livePreviewHeld1.clear();
+    g_livePreviewHeld2.clear();
+    g_livePreviewHeldUseSecondary = false;
+    if (skinRowOk) {
+        g_livePreviewWeaponsActive = true;
+        g_livePreviewWeaponSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
+        g_livePreviewWeapon1 = g_uiWeapon1;
+        g_livePreviewWeapon2 = g_uiWeapon2;
+        g_livePreviewHeldActive = true;
+        g_livePreviewHeldSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
+        g_livePreviewHeld1 = g_uiHeld1;
+        g_livePreviewHeld2 = g_uiHeld2;
+    }
+
+    bool weaponHeldTabActiveThisFrame = false;
     if (ImGui::BeginTabBar("OrcOutFitWeaponSubTabs", ImGuiTabBarFlags_None)) {
         if (ImGui::BeginTabItem(WT(OrcTextId::TabWeaponRender))) {
-            if (!g_uiWeaponBuffersReady) {
-                TryInitWeaponSkinListToLocalPed();
-                SyncWeaponUiBuffersFromSkinPick();
-            }
-
-            if (OrcUiButtonFullWidth(WT(OrcTextId::ReloadIni))) {
-                LoadConfig();
-                DiscoverCustomObjectsAndEnsureIni();
-                LoadStandardObjectsFromIni();
-                DiscoverCustomSkins();
-                LoadStandardSkinsFromIni();
-                SyncWeaponUiBuffersFromSkinPick();
-            }
-
-            ImGui::Separator();
-            std::vector<std::pair<std::string, int>> pedSkins;
-            OrcCollectPedSkins(pedSkins);
-            if (pedSkins.empty()) {
-                ImGui::TextDisabled("%s", WT(OrcTextId::NoPedModelsInCacheReconnect));
-            } else {
-                if (g_uiWeaponSkinListIdx < 0 || g_uiWeaponSkinListIdx >= (int)pedSkins.size())
-                    g_uiWeaponSkinListIdx = 0;
-                if (OrcUiPedSkinPickerRowWithMySkin("wskinpick", WT(OrcTextId::PedSkinEditingTarget), pedSkins, &g_uiWeaponSkinListIdx))
-                    SyncWeaponUiBuffersFromSkinPick();
-            }
-            if (!pedSkins.empty() &&
-                g_uiWeaponSkinListIdx >= 0 &&
-                g_uiWeaponSkinListIdx < (int)pedSkins.size()) {
-                g_livePreviewWeaponsActive = true;
-                g_livePreviewWeaponSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
-                g_livePreviewWeapon1 = g_uiWeapon1;
-                g_livePreviewWeapon2 = g_uiWeapon2;
-            } else {
-                g_livePreviewWeaponsActive = false;
-                g_livePreviewWeaponSkinDff.clear();
-                g_livePreviewWeapon1.clear();
-                g_livePreviewWeapon2.clear();
-            }
-
             WeaponCfg* activeArr = g_uiWeapon1.empty() ? nullptr : g_uiWeapon1.data();
             WeaponCfg* activeArr2 = g_uiWeapon2.empty() ? nullptr : g_uiWeapon2.data();
             const int activeCount = (int)g_uiWeapon1.size();
             const int activeCount2 = (int)g_uiWeapon2.size();
 
             ImGui::Separator();
-            static bool g_uiWeaponSecondary = false;
             struct WeaponCopyBuf {
                 bool valid = false;
                 bool secondary = false;
@@ -277,6 +288,11 @@ void OrcWeaponsUiDrawWeaponsTab() {
                     g_livePreviewWeaponSkinDff.clear();
                     g_livePreviewWeapon1.clear();
                     g_livePreviewWeapon2.clear();
+                    g_livePreviewHeldActive = false;
+                    g_livePreviewHeldSkinDff.clear();
+                    g_livePreviewHeld1.clear();
+                    g_livePreviewHeld2.clear();
+                    g_livePreviewHeldUseSecondary = false;
                 }
                 CPlayerPed* pl = FindPlayerPed(0);
                 const bool blockSkinSave = pl && pl->m_nPedType == PED_TYPE_PLAYER1 &&
@@ -288,12 +304,17 @@ void OrcWeaponsUiDrawWeaponsTab() {
                         const std::string& dff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
                         char outPath[MAX_PATH];
                         _snprintf_s(outPath, _TRUNCATE, "%s\\%s.ini", g_gameWeaponsDir, dff.c_str());
-                        SaveAllWeaponsToIniFile(outPath, g_uiWeapon1, g_uiWeapon2);
+                        SaveAllWeaponsToIniFile(outPath, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
                         InvalidatePerSkinWeaponCache();
                         g_livePreviewWeaponsActive = false;
                         g_livePreviewWeaponSkinDff.clear();
                         g_livePreviewWeapon1.clear();
                         g_livePreviewWeapon2.clear();
+                        g_livePreviewHeldActive = false;
+                        g_livePreviewHeldSkinDff.clear();
+                        g_livePreviewHeld1.clear();
+                        g_livePreviewHeld2.clear();
+                        g_livePreviewHeldUseSecondary = false;
                     }
                 }
 
@@ -308,6 +329,156 @@ void OrcWeaponsUiDrawWeaponsTab() {
                 ImGui::TextDisabled("%s", OrcFormat(OrcTextId::ToggleKeyFormat, VkToString(g_activationVk)).c_str());
                 if (samp_bridge::IsSampPresent())
                     ImGui::TextDisabled("%s", WT(OrcTextId::UnsupportedSampSpMode));
+            }
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(WT(OrcTextId::TabWeaponHeld))) {
+            weaponHeldTabActiveThisFrame = true;
+            ImGui::TextWrapped("%s", WT(OrcTextId::WeaponHeldTabHint));
+            ImGui::TextWrapped("%s", WT(OrcTextId::WeaponPresetOverwriteHint));
+            auto IsDualCapableHeld = [](int wt) -> bool {
+                if (wt <= 0 || g_cfg.empty() || wt >= (int)g_cfg.size()) return false;
+                CWeaponInfo* wi2 = CWeaponInfo::GetWeaponInfo((eWeaponType)wt, 2);
+                if (wi2 && wi2->m_nFlags.bTwinPistol) return true;
+                CWeaponInfo* wi1 = CWeaponInfo::GetWeaponInfo((eWeaponType)wt, 1);
+                return wi1 && wi1->m_nFlags.bTwinPistol;
+            };
+            auto ValidateHeldCfg = [](const HeldWeaponPoseCfg& h) -> bool {
+                auto Fin = [](float v) { return std::isfinite(v) != 0; };
+                if (!Fin(h.x) || !Fin(h.y) || !Fin(h.z) || !Fin(h.rx) || !Fin(h.ry) || !Fin(h.rz) || !Fin(h.scale)) return false;
+                if (h.scale <= 0.0f || h.scale > 1000.0f) return false;
+                if (std::fabs(h.x) > 100.0f || std::fabs(h.y) > 100.0f || std::fabs(h.z) > 100.0f) return false;
+                if (std::fabs(h.rx) > 1000.0f || std::fabs(h.ry) > 1000.0f || std::fabs(h.rz) > 1000.0f) return false;
+                return true;
+            };
+            HeldWeaponPoseCfg* activeHeldArr = nullptr;
+            int activeHeldCount = 0;
+            if (!g_uiHeld1.empty() && !g_uiHeld2.empty()) {
+                activeHeldArr = g_uiWeaponSecondary ? g_uiHeld2.data() : g_uiHeld1.data();
+                activeHeldCount = g_uiWeaponSecondary ? (int)g_uiHeld2.size() : (int)g_uiHeld1.size();
+            }
+
+            char previewH[128];
+            const WeaponCfg* pcH = (g_uiWeaponIdx >= 0 && g_uiWeaponIdx < (int)g_cfg.size()) ? &g_cfg[g_uiWeaponIdx] : nullptr;
+            const int previewModelIdH = (g_uiWeaponIdx > 0 && g_uiWeaponIdx < (int)g_weaponModelId.size())
+                ? (g_uiWeaponSecondary ? g_weaponModelId2[g_uiWeaponIdx] : g_weaponModelId[g_uiWeaponIdx])
+                : 0;
+            _snprintf_s(previewH, _TRUNCATE, "%s%s [%d][%d]",
+                (pcH && pcH->name) ? pcH->name : WT(OrcTextId::Weapon),
+                g_uiWeaponSecondary ? " 2" : "",
+                g_uiWeaponIdx, previewModelIdH);
+            if (OrcUiBeginControlRow("weapon_held", WT(OrcTextId::Weapon))) {
+                if (ImGui::BeginCombo("##value_held", previewH)) {
+                    std::vector<char> localHas;
+                    localHas.assign(g_cfg.size(), 0);
+                    CPlayerPed* pedHeld = FindPlayerPed(0);
+                    if (pedHeld) {
+                        for (int s = 0; s < 13; s++) {
+                            auto& w = pedHeld->m_aWeapons[s];
+                            const int wti = (int)w.m_eWeaponType;
+                            if (wti <= 0 || wti >= (int)localHas.size()) continue;
+                            CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wti), 1);
+                            const bool needsAmmo = wi && wi->m_nSlot >= 2 && wi->m_nSlot <= 9;
+                            if (needsAmmo && w.m_nAmmoTotal == 0) continue;
+                            localHas[wti] = 1;
+                        }
+                    }
+                    const int maxWtUi = std::min(256, (int)g_cfg.size() - 1);
+                    for (int wt = 0; wt <= maxWtUi; wt++) {
+                        const char* baseName = (wt >= 0 && wt < (int)g_cfg.size() && g_cfg[wt].name) ? g_cfg[wt].name : WT(OrcTextId::Weapon);
+                        char lbl[128];
+                        const int modelId = (wt > 0 && wt < (int)g_weaponModelId.size()) ? g_weaponModelId[wt] : 0;
+                        _snprintf_s(lbl, _TRUNCATE, "%s [%d][%d]", baseName, wt, modelId);
+                        const bool hasNow = (wt > 0 && wt < (int)localHas.size() && localHas[wt] != 0);
+                        if (ImGui::Selectable(lbl, (wt == g_uiWeaponIdx) && !g_uiWeaponSecondary)) {
+                            g_uiWeaponIdx = wt;
+                            g_uiWeaponSecondary = false;
+                        }
+                        if (hasNow) {
+                            ImDrawList* dl = ImGui::GetWindowDrawList();
+                            const ImVec2 mn = ImGui::GetItemRectMin();
+                            const ImVec2 mx = ImGui::GetItemRectMax();
+                            dl->AddRectFilled(mn, ImVec2(mn.x + OrcUiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
+                        }
+                        if (g_considerWeaponSkills && IsDualCapableHeld(wt)) {
+                            char lbl2[128];
+                            const int modelId2 = (wt > 0 && wt < (int)g_weaponModelId2.size()) ? g_weaponModelId2[wt] : 0;
+                            _snprintf_s(lbl2, _TRUNCATE, "%s 2 [%d][%d]", baseName, wt, modelId2);
+                            if (ImGui::Selectable(lbl2, (wt == g_uiWeaponIdx) && g_uiWeaponSecondary)) {
+                                g_uiWeaponIdx = wt;
+                                g_uiWeaponSecondary = true;
+                            }
+                            if (hasNow) {
+                                ImDrawList* dl = ImGui::GetWindowDrawList();
+                                const ImVec2 mn = ImGui::GetItemRectMin();
+                                const ImVec2 mx = ImGui::GetItemRectMax();
+                                dl->AddRectFilled(mn, ImVec2(mn.x + OrcUiScaled(3.0f), mx.y), IM_COL32(60, 200, 120, 160), 0.0f);
+                            }
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                OrcUiEndControlRow();
+            }
+            int idxH = g_uiWeaponIdx;
+            if (OrcUiInputInt("weaponid_held", WT(OrcTextId::WeaponSlotId), &idxH, 1, 1)) {
+                if (idxH >= 1 && idxH < (int)g_cfg.size()) {
+                    g_uiWeaponIdx = idxH;
+                    g_uiWeaponSecondary = false;
+                }
+            }
+            if (g_considerWeaponSkills && IsDualCapableHeld(g_uiWeaponIdx)) {
+                OrcUiCheckbox("edit_second_weapon_held", WT(OrcTextId::EditSecondWeapon), &g_uiWeaponSecondary);
+            } else {
+                g_uiWeaponSecondary = false;
+            }
+
+            ImGui::Separator();
+            const bool canEditHeld = (activeHeldArr != nullptr && g_uiWeaponIdx >= 0 && g_uiWeaponIdx < activeHeldCount);
+            if (!canEditHeld) {
+                ImGui::TextDisabled("%s", WT(OrcTextId::WeaponEditorUnavailable));
+            } else {
+                HeldWeaponPoseCfg& ch = activeHeldArr[g_uiWeaponIdx];
+                OrcUiCheckbox("held_enable", WT(OrcTextId::HeldAdjustEnabled), &ch.enabled);
+                OrcUiDragFloat("held_x", WT(OrcTextId::OffsetX), &ch.x, 0.005f, -2.0f, 2.0f, "%.3f");
+                OrcUiDragFloat("held_y", WT(OrcTextId::OffsetY), &ch.y, 0.005f, -2.0f, 2.0f, "%.3f");
+                OrcUiDragFloat("held_z", WT(OrcTextId::OffsetZ), &ch.z, 0.005f, -2.0f, 2.0f, "%.3f");
+                float rxd = ch.rx / D2R, ryd = ch.ry / D2R, rzd = ch.rz / D2R;
+                if (OrcUiDragFloat("held_rx", WT(OrcTextId::RotationX), &rxd, 0.5f, -180.0f, 180.0f, "%.1f")) ch.rx = rxd * D2R;
+                if (OrcUiDragFloat("held_ry", WT(OrcTextId::RotationY), &ryd, 0.5f, -180.0f, 180.0f, "%.1f")) ch.ry = ryd * D2R;
+                if (OrcUiDragFloat("held_rz", WT(OrcTextId::RotationZ), &rzd, 0.5f, -180.0f, 180.0f, "%.1f")) ch.rz = rzd * D2R;
+                OrcUiDragFloat("held_sc", WT(OrcTextId::Scale), &ch.scale, 0.01f, 0.05f, 10.0f, "%.3f");
+                ImGui::Separator();
+                CPlayerPed* plH = FindPlayerPed(0);
+                const bool blockSkinSaveH = plH && plH->m_nPedType == PED_TYPE_PLAYER1 &&
+                    (int)plH->m_nModelIndex == MODEL_PLAYER && !samp_bridge::IsSampPresent();
+                if (blockSkinSaveH) {
+                    ImGui::TextDisabled("%s", WT(OrcTextId::PerSkinPresetDisabledForCj));
+                } else if (skinRowOk) {
+                    if (OrcUiButtonFullWidth(WT(OrcTextId::SaveToSkinWeapons))) {
+                        const std::string& dff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
+                        char outPathH[MAX_PATH];
+                        _snprintf_s(outPathH, _TRUNCATE, "%s\\%s.ini", g_gameWeaponsDir, dff.c_str());
+                        bool heldAllOk = true;
+                        for (const HeldWeaponPoseCfg& hh : g_uiHeld1)
+                            if (!ValidateHeldCfg(hh)) heldAllOk = false;
+                        for (const HeldWeaponPoseCfg& hh : g_uiHeld2)
+                            if (!ValidateHeldCfg(hh)) heldAllOk = false;
+                        if (heldAllOk)
+                            SaveAllWeaponsToIniFile(outPathH, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
+                        InvalidatePerSkinWeaponCache();
+                        g_livePreviewWeaponsActive = false;
+                        g_livePreviewWeaponSkinDff.clear();
+                        g_livePreviewWeapon1.clear();
+                        g_livePreviewWeapon2.clear();
+                        g_livePreviewHeldActive = false;
+                        g_livePreviewHeldSkinDff.clear();
+                        g_livePreviewHeld1.clear();
+                        g_livePreviewHeld2.clear();
+                        g_livePreviewHeldUseSecondary = false;
+                    }
+                }
             }
             ImGui::EndTabItem();
         }
@@ -376,5 +547,15 @@ void OrcWeaponsUiDrawWeaponsTab() {
         }
 
         ImGui::EndTabBar();
+    }
+
+    // После всех DragFloat/Checkbox: буферы превью = актуальные значения этого же кадра (иначе live на кадр отстаёт,
+    // а при рассинхроне имён скина превью могло не совпасть с `GetWeaponSkinIniLookupName` до фикса в main.cpp).
+    if (skinRowOk) {
+        g_livePreviewWeapon1 = g_uiWeapon1;
+        g_livePreviewWeapon2 = g_uiWeapon2;
+        g_livePreviewHeld1 = g_uiHeld1;
+        g_livePreviewHeld2 = g_uiHeld2;
+        g_livePreviewHeldUseSecondary = g_uiWeaponSecondary && weaponHeldTabActiveThisFrame;
     }
 }

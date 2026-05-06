@@ -45,6 +45,14 @@ extern bool g_weaponTextureRandomMode;
 extern bool g_weaponTextureStandardRemap;
 /// HUD `DrawWeaponIcon`: if Guns/replacement dictionary has `<weapon>icon`, use as current TXD for the call (local player).
 extern bool g_weaponHudIconFromGunsTxd;
+/// Подробный лог «В руке»: `held chain:` / `held pose:` (в т.ч. phase=preRwDraw у RpClumpRender / AtomicDefaultRender), throttle короче.
+/// `[Features] HeldPoseDebug=1` и `DebugLogLevel=2` в `OrcOutFit.ini`.
+extern bool g_heldPoseDebug;
+/// Трассировка оружия в руке: статус раз в N мс + детальный лог хуков `RenderWeaponPedsForPC` / `RenderWeaponCB`.
+/// `[Features] HeldWeaponTrace=0` выкл; `1` — интервал статуса + хуки с throttle; `2` — чаще строки по хукам.
+extern int g_heldWeaponTrace;
+/// Интервал строки `held status:` (мс), по умолчанию 10000. Минимум 3000 при включённом HeldWeaponTrace.
+extern int g_heldWeaponStatusIntervalMs;
 
 extern std::vector<WeaponCfg> g_cfg;
 extern std::vector<WeaponCfg> g_cfg2;
@@ -52,6 +60,12 @@ extern bool g_livePreviewWeaponsActive;
 extern std::string g_livePreviewWeaponSkinDff;
 extern std::vector<WeaponCfg> g_livePreviewWeapon1;
 extern std::vector<WeaponCfg> g_livePreviewWeapon2;
+extern bool g_livePreviewHeldActive;
+extern std::string g_livePreviewHeldSkinDff;
+extern std::vector<HeldWeaponPoseCfg> g_livePreviewHeld1;
+extern std::vector<HeldWeaponPoseCfg> g_livePreviewHeld2;
+/// Вкладка «В руке»: пользователь крутит Held для строки «… 2» / второго набора — live preview читает `g_livePreviewHeld2`.
+extern bool g_livePreviewHeldUseSecondary;
 // Weapon types discovered in current game (weapon.dat / modded weapon.dat).
 extern std::vector<int> g_availableWeaponTypes;
 // Cached model ids for each weapon type (same indexing as g_cfg).
@@ -121,7 +135,8 @@ bool IsValidStandardObjectModel(int modelId);
 
 void SaveWeaponSection(int weaponIndex);
 void SaveWeaponSection2(int weaponIndex);
-void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& w1, const std::vector<WeaponCfg>& w2);
+void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& w1, const std::vector<WeaponCfg>& w2,
+    const std::vector<HeldWeaponPoseCfg>* held1 = nullptr, const std::vector<HeldWeaponPoseCfg>* held2 = nullptr);
 void SaveSkinCfgToIni(const CustomSkinCfg& s);
 void SaveStandardSkinCfgToIni(const StandardSkinCfg& s);
 void SaveSkinModeIni();
@@ -133,12 +148,19 @@ void InvalidateObjectSkinParamCache();
 void InvalidateStandardObjectSkinParamCache();
 void InvalidateStandardSkinLookupCache();
 
-void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2);
+void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2,
+    std::vector<HeldWeaponPoseCfg>* outHeld1 = nullptr, std::vector<HeldWeaponPoseCfg>* outHeld2 = nullptr);
 
 // ped.dat DFF basename for ped (LoadPedObject hook); empty if unknown.
 const char* OrcTryGetPedModelNameById(int modelId);
 std::string GetPedStdSkinDffName(CPed* ped);
+/// Базовое имя для `OrcOutFit\Weapons\<name>.ini`: как `GetPedStdSkinDffName`, но в SA:MP при пустом DFF
+/// у локального игрока подставляет `[SkinMode] Selected` / стандартный выбранный скин при `SkinLocalPreferSelected`.
+std::string GetWeaponSkinIniLookupName(CPed* ped);
 bool ResolveWeaponsIniForSkinDff(const char* skinDffName, char* outPath, size_t outPathChars);
+/// `Weapons\<>.ini` для пресета педа: сначала DFF из LoadPedObject (`GetPedStdSkinDffName`), иначе `GetWeaponSkinIniLookupName`.
+/// `outKeyLower` — нижний регистр базового имени найденного файла (ключ кеша пер-скин пресетов).
+bool ResolveWeaponsPresetIniForPed(CPed* ped, char* outPath, size_t outPathChars, std::string* outKeyLower);
 bool OrcApplyLocalPlayerModelById(int modelId);
 int OrcGetLocalPlayerModelId();
 
@@ -180,5 +202,11 @@ std::vector<std::string> ParseNickCsv(const std::string& csv);
 
 const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt);
 const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt);
+/// `secondary`: пресет с диска — вторая строка (twin / секции `*_2` в Weapons\<skin>.ini). Рантайм RWCB/слот пока всегда `false`.
+const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary);
+/// Сброс live-preview оружия/«В руке», когда меню закрыто (иначе INI с диска может игнорироваться).
+void OrcClearWeaponUiLivePreviewWhenMenuClosed();
+/// Детальный лог, почему пресет held не активен (throttled внутри).
+void OrcLogHeldPoseCfgDisabled(CPed* ped, int wt);
 const char* VkToString(int vk);
 int ParseActivationVk(const char* text);
