@@ -46,6 +46,8 @@ RpAtomic* OrcInitAtomicCB(RpAtomic* a, void*) {
     return a;
 }
 
+// Replacement weapon meshes: keep `SetAtomicRenderCallback(nullptr)` — `CVisibilityPlugins::RenderWeaponCB`
+// expects visibility-plugin data; held gunflash is fixed by `OrcPedSyncGunflashToWeaponSlot` on `CPed`.
 RpAtomic* OrcInitAttachmentAtomicCB(RpAtomic* a, void*) {
     OrcInitAtomicCB(a, nullptr);
     if (a && a->geometry) {

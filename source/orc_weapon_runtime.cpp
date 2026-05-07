@@ -7,6 +7,7 @@
 #include "CSprite2d.h"
 #include "CStreaming.h"
 #include "CWeaponInfo.h"
+#include "CClumpModelInfo.h"
 #include "CModelInfo.h"
 #include "CTimer.h"
 #include "RenderWare.h"
@@ -55,6 +56,55 @@ static int FindSlotByType(RenderedWeapon* arr, int wt, bool secondary) {
 static int FindFree(RenderedWeapon* arr) {
     for (int i = 0; i < OrcWeaponSlotMax; i++) if (!arr[i].active) return i;
     return -1;
+}
+
+static bool OrcRwFrameIsDescendantOf(RwFrame* frame, RwFrame* ancestor) {
+    if (!frame || !ancestor)
+        return false;
+    constexpr int kMaxAnc = 64;
+    int steps = 0;
+    for (RwFrame* x = frame; x && steps < kMaxAnc;
+         x = reinterpret_cast<RwFrame*>(plugin::GetObjectParent(reinterpret_cast<RwObject*>(x))),
+            ++steps) {
+        if (x == ancestor)
+            return true;
+    }
+    return false;
+}
+
+static RwFrame* OrcResolveGunflashFrameStrictForWeaponObject(RwObject* weaponObject, bool* suspiciousRoot = nullptr) {
+    if (suspiciousRoot)
+        *suspiciousRoot = false;
+    if (!weaponObject || weaponObject->type != rpCLUMP)
+        return nullptr;
+    RpClump* clump = reinterpret_cast<RpClump*>(weaponObject);
+    RwFrame* root = RpClumpGetFrame(clump);
+    RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+    if (!gf)
+        return nullptr;
+    if (gf == root) {
+        if (suspiciousRoot)
+            *suspiciousRoot = true;
+        return nullptr;
+    }
+    return gf;
+}
+
+struct OrcHideGunflashCtx {
+    RwFrame* gunflashFrame = nullptr;
+    int hidden = 0;
+};
+
+static RpAtomic* OrcHideBodyGunflashAtomicCb(RpAtomic* a, void* data) {
+    auto* ctx = reinterpret_cast<OrcHideGunflashCtx*>(data);
+    if (!a || !ctx || !ctx->gunflashFrame)
+        return a;
+    RwFrame* af = RpAtomicGetFrame(a);
+    if (!af || !OrcRwFrameIsDescendantOf(af, ctx->gunflashFrame))
+        return a;
+    RpAtomicSetFlags(a, 0);
+    ++ctx->hidden;
+    return a;
 }
 
 void OrcDestroyRenderedWeapon(RenderedWeapon& r) {
@@ -193,6 +243,22 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
             return;
         }
         RpClumpForAllAtomics(clump, OrcPrepAtomicCB, nullptr);
+        bool suspiciousRoot = false;
+        RwFrame* gf = OrcResolveGunflashFrameStrictForWeaponObject(r.rwObject, &suspiciousRoot);
+        if (gf) {
+            OrcHideGunflashCtx hctx{};
+            hctx.gunflashFrame = gf;
+            RpClumpForAllAtomics(clump, OrcHideBodyGunflashAtomicCb, &hctx);
+            if (hctx.hidden > 0 && g_orcLogLevel >= OrcLogLevel::Info) {
+                OrcLogInfoThrottled(592, 2500u,
+                    "body gunflash: hidden=%d wt=%d key=%s rw=%p", hctx.hidden, r.weaponType,
+                    r.replacementKey.empty() ? "-" : r.replacementKey.c_str(), r.rwObject);
+            }
+        } else if (suspiciousRoot && g_orcLogLevel >= OrcLogLevel::Info) {
+            OrcLogInfoThrottled(593, 3000u,
+                "body gunflash: suspicious root frame from GetFrameFromName wt=%d key=%s rw=%p",
+                r.weaponType, r.replacementKey.empty() ? "-" : r.replacementKey.c_str(), r.rwObject);
+        }
         RpClumpRender(clump);
     } else {
         OrcPrepAtomicCB(atomic, nullptr);
@@ -326,8 +392,16 @@ static void CopyRwClumpMatchingAtomicFrameMatricesFromStock(RwObject* stock, RwO
     }
 }
 
-static void CopyStockHeldWeaponRwMatricesToClone(RwObject* stock, RwObject* clone) {
+static void CopyStockHeldWeaponRwMatricesToClone(RwObject* stock, RwObject* clone, bool copyDeepPose) {
     CopyRwObjectRootMatrix(stock, clone);
+    if (!copyDeepPose) {
+        if (g_orcLogLevel >= OrcLogLevel::Info) {
+            OrcLogInfoThrottled(596, 2500u,
+                "held wr posecopy: root-only stock=%p clone=%p st=%d ct=%d",
+                stock, clone, stock ? (int)stock->type : -1, clone ? (int)clone->type : -1);
+        }
+        return;
+    }
     if (stock->type == rpCLUMP && clone->type == rpCLUMP &&
         CopyWeaponClumpPoseViaHAnimFromStock(reinterpret_cast<RpClump*>(stock), reinterpret_cast<RpClump*>(clone))) {
         return;
@@ -374,6 +448,62 @@ static RwObject* OrcResolveHeldWeaponRwObject(CPed* ped) {
     return it->second.rwObject;
 }
 
+static bool OrcRwFrameUnderClumpRoot(RwFrame* frame, RwFrame* clumpRoot) {
+    if (!frame || !clumpRoot)
+        return false;
+    return OrcRwFrameIsDescendantOf(frame, clumpRoot);
+}
+
+/// `m_pGunflashObject` указывает на фрейм внутри **текущего** `m_pWeaponObject` (или вспышки нет).
+static bool OrcGunflashCoherentWithWeaponSlot(CPed* ped) {
+    if (!ped || !ped->m_pGunflashObject)
+        return true;
+    if (!ped->m_pWeaponObject || ped->m_pWeaponObject->type != rpCLUMP)
+        return false;
+    RwFrame* root = RpClumpGetFrame(reinterpret_cast<RpClump*>(ped->m_pWeaponObject));
+    return OrcRwFrameUnderClumpRoot(ped->m_pGunflashObject, root);
+}
+
+/// Движок выставляет `m_pGunflashObject` только при создании стокового клумпа; после `m_pWeaponObject` = клон
+/// указатель остаётся на старый клумп → вспышка у кисти / залипание. См. план «Рендер вспышки оружия».
+static void OrcPedSyncGunflashToWeaponSlot(CPed* ped, const char* phase) {
+    if (!ped)
+        return;
+    if (g_orcLogLevel >= OrcLogLevel::Info && ped->m_pWeaponObject &&
+        HeldWeaponRwObjectIsReplacementClone(ped, ped->m_pWeaponObject) && !OrcGunflashCoherentWithWeaponSlot(ped)) {
+        OrcLogInfoThrottled(591, 2400u,
+            "held gunflash: stale m_pGunflashObject before sync phase=%s pedRef=%d wo=%p gf=%p",
+            phase ? phase : "?", CPools::GetPedRef(ped), ped->m_pWeaponObject, ped->m_pGunflashObject);
+    }
+    if (!ped->m_pWeaponObject) {
+        ped->m_pGunflashObject = nullptr;
+        return;
+    }
+    bool suspiciousRoot = false;
+    RwFrame* resolved = OrcResolveGunflashFrameStrictForWeaponObject(ped->m_pWeaponObject, &suspiciousRoot);
+
+    if (!resolved && HeldWeaponRwObjectIsReplacementClone(ped, ped->m_pWeaponObject)) {
+        const int pedRef = CPools::GetPedRef(ped);
+        auto it = g_heldWeaponReplacements.find(pedRef);
+        if (it != g_heldWeaponReplacements.end() && it->second.originalObject) {
+            resolved = OrcResolveGunflashFrameStrictForWeaponObject(it->second.originalObject);
+            if (resolved && g_orcLogLevel >= OrcLogLevel::Info) {
+                OrcLogInfoThrottled(594, 1800u,
+                    "held gunflash: fallback to stock frame phase=%s pedRef=%d wo=%p stock=%p",
+                    phase ? phase : "?", pedRef, ped->m_pWeaponObject, it->second.originalObject);
+            }
+        }
+    }
+
+    ped->m_pGunflashObject = resolved;
+    if (g_orcLogLevel >= OrcLogLevel::Info) {
+        OrcLogInfoThrottled(595, 2200u,
+            "held gunflash: sync phase=%s pedRef=%d wo=%p gf=%p suspiciousRoot=%d coherent=%d",
+            phase ? phase : "?", CPools::GetPedRef(ped), ped->m_pWeaponObject, ped->m_pGunflashObject,
+            suspiciousRoot ? 1 : 0, OrcGunflashCoherentWithWeaponSlot(ped) ? 1 : 0);
+    }
+}
+
 // `Events::pedRenderEvent` wraps an inner CALL inside `CPed::Render`, not the whole function. Restoring the
 // stock `m_pWeaponObject` in the event's "after" callback runs *before* the rest of `CPed::Render` draws the
 // vanilla held weapon, so the engine paints stock on top. Queue the stock pointer and write it in
@@ -403,6 +533,7 @@ static void OrcRestoreDeferredHeldStockIfSlotStillHasClone(CPed* ped) {
     const DeferredHeldWeaponSlotRestore& r = d->second;
     if (r.stock && r.clone && ped->m_pWeaponObject == r.clone) {
         ped->m_pWeaponObject = r.stock;
+        OrcPedSyncGunflashToWeaponSlot(ped, "defRestore");
         g_deferredHeldWeaponStockRestore.erase(pedRef);
     }
 }
@@ -421,8 +552,10 @@ void OrcFlushDeferredHeldWeaponSlotRestore() {
         if (!ped)
             continue;
         const DeferredHeldWeaponSlotRestore& r = kv.second;
-        if (r.stock && r.clone && ped->m_pWeaponObject == r.clone)
+        if (r.stock && r.clone && ped->m_pWeaponObject == r.clone) {
             ped->m_pWeaponObject = r.stock;
+            OrcPedSyncGunflashToWeaponSlot(ped, "flushRestore");
+        }
     }
     g_deferredHeldWeaponStockRestore.clear();
 }
@@ -1557,10 +1690,13 @@ void OrcDestroyAllHeldWeaponReplacementInstances() {
         if (st.captureActive) {
             CPed* ped = CPools::GetPed(kv.first);
             if (ped) {
-                if (st.hideBaseMode && st.originalObject)
+                if (st.hideBaseMode && st.originalObject) {
                     ped->m_pWeaponObject = st.originalObject;
-                else if (st.rwObject && ped->m_pWeaponObject == st.rwObject && st.originalObject)
+                    OrcPedSyncGunflashToWeaponSlot(ped, "destroyHeld:orig");
+                } else if (st.rwObject && ped->m_pWeaponObject == st.rwObject && st.originalObject) {
                     ped->m_pWeaponObject = st.originalObject;
+                    OrcPedSyncGunflashToWeaponSlot(ped, "destroyHeld:stock");
+                }
             }
         }
         st.captureActive = false;
@@ -1758,10 +1894,11 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     if (state.rwObject && state.originalObject && state.weaponType == wt && state.replacementKey == asset->key) {
         if (ped->m_pWeaponObject == state.originalObject) {
             OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-            CopyStockHeldWeaponRwMatricesToClone(state.originalObject, state.rwObject);
+            CopyStockHeldWeaponRwMatricesToClone(state.originalObject, state.rwObject, false);
             state.hideBaseMode = false;
             state.captureActive = true;
             ped->m_pWeaponObject = state.rwObject;
+            OrcPedSyncGunflashToWeaponSlot(ped, "repl:swapStock");
             OrcApplyHeldPoseToWeaponObject(ped, state.rwObject, "repl:swapStock");
             return;
         }
@@ -1772,7 +1909,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
             s_heldReSyncDupPedRef = pedRef;
             s_heldReSyncDupSerial = s_heldPrepSimSerial;
             OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-            CopyStockHeldWeaponRwMatricesToClone(state.originalObject, state.rwObject);
+            CopyStockHeldWeaponRwMatricesToClone(state.originalObject, state.rwObject, false);
             OrcApplyHeldPoseToWeaponObject(ped, state.rwObject, "repl:reSync");
             return;
         }
@@ -1812,11 +1949,12 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     // expects weapon visibility-plugin data on each RpAtomic; replacement clones don't have it → AV (+0x18).
     // InitAttachmentAtomicCB clears callbacks so RpClumpRender uses the default atomic path.
     OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-    CopyStockHeldWeaponRwMatricesToClone(ped->m_pWeaponObject, state.rwObject);
+    CopyStockHeldWeaponRwMatricesToClone(ped->m_pWeaponObject, state.rwObject, false);
     state.originalObject = ped->m_pWeaponObject;
     state.hideBaseMode = false;
     state.captureActive = true;
     ped->m_pWeaponObject = state.rwObject;
+    OrcPedSyncGunflashToWeaponSlot(ped, "repl:firstSwap");
     OrcApplyHeldPoseToWeaponObject(ped, state.rwObject, "repl:firstSwap");
 }
 
@@ -1903,11 +2041,12 @@ static void OrcApplyHeldWeaponReplacementAfterAddWeaponModel(CPed* ped, int mode
     }
 
     OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-    CopyStockHeldWeaponRwMatricesToClone(ped->m_pWeaponObject, state.rwObject);
+    CopyStockHeldWeaponRwMatricesToClone(ped->m_pWeaponObject, state.rwObject, false);
     state.originalObject = ped->m_pWeaponObject;
     state.hideBaseMode = false;
     state.captureActive = true;
     ped->m_pWeaponObject = state.rwObject;
+    OrcPedSyncGunflashToWeaponSlot(ped, "repl:addModel");
     OrcApplyHeldPoseToWeaponObject(ped, state.rwObject, "repl:addModel");
 }
 
@@ -1976,8 +2115,10 @@ static void __fastcall RemoveWeaponModel_Hook(CPed* ped, void* /*edx*/, int mode
                     if (d != g_deferredHeldWeaponStockRestore.end())
                         stock = d->second.stock;
                 }
-                if (stock)
+                if (stock) {
                     ped->m_pWeaponObject = stock;
+                    OrcPedSyncGunflashToWeaponSlot(ped, "removeWeapon:preVanilla");
+                }
             }
         }
     }
