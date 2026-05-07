@@ -283,6 +283,39 @@ bool OrcUiInputInt(const char* id, const char* label, int* value, int step, int 
     return changed;
 }
 
+static void OrcUiSaveMainIniDebounced() {
+    SaveMainIni();
+}
+
+static bool OrcUiComboTrace012(const char* rowId, OrcTextId labelId, int* value) {
+    const OrcTextId optIds[] = { OrcTextId::TraceLevelCombo0, OrcTextId::TraceLevelCombo1, OrcTextId::TraceLevelCombo2 };
+    int v = *value;
+    if (v < 0)
+        v = 0;
+    if (v > 2)
+        v = 2;
+    if (!OrcUiBeginControlRow(rowId, T(labelId)))
+        return false;
+    bool changed = false;
+    if (ImGui::BeginCombo("##value", T(optIds[v]))) {
+        for (int i = 0; i < 3; ++i) {
+            if (ImGui::Selectable(T(optIds[i]), v == i)) {
+                if (v != i) {
+                    v = i;
+                    changed = true;
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    OrcUiEndControlRow();
+    if (changed) {
+        *value = v;
+        OrcUiSaveMainIniDebounced();
+    }
+    return changed;
+}
+
 static bool UiSliderFloat(const char* id, const char* label, float* value, float minValue, float maxValue, const char* format, ImGuiSliderFlags flags = 0) {
     UiBeginWideControl(id, label);
     const bool changed = ImGui::SliderFloat("##value", value, minValue, maxValue, format, flags);
@@ -582,6 +615,7 @@ void OrcUiDraw() {
                         if (ImGui::Selectable(T(logLabels[i]), logCombo == i)) {
                             logCombo = i;
                             g_orcLogLevel = static_cast<OrcLogLevel>(logCombo);
+                            OrcUiSaveMainIniDebounced();
                         }
                     }
                     ImGui::EndCombo();
@@ -589,6 +623,26 @@ void OrcUiDraw() {
                 OrcUiEndControlRow();
             }
             ImGui::TextDisabled("%s", OrcLogGetPath());
+
+            if (ImGui::CollapsingHeader(T(OrcTextId::UiFeaturesDiagnosticsHeader), ImGuiTreeNodeFlags_None)) {
+                ImGui::TextWrapped("%s", T(OrcTextId::UiFeaturesDiagnosticsHint));
+                OrcUiComboTrace012("held_weapon_trace", OrcTextId::HeldWeaponTraceUi, &g_heldWeaponTrace);
+                bool heldDbg = g_heldPoseDebug;
+                if (OrcUiCheckbox("held_pose_debug", T(OrcTextId::HeldPoseDebugUi), &heldDbg)) {
+                    g_heldPoseDebug = heldDbg;
+                    OrcUiSaveMainIniDebounced();
+                }
+                int heldMs = g_heldWeaponStatusIntervalMs;
+                if (OrcUiInputInt("held_status_ms", T(OrcTextId::HeldWeaponStatusIntervalUi), &heldMs, 500, 1000,
+                        ImGuiInputTextFlags_CharsDecimal)) {
+                    if (heldMs < 0)
+                        heldMs = 0;
+                    if (heldMs > 0 && heldMs < 3000 && g_heldWeaponTrace > 0)
+                        heldMs = 3000;
+                    g_heldWeaponStatusIntervalMs = heldMs;
+                    OrcUiSaveMainIniDebounced();
+                }
+            }
 
             ImGui::Separator();
             if (OrcUiButtonFullWidth(T(OrcTextId::SaveMainFeatures))) {

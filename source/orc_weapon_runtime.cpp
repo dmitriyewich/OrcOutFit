@@ -10,6 +10,7 @@
 #include "CModelInfo.h"
 #include "CTimer.h"
 #include "RenderWare.h"
+#include "game_sa/rw/rphanim.h"
 #include "eWeaponType.h"
 
 #include <algorithm>
@@ -36,9 +37,6 @@
 #include "samp_bridge.h"
 
 using namespace plugin;
-
-// alphaOverride < 0: use ped gunflash MP1 (held weapon). Else explicit alpha for holstered body clones (0 = hide flash).
-static void SyncWeaponReplacementMuzzleFlashAlpha(CPed* ped, RwObject* obj, int alphaOverride = -1);
 
 static bool g_pedWeaponModelHooksInstalled = false;
 using AddWeaponModel_t = void(__thiscall*)(CPed*, int);
@@ -187,8 +185,6 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
         r.replacementKey.empty() ? nullptr : &r.replacementKey);
     const bool meshIsReplacement = !r.replacementKey.empty();
     OrcApplyWeaponTexturesCombined(ped, r.weaponType, r.rwObject, textureAsset, meshIsReplacement);
-    if (!r.replacementKey.empty())
-        SyncWeaponReplacementMuzzleFlashAlpha(nullptr, r.rwObject, 0);
 
     if (r.rwObject->type == rpCLUMP) {
         auto* clump = reinterpret_cast<RpClump*>(r.rwObject);
@@ -233,66 +229,110 @@ static void CopyRwObjectRootMatrix(RwObject* src, RwObject* dst) {
     }
 }
 
-// Replacement DFFs often include a muzzle-flash mesh with the same texture names as vanilla.
-// The game drives visibility via CPed::m_nWeaponGunflashAlphaMP1 (and MP2) during held render;
-// our InitAttachmentAtomicCB forces material alpha to 255, so sync flash materials each frame.
-// Holster/body clones (RenderOneWeapon) must force alpha 0 — MP1 reflects the held gun, not the carried one.
-static bool IsWeaponMuzzleFlashTextureName(const char* name) {
-    if (!name || !name[0])
-        return false;
-    const std::string s = OrcToLowerAscii(name);
-    if (s.find("gunflash") != std::string::npos)
-        return true;
-    if (s.find("muzzleflash") != std::string::npos)
-        return true;
-    if (s.find("muzzle_flash") != std::string::npos)
-        return true;
-    if (s.find("muzzle_texture") != std::string::npos)
-        return true;
-    return false;
-}
+struct OrcAtomicFrameListCtx {
+    std::vector<RwFrame*> frames;
+};
 
-static RpMaterial* SyncHeldReplacementMuzzleFlashMatCB(RpMaterial* m, void* data) {
-    const int* alpha = reinterpret_cast<int*>(data);
-    if (!m || !alpha)
-        return m;
-    if (!m->texture || !IsWeaponMuzzleFlashTextureName(m->texture->name))
-        return m;
-    int a = *alpha;
-    if (a < 0)
-        a = 0;
-    if (a > 255)
-        a = 255;
-    m->color.alpha = static_cast<RwUInt8>(a);
-    return m;
-}
-
-static RpAtomic* SyncHeldReplacementMuzzleFlashAtomicCB(RpAtomic* atomic, void* data) {
-    if (!atomic || !atomic->geometry)
-        return atomic;
-    RpGeometryForAllMaterials(atomic->geometry, SyncHeldReplacementMuzzleFlashMatCB, data);
+static RpAtomic* OrcCollectAtomicRootFrameCb(RpAtomic* atomic, void* data) {
+    auto* ctx = reinterpret_cast<OrcAtomicFrameListCtx*>(data);
+    if (atomic && RpAtomicGetFrame(atomic))
+        ctx->frames.push_back(RpAtomicGetFrame(atomic));
     return atomic;
 }
 
-static void SyncWeaponReplacementMuzzleFlashAlpha(CPed* ped, RwObject* obj, int alphaOverride) {
-    if (!obj)
-        return;
-    int a;
-    if (alphaOverride >= 0)
-        a = alphaOverride;
-    else {
-        if (!ped)
-            return;
-        a = static_cast<int>(ped->m_nWeaponGunflashAlphaMP1);
-    }
+// Stock clump gets full IK hierarchy each frame; replacement clone only received the root matrix.
+// Copy per-atomic RwFrame modelling matrices when atomic counts match (same DFF layout).
+/// Оружие в руках часто с `RpHAnimHierarchy` на корневом RwFrame — копируем узлы по `nodeID`, как `CopySkinHierarchyPose` для скинов.
+static RpHAnimHierarchy* OrcGetHAnimHierarchyFromClumpRoot(RpClump* clump) {
+    if (!clump)
+        return nullptr;
+    RwFrame* root = RpClumpGetFrame(clump);
+    if (!root)
+        return nullptr;
     __try {
-        if (obj->type == rpCLUMP)
-            RpClumpForAllAtomics(reinterpret_cast<RpClump*>(obj), SyncHeldReplacementMuzzleFlashAtomicCB, &a);
-        else if (obj->type == rpATOMIC)
-            SyncHeldReplacementMuzzleFlashAtomicCB(reinterpret_cast<RpAtomic*>(obj), &a);
+        return RpHAnimFrameGetHierarchy(root);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogError("SyncWeaponReplacementMuzzleFlashAlpha: SEH ex=0x%08X", GetExceptionCode());
+        OrcLogError("OrcGetHAnimHierarchyFromClumpRoot: SEH ex=0x%08X", GetExceptionCode());
+        return nullptr;
     }
+}
+
+static bool CopyWeaponClumpPoseViaHAnimFromStock(RpClump* stock, RpClump* clone) {
+    if (!stock || !clone)
+        return false;
+    RpHAnimHierarchy* sh = OrcGetHAnimHierarchyFromClumpRoot(stock);
+    RpHAnimHierarchy* dh = OrcGetHAnimHierarchyFromClumpRoot(clone);
+    if (!sh || !dh || !sh->pMatrixArray || !dh->pMatrixArray || !sh->pNodeInfo || !dh->pNodeInfo)
+        return false;
+    __try {
+        for (int i = 0; i < sh->numNodes; ++i) {
+            const int nodeId = sh->pNodeInfo[i].nodeID;
+            if (nodeId < 0)
+                continue;
+            const int di = RpHAnimIDGetIndex(dh, nodeId);
+            if (di < 0 || di >= dh->numNodes)
+                continue;
+            dh->pMatrixArray[di] = sh->pMatrixArray[i];
+        }
+        RpHAnimHierarchyUpdateMatrices(dh);
+        for (int i = 0; i < sh->numNodes; ++i) {
+            const int nodeId = sh->pNodeInfo[i].nodeID;
+            if (nodeId < 0)
+                continue;
+            const int di = RpHAnimIDGetIndex(dh, nodeId);
+            if (di < 0 || di >= dh->numNodes)
+                continue;
+            RwFrame* sf = sh->pNodeInfo[i].pFrame;
+            RwFrame* df = dh->pNodeInfo[di].pFrame;
+            if (!sf || !df)
+                continue;
+            std::memcpy(RwFrameGetMatrix(df), RwFrameGetMatrix(sf), sizeof(RwMatrix));
+            RwMatrixUpdate(RwFrameGetMatrix(df));
+        }
+        RwFrame* cloneRoot = RpClumpGetFrame(clone);
+        if (cloneRoot)
+            RwFrameUpdateObjects(cloneRoot);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("CopyWeaponClumpPoseViaHAnimFromStock: SEH ex=0x%08X", GetExceptionCode());
+        return false;
+    }
+}
+
+static void CopyRwClumpMatchingAtomicFrameMatricesFromStock(RwObject* stock, RwObject* clone) {
+    if (!stock || !clone || stock->type != rpCLUMP || clone->type != rpCLUMP)
+        return;
+    RpClump* sc = reinterpret_cast<RpClump*>(stock);
+    RpClump* dc = reinterpret_cast<RpClump*>(clone);
+    OrcAtomicFrameListCtx stockAll{}, cloneAll{};
+    RpClumpForAllAtomics(sc, OrcCollectAtomicRootFrameCb, &stockAll);
+    RpClumpForAllAtomics(dc, OrcCollectAtomicRootFrameCb, &cloneAll);
+    __try {
+        if (!stockAll.frames.empty() && stockAll.frames.size() == cloneAll.frames.size()) {
+            for (size_t i = 0; i < stockAll.frames.size(); ++i) {
+                RwFrame* sf = stockAll.frames[i];
+                RwFrame* df = cloneAll.frames[i];
+                if (!sf || !df)
+                    continue;
+                std::memcpy(RwFrameGetMatrix(df), RwFrameGetMatrix(sf), sizeof(RwMatrix));
+                RwMatrixUpdate(RwFrameGetMatrix(df));
+            }
+        }
+        RwFrame* root = RpClumpGetFrame(dc);
+        if (root)
+            RwFrameUpdateObjects(root);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("CopyRwClumpMatchingAtomicFrameMatricesFromStock: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+static void CopyStockHeldWeaponRwMatricesToClone(RwObject* stock, RwObject* clone) {
+    CopyRwObjectRootMatrix(stock, clone);
+    if (stock->type == rpCLUMP && clone->type == rpCLUMP &&
+        CopyWeaponClumpPoseViaHAnimFromStock(reinterpret_cast<RpClump*>(stock), reinterpret_cast<RpClump*>(clone))) {
+        return;
+    }
+    CopyRwClumpMatchingAtomicFrameMatricesFromStock(stock, clone);
 }
 
 struct HeldWeaponReplacementState {
@@ -739,32 +779,56 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
         }
     } else if (obj->type == rpCLUMP) {
         RpClump* clump = reinterpret_cast<RpClump*>(obj);
-        HeldClumpApplyCtx ctx{};
-        ctx.h = &h;
-        RpClumpForAllAtomics(clump, OrcHeldPoseApplyEachAtomicCb, &ctx);
-        heldPoseAtomCount = ctx.nAtom;
-        heldPoseOkCount = ctx.nOk;
-        logAtX = ctx.logAtX;
-        logAtY = ctx.logAtY;
-        logAtZ = ctx.logAtZ;
-        if (ctx.nOk == 0) {
+        // Replacement DFF: Held по каждому атомику ломает дочерние фреймы (вспышка у кисти / перевёрнутая).
+        // Ванильный IK уже в матрицах после CopyStock*; смещаем всё оружие как жёсткое тело с корня.
+        if (isReplClone) {
             RwFrame* rootF = RpClumpGetFrame(clump);
-            if (rootF && OrcTryApplyHeldPoseOneFrame(rootF, h)) {
-                heldPoseOkCount = 1;
-                heldPoseTgt = "root_fallback";
-                RwMatrix* rm = RwFrameGetMatrix(rootF);
-                if (rm) {
-                    logAtX = rm->pos.x;
-                    logAtY = rm->pos.y;
-                    logAtZ = rm->pos.z;
-                }
-            } else {
-                OrcLogInfoThrottled(443, 2500u, "held pose: skip no frame applied phase=%s wt=%d atomics=%d", phase, wt,
-                    ctx.nAtom);
+            if (!rootF) {
+                OrcLogInfoThrottled(434, 3000u, "held pose: skip no root repl phase=%s wt=%d", phase, wt);
                 return false;
             }
+            OrcHeldPoseInvalidateBaselineForRwFrame(rootF);
+            if (!OrcTryApplyHeldPoseOneFrame(rootF, h)) {
+                OrcLogInfoThrottled(442, 2500u, "held pose: skip apply failed (repl root) phase=%s wt=%d", phase, wt);
+                return false;
+            }
+            heldPoseAtomCount = 1;
+            heldPoseOkCount = 1;
+            heldPoseTgt = "replRoot";
+            RwMatrix* rm = RwFrameGetMatrix(rootF);
+            if (rm) {
+                logAtX = rm->pos.x;
+                logAtY = rm->pos.y;
+                logAtZ = rm->pos.z;
+            }
         } else {
-            heldPoseTgt = "eachAtomic";
+            HeldClumpApplyCtx ctx{};
+            ctx.h = &h;
+            RpClumpForAllAtomics(clump, OrcHeldPoseApplyEachAtomicCb, &ctx);
+            heldPoseAtomCount = ctx.nAtom;
+            heldPoseOkCount = ctx.nOk;
+            logAtX = ctx.logAtX;
+            logAtY = ctx.logAtY;
+            logAtZ = ctx.logAtZ;
+            if (ctx.nOk == 0) {
+                RwFrame* rootF = RpClumpGetFrame(clump);
+                if (rootF && OrcTryApplyHeldPoseOneFrame(rootF, h)) {
+                    heldPoseOkCount = 1;
+                    heldPoseTgt = "root_fallback";
+                    RwMatrix* rm = RwFrameGetMatrix(rootF);
+                    if (rm) {
+                        logAtX = rm->pos.x;
+                        logAtY = rm->pos.y;
+                        logAtZ = rm->pos.z;
+                    }
+                } else {
+                    OrcLogInfoThrottled(443, 2500u, "held pose: skip no frame applied phase=%s wt=%d atomics=%d", phase, wt,
+                        ctx.nAtom);
+                    return false;
+                }
+            } else {
+                heldPoseTgt = "eachAtomic";
+            }
         }
     } else {
         OrcLogInfoThrottled(434, 3000u, "held pose: skip unknown obj type phase=%s t=%d wt=%d", phase, (int)obj->type, wt);
@@ -939,6 +1003,10 @@ static bool OrcHeldAtomicMatchesWeaponModelTemplate(RpAtomic* atomic, int wt) {
 /// `wtSel` / `wo` снаружи (RWCB вызывается очень часто — не дублируем `OrcResolveHeldWeaponRwObject`).
 static bool OrcHeldRwcbShouldApplyAtomicImpl(CPed* ped, RpAtomic* atomic, int wtSel, RwObject* wo) {
     if (!ped || !atomic || wtSel <= 0)
+        return false;
+
+    // Клон replacement: Held только на корне в `pedRender` (`replRoot`); повтор на каждом атомике в RWCB ломает вспышку/иерархию.
+    if (wo && HeldWeaponRwObjectIsReplacementClone(ped, wo) && OrcHeldAtomicMatchesPedWeaponObject(atomic, wo))
         return false;
 
     // Прямой матч / сток repl / геометрия слота — без `OrcAtomicAttachedUnderPedRwClump`: у RWCB атомов
@@ -1602,7 +1670,6 @@ static void RenderHeldReplacementHideBaseForPed(CPed* ped, HeldWeaponReplacement
             state.replacementKey.empty() ? nullptr : &state.replacementKey);
         OrcApplyWeaponTexturesCombined(ped, wt, state.rwObject, tex, true);
     }
-    SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
     OrcApplyAttachmentLightingForPed(ped, lightPos, 0.5f);
 
     if (state.rwObject->type == rpCLUMP) {
@@ -1691,8 +1758,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     if (state.rwObject && state.originalObject && state.weaponType == wt && state.replacementKey == asset->key) {
         if (ped->m_pWeaponObject == state.originalObject) {
             OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-            CopyRwObjectRootMatrix(state.originalObject, state.rwObject);
-            SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+            CopyStockHeldWeaponRwMatricesToClone(state.originalObject, state.rwObject);
             state.hideBaseMode = false;
             state.captureActive = true;
             ped->m_pWeaponObject = state.rwObject;
@@ -1706,8 +1772,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
             s_heldReSyncDupPedRef = pedRef;
             s_heldReSyncDupSerial = s_heldPrepSimSerial;
             OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-            CopyRwObjectRootMatrix(state.originalObject, state.rwObject);
-            SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+            CopyStockHeldWeaponRwMatricesToClone(state.originalObject, state.rwObject);
             OrcApplyHeldPoseToWeaponObject(ped, state.rwObject, "repl:reSync");
             return;
         }
@@ -1747,8 +1812,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     // expects weapon visibility-plugin data on each RpAtomic; replacement clones don't have it → AV (+0x18).
     // InitAttachmentAtomicCB clears callbacks so RpClumpRender uses the default atomic path.
     OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-    CopyRwObjectRootMatrix(ped->m_pWeaponObject, state.rwObject);
-    SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+    CopyStockHeldWeaponRwMatricesToClone(ped->m_pWeaponObject, state.rwObject);
     state.originalObject = ped->m_pWeaponObject;
     state.hideBaseMode = false;
     state.captureActive = true;
@@ -1839,8 +1903,7 @@ static void OrcApplyHeldWeaponReplacementAfterAddWeaponModel(CPed* ped, int mode
     }
 
     OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-    CopyRwObjectRootMatrix(ped->m_pWeaponObject, state.rwObject);
-    SyncWeaponReplacementMuzzleFlashAlpha(ped, state.rwObject);
+    CopyStockHeldWeaponRwMatricesToClone(ped->m_pWeaponObject, state.rwObject);
     state.originalObject = ped->m_pWeaponObject;
     state.hideBaseMode = false;
     state.captureActive = true;

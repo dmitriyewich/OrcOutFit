@@ -77,6 +77,14 @@
     X(SkinAlwaysSelectedForMe, "Скин: всегда использовать выбранный скин для меня", "Skin: always use selected skin for me") \
     X(SkinAlwaysSelectedHint, "Если включено: ваш ped использует скин, выбранный во вкладке Скины (после сохранения выбора). Скин по нику все равно имеет приоритет, когда привязка по нику включена и имя совпадает. Работает даже при выключенной привязке по нику.", "If on: your ped uses the skin chosen in the Skins tab (after Save skin mode selection). Nick-bound skin still wins when nick binding is on and your name matches. Works even when nick binding is off.") \
     X(DebugLog, "Отладочный лог (OrcOutFit.log)", "Debug log (OrcOutFit.log)") \
+    X(UiFeaturesDiagnosticsHeader, "Диагностика [Features]", "Diagnostics [Features]") \
+    X(UiFeaturesDiagnosticsHint, "Действует сразу; OrcOutFit.ini пишется с задержкой (~0.45 с).", "Applies immediately; OrcOutFit.ini write is debounced (~0.45s).") \
+    X(HeldWeaponTraceUi, "HeldWeaponTrace (лог в руке)", "HeldWeaponTrace (held weapon log)") \
+    X(HeldPoseDebugUi, "HeldPoseDebug (чаще held-лог)", "HeldPoseDebug (more held logs)") \
+    X(HeldWeaponStatusIntervalUi, "HeldWeaponStatusIntervalMs", "HeldWeaponStatusIntervalMs") \
+    X(TraceLevelCombo0, "0 — выкл", "0 — off") \
+    X(TraceLevelCombo1, "1", "1") \
+    X(TraceLevelCombo2, "2", "2") \
     X(LogOff, "Выкл", "Off") \
     X(LogErrorsOnly, "Только ошибки", "Errors only") \
     X(LogInfoFull, "Информация (полный)", "Info (full)") \
