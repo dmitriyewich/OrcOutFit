@@ -1,10 +1,11 @@
 name: Build OrcOutFit Win32
 # run-name (приоритет):
 # 1) release — сначала название релиза, иначе tag_name;
-# 2) workflow_dispatch — «manual · ветка · полный SHA (#run)»;
+# 2) workflow_dispatch — временно «manual · ветка (#run)», затем шаг Rename run
+#    обновляет имя на «manual · ветка · Commit <short_sha> <message> (#run)»;
 # 3) иначе — ветка (#run).
 # Автозапуск по push в main отключён — только workflow_dispatch и release.
-run-name: ${{ github.event_name == 'release' && (github.event.release.name || github.event.release.tag_name) || github.event_name == 'workflow_dispatch' && format('manual · {0} · {1} (#{2})', github.ref_name, github.sha, github.run_number) || format('{0} (#{1})', github.ref_name, github.run_number) }}
+run-name: ${{ github.event_name == 'release' && (github.event.release.name || github.event.release.tag_name) || github.event_name == 'workflow_dispatch' && format('manual · {0} (#{1})', github.ref_name, github.run_number) || format('{0} (#{1})', github.ref_name, github.run_number) }}
 
 on:
   workflow_dispatch:
@@ -16,6 +17,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -25,6 +27,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Rename workflow run (manual)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ref = context.ref.replace("refs/heads/", "");
+            const shortSha = context.sha.substring(0, 7);
+            const commit = await github.rest.repos.getCommit({
+              owner,
+              repo,
+              ref: context.sha
+            });
+            const rawMessage = (commit.data?.commit?.message || "").trim();
+            const subject = (rawMessage.split("\n")[0] || "manual dispatch").trim();
+            const runName = `manual · ${ref} · Commit ${shortSha} ${subject} (#${context.runNumber})`;
+            await github.request("PATCH /repos/{owner}/{repo}/actions/runs/{run_id}", {
+              owner,
+              repo,
+              run_id: context.runId,
+              name: runName
+            });
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
