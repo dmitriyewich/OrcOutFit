@@ -15,7 +15,9 @@ void OrcBuildWeaponSkinPresetFromIniDocument(
     std::vector<WeaponCfg>& outW1,
     std::vector<WeaponCfg>& outW2,
     std::vector<HeldWeaponPoseCfg>& outH1,
-    std::vector<HeldWeaponPoseCfg>& outH2);
+    std::vector<HeldWeaponPoseCfg>& outH2,
+    HeldWeaponCustomOverridesByWeapon* outCustomH1 = nullptr,
+    HeldWeaponCustomOverridesByWeapon* outCustomH2 = nullptr);
 
 struct OrcWeaponSkinPresetLoaded {
     uint64_t enqueueEpoch = 0;
@@ -25,6 +27,8 @@ struct OrcWeaponSkinPresetLoaded {
     std::vector<WeaponCfg> w2;
     std::vector<HeldWeaponPoseCfg> h1;
     std::vector<HeldWeaponPoseCfg> h2;
+    HeldWeaponCustomOverridesByWeapon ch1;
+    HeldWeaponCustomOverridesByWeapon ch2;
 };
 
 uint64_t OrcWeaponSkinPresetGetInvalidateEpoch();

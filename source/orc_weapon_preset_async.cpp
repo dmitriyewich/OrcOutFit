@@ -97,7 +97,7 @@ void WorkerLoop() {
         if (parsed)
             useDoc = std::move(doc);
 
-        OrcBuildWeaponSkinPresetFromIniDocument(useDoc, work.baseW1, work.baseW2, r.w1, r.w2, r.h1, r.h2);
+        OrcBuildWeaponSkinPresetFromIniDocument(useDoc, work.baseW1, work.baseW2, r.w1, r.w2, r.h1, r.h2, &r.ch1, &r.ch2);
 
         {
             std::lock_guard<std::mutex> lk(g_mtx);

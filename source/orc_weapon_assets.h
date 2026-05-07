@@ -54,6 +54,8 @@ std::string OrcGetWeaponModelBaseNameLower(int wt);
 WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom);
 WeaponReplacementAsset* OrcResolveUsableWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom);
 std::string OrcResolveUsableWeaponReplacementKeyForPed(CPed* ped, int wt, bool allowRandom);
+void OrcCollectWeaponReplacementVariantKeys(int wt, std::vector<std::string>& outKeys);
+bool OrcPinWeaponReplacementChoiceForPed(CPed* ped, int wt, const std::string& replacementKey);
 
 RwObject* OrcCloneWeaponReplacementObject(WeaponReplacementAsset& asset);
 

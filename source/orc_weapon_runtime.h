@@ -42,6 +42,8 @@ void OrcWeaponEnsurePedModelHooksInstalled();
 int OrcResolveWeaponHeldVisualWeaponType(CPed* ped);
 /// If ped slots read empty but Guns held clone exists (SA:MP), reuse its weapon type for HUD icon resolution.
 int OrcWeaponHudGetHeldReplacementWeaponTypeIfAny(CPed* ped);
+/// Active held replacement key currently captured for ped/weapon (stable key from runtime clone state).
+bool OrcGetHeldReplacementKeyForPed(CPed* ped, int wt, std::string& outKeyLower);
 void OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
 
 void OrcPrepareHeldWeaponTextureBefore(CPed* ped);

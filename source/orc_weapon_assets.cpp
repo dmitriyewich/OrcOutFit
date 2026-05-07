@@ -48,6 +48,16 @@ static std::string MakeWeaponReplacementKey(const std::string& weaponLower, cons
     return weaponLower + "|" + matchLower;
 }
 
+static WeaponReplacementAsset* FindWeaponReplacementAssetByKey(const std::string& keyLower) {
+    if (keyLower.empty())
+        return nullptr;
+    for (WeaponReplacementAsset& asset : g_weaponReplacementAssets) {
+        if (OrcToLowerAscii(asset.key) == keyLower)
+            return &asset;
+    }
+    return nullptr;
+}
+
 static std::string StripSampColorCodes(std::string value) {
     std::string out;
     out.reserve(value.size());
@@ -2157,6 +2167,21 @@ static int PickStickyWeaponReplacementChoice(CPed* ped,
 WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom) {
     if (!g_weaponReplacementEnabled || !ped || wt <= 0)
         return nullptr;
+    if (g_livePreviewHeldBaseForceVanilla && wt == g_livePreviewHeldBaseWeaponType &&
+        OrcWeaponUiLivePreviewMatchesPedWeaponsIni(ped)) {
+        CPlayerPed* local = FindPlayerPed(0);
+        if (local && ped == local)
+            return nullptr;
+    }
+    if (g_livePreviewHeldCustomForceActive && wt == g_livePreviewHeldCustomWeaponType &&
+        !g_livePreviewHeldCustomKey.empty() && OrcWeaponUiLivePreviewMatchesPedWeaponsIni(ped)) {
+        CPlayerPed* local = FindPlayerPed(0);
+        if (local && ped == local) {
+            WeaponReplacementAsset* forced = FindWeaponReplacementAssetByKey(g_livePreviewHeldCustomKey);
+            if (forced)
+                return forced;
+        }
+    }
     const std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
     if (weaponLower.empty())
         return nullptr;
@@ -2225,6 +2250,62 @@ WeaponReplacementAsset* OrcResolveUsableWeaponReplacementAssetForPed(CPed* ped, 
 std::string OrcResolveUsableWeaponReplacementKeyForPed(CPed* ped, int wt, bool allowRandom) {
     WeaponReplacementAsset* asset = OrcResolveUsableWeaponReplacementAssetForPed(ped, wt, allowRandom);
     return asset ? asset->key : std::string{};
+}
+
+bool OrcPinWeaponReplacementChoiceForPed(CPed* ped, int wt, const std::string& replacementKey) {
+    if (!ped || wt <= 0 || replacementKey.empty())
+        return false;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return false;
+    const std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
+    if (weaponLower.empty())
+        return false;
+
+    const std::string keyLower = OrcToLowerAscii(replacementKey);
+    int assetIndex = -1;
+    for (int i = 0; i < (int)g_weaponReplacementAssets.size(); ++i) {
+        if (OrcToLowerAscii(g_weaponReplacementAssets[(size_t)i].key) == keyLower) {
+            assetIndex = i;
+            break;
+        }
+    }
+    if (assetIndex < 0)
+        return false;
+
+    bool pinned = false;
+    const std::string pedPrefix = std::to_string(pedRef) + "|";
+    const std::string skinRaw = GetPedStdSkinDffName(ped);
+    if (!skinRaw.empty()) {
+        const std::string skinKey = MakeWeaponReplacementKey(weaponLower, OrcToLowerAscii(skinRaw));
+        auto itSkinPool = g_weaponReplacementRandomBySkin.find(skinKey);
+        if (itSkinPool != g_weaponReplacementRandomBySkin.end() && !itSkinPool->second.empty()) {
+            g_weaponReplacementRandomChoiceByPed[pedPrefix + "sr|" + skinKey] = assetIndex;
+            pinned = true;
+        }
+    }
+    auto itWPool = g_weaponReplacementRandomByWeapon.find(weaponLower);
+    if (itWPool != g_weaponReplacementRandomByWeapon.end() && !itWPool->second.empty()) {
+        g_weaponReplacementRandomChoiceByPed[pedPrefix + "wr|" + weaponLower] = assetIndex;
+        pinned = true;
+    }
+    return pinned;
+}
+
+void OrcCollectWeaponReplacementVariantKeys(int wt, std::vector<std::string>& outKeys) {
+    outKeys.clear();
+    const std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
+    if (weaponLower.empty())
+        return;
+    const std::string pref = std::string("wprand:") + weaponLower + ":";
+    outKeys.reserve(g_weaponReplacementAssets.size());
+    for (const WeaponReplacementAsset& asset : g_weaponReplacementAssets) {
+        if (asset.key.rfind(pref, 0) != 0)
+            continue;
+        outKeys.push_back(asset.key);
+    }
+    std::sort(outKeys.begin(), outKeys.end());
+    outKeys.erase(std::unique(outKeys.begin(), outKeys.end()), outKeys.end());
 }
 
 

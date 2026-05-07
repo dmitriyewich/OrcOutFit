@@ -3,6 +3,7 @@
 #include <string>
 #include <array>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 #include <cstdint>
 
@@ -45,6 +46,9 @@ struct HeldWeaponPoseCfg {
     float rx = 0.0f, ry = 0.0f, rz = 0.0f;
     float scale = 1.0f;
 };
+
+using HeldWeaponCustomOverrides = std::unordered_map<std::string, HeldWeaponPoseCfg>;
+using HeldWeaponCustomOverridesByWeapon = std::vector<HeldWeaponCustomOverrides>;
 
 struct CustomObjectCfg {
     std::string name;

@@ -5,6 +5,7 @@
 #include "orc_types.h"
 #include "orc_ui_shared.h"
 #include "orc_ui_bones.h"
+#include "orc_weapon_assets.h"
 
 #include "samp_bridge.h"
 
@@ -34,6 +35,9 @@ static std::vector<WeaponCfg> g_uiWeapon1;
 static std::vector<WeaponCfg> g_uiWeapon2;
 static std::vector<HeldWeaponPoseCfg> g_uiHeld1;
 static std::vector<HeldWeaponPoseCfg> g_uiHeld2;
+static HeldWeaponCustomOverridesByWeapon g_uiHeldCustom1;
+static HeldWeaponCustomOverridesByWeapon g_uiHeldCustom2;
+static std::string g_uiHeldCustomKey;
 static int g_uiWeaponSkinListIdx = 0;
 static bool g_uiWeaponBuffersReady = false;
 static bool g_uiWeaponSecondary = false;
@@ -73,7 +77,7 @@ static void SyncWeaponUiBuffersFromSkinPick() {
     std::vector<std::pair<std::string, int>> skins;
     OrcCollectPedSkins(skins);
     if (skins.empty()) {
-        OrcLoadWeaponPresetFile("", g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
+        OrcLoadWeaponPresetFile("", g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2, &g_uiHeldCustom1, &g_uiHeldCustom2);
         MarkWeaponUiBuffersReady();
         return;
     }
@@ -83,11 +87,18 @@ static void SyncWeaponUiBuffersFromSkinPick() {
     const std::string& dff = skins[(size_t)g_uiWeaponSkinListIdx].first;
     char wpath[MAX_PATH];
     if (ResolveWeaponsIniForSkinDff(dff.c_str(), wpath, sizeof(wpath)))
-        OrcLoadWeaponPresetFile(wpath, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
+        OrcLoadWeaponPresetFile(wpath, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2, &g_uiHeldCustom1, &g_uiHeldCustom2);
     else
-        OrcLoadWeaponPresetFile("", g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
+        OrcLoadWeaponPresetFile("", g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2, &g_uiHeldCustom1, &g_uiHeldCustom2);
     for (size_t i = 0; i < g_uiWeapon1.size() && i < g_cfg.size(); i++)
         g_uiWeapon1[i].name = g_cfg[i].name;
+    if (!g_uiHeldCustomKey.empty()) {
+        const HeldWeaponCustomOverridesByWeapon& tbl = g_uiWeaponSecondary ? g_uiHeldCustom2 : g_uiHeldCustom1;
+        if (g_uiWeaponIdx < 0 || g_uiWeaponIdx >= (int)tbl.size() ||
+            tbl[(size_t)g_uiWeaponIdx].find(g_uiHeldCustomKey) == tbl[(size_t)g_uiWeaponIdx].end()) {
+            g_uiHeldCustomKey.clear();
+        }
+    }
     MarkWeaponUiBuffersReady();
 }
 
@@ -150,6 +161,10 @@ void OrcWeaponsUiDrawWeaponsTab() {
     g_livePreviewHeld1.clear();
     g_livePreviewHeld2.clear();
     g_livePreviewHeldUseSecondary = false;
+    g_livePreviewHeldCustomForceActive = false;
+    g_livePreviewHeldCustomWeaponType = 0;
+    g_livePreviewHeldBaseForceVanilla = false;
+    g_livePreviewHeldBaseWeaponType = 0;
     if (skinRowOk) {
         g_livePreviewWeaponsActive = true;
         g_livePreviewWeaponSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
@@ -159,6 +174,13 @@ void OrcWeaponsUiDrawWeaponsTab() {
         g_livePreviewHeldSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
         g_livePreviewHeld1 = g_uiHeld1;
         g_livePreviewHeld2 = g_uiHeld2;
+        g_livePreviewHeldCustom1 = g_uiHeldCustom1;
+        g_livePreviewHeldCustom2 = g_uiHeldCustom2;
+        g_livePreviewHeldCustomKey = g_uiHeldCustomKey;
+        g_livePreviewHeldCustomWeaponType = g_uiWeaponIdx;
+        g_livePreviewHeldBaseWeaponType = g_uiWeaponIdx;
+        g_livePreviewHeldCustomForceActive = false;
+        g_livePreviewHeldBaseForceVanilla = false;
     }
 
     bool weaponHeldTabActiveThisFrame = false;
@@ -319,15 +341,6 @@ void OrcWeaponsUiDrawWeaponsTab() {
                     SaveAllWeaponsToIniFile(g_iniPath, g_cfg, g_cfg2);
                     InvalidatePerSkinWeaponCache();
                     SyncWeaponUiBuffersFromSkinPick();
-                    g_livePreviewWeaponsActive = false;
-                    g_livePreviewWeaponSkinDff.clear();
-                    g_livePreviewWeapon1.clear();
-                    g_livePreviewWeapon2.clear();
-                    g_livePreviewHeldActive = false;
-                    g_livePreviewHeldSkinDff.clear();
-                    g_livePreviewHeld1.clear();
-                    g_livePreviewHeld2.clear();
-                    g_livePreviewHeldUseSecondary = false;
                 }
                 CPlayerPed* pl = FindPlayerPed(0);
                 const bool blockSkinSave = pl && pl->m_nPedType == PED_TYPE_PLAYER1 &&
@@ -339,17 +352,8 @@ void OrcWeaponsUiDrawWeaponsTab() {
                         const std::string& dff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
                         char outPath[MAX_PATH];
                         _snprintf_s(outPath, _TRUNCATE, "%s\\%s.ini", g_gameWeaponsDir, dff.c_str());
-                        SaveAllWeaponsToIniFile(outPath, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
+                        SaveAllWeaponsToIniFile(outPath, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2, &g_uiHeldCustom1, &g_uiHeldCustom2);
                         InvalidatePerSkinWeaponCache();
-                        g_livePreviewWeaponsActive = false;
-                        g_livePreviewWeaponSkinDff.clear();
-                        g_livePreviewWeapon1.clear();
-                        g_livePreviewWeapon2.clear();
-                        g_livePreviewHeldActive = false;
-                        g_livePreviewHeldSkinDff.clear();
-                        g_livePreviewHeld1.clear();
-                        g_livePreviewHeld2.clear();
-                        g_livePreviewHeldUseSecondary = false;
                     }
                 }
 
@@ -469,12 +473,64 @@ void OrcWeaponsUiDrawWeaponsTab() {
                 g_uiWeaponSecondary = false;
             }
 
+            std::vector<std::string> heldCustomKeys;
+            OrcCollectWeaponReplacementVariantKeys(g_uiWeaponIdx, heldCustomKeys);
+            if (!heldCustomKeys.empty()) {
+                std::string previewCustom = g_uiHeldCustomKey.empty() ? WT(OrcTextId::DefaultHeldPose) : g_uiHeldCustomKey;
+                bool customSelectionChanged = false;
+                if (OrcUiBeginControlRow("held_custom_variant", WT(OrcTextId::CustomWeaponVariant))) {
+                    if (ImGui::BeginCombo("##value_held_custom", previewCustom.c_str())) {
+                        if (ImGui::Selectable(WT(OrcTextId::DefaultHeldPose), g_uiHeldCustomKey.empty())) {
+                            g_uiHeldCustomKey.clear();
+                            customSelectionChanged = true;
+                        }
+                        for (const std::string& key : heldCustomKeys) {
+                            const bool selected = (key == g_uiHeldCustomKey);
+                            if (ImGui::Selectable(key.c_str(), selected)) {
+                                g_uiHeldCustomKey = key;
+                                customSelectionChanged = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    OrcUiEndControlRow();
+                }
+                if (customSelectionChanged) {
+                    CPlayerPed* local = FindPlayerPed(0);
+                    if (local && g_uiWeaponIdx > 0 && !g_uiHeldCustomKey.empty())
+                        OrcPinWeaponReplacementChoiceForPed(local, g_uiWeaponIdx, g_uiHeldCustomKey);
+                }
+            } else {
+                g_uiHeldCustomKey.clear();
+                ImGui::TextDisabled("%s", WT(OrcTextId::NoCustomVariantForWeapon));
+            }
+
             ImGui::Separator();
             const bool canEditHeld = (activeHeldArr != nullptr && g_uiWeaponIdx >= 0 && g_uiWeaponIdx < activeHeldCount);
             if (!canEditHeld) {
                 ImGui::TextDisabled("%s", WT(OrcTextId::WeaponEditorUnavailable));
             } else {
-                HeldWeaponPoseCfg& ch = activeHeldArr[g_uiWeaponIdx];
+                HeldWeaponPoseCfg* chPtr = &activeHeldArr[g_uiWeaponIdx];
+                if (!g_uiHeldCustomKey.empty()) {
+                    HeldWeaponCustomOverridesByWeapon& customTbl = g_uiWeaponSecondary ? g_uiHeldCustom2 : g_uiHeldCustom1;
+                    if (g_uiWeaponIdx >= 0 && g_uiWeaponIdx < (int)customTbl.size()) {
+                        HeldWeaponCustomOverrides& byKey = customTbl[(size_t)g_uiWeaponIdx];
+                        auto it = byKey.find(g_uiHeldCustomKey);
+                        if (it == byKey.end()) {
+                            // Первый выбор custom-варианта: стартуем от базовой позы, чтобы
+                            // слайдеры сразу давали видимый результат и не упирались в disabled=0.
+                            HeldWeaponPoseCfg seed = activeHeldArr[g_uiWeaponIdx];
+                            if (seed.scale == 0.0f)
+                                seed.scale = 1.0f;
+                            seed.enabled = true;
+                            it = byKey.emplace(g_uiHeldCustomKey, seed).first;
+                        }
+                        chPtr = &it->second;
+                    }
+                }
+                HeldWeaponPoseCfg& ch = *chPtr;
+                if (ch.scale == 0.0f)
+                    ch.scale = 1.0f;
                 OrcUiCheckbox("held_enable", WT(OrcTextId::HeldAdjustEnabled), &ch.enabled);
                 OrcUiDragFloat("held_x", WT(OrcTextId::OffsetX), &ch.x, 0.005f, -2.0f, 2.0f, "%.3f");
                 OrcUiDragFloat("held_y", WT(OrcTextId::OffsetY), &ch.y, 0.005f, -2.0f, 2.0f, "%.3f");
@@ -501,17 +557,8 @@ void OrcWeaponsUiDrawWeaponsTab() {
                         for (const HeldWeaponPoseCfg& hh : g_uiHeld2)
                             if (!ValidateHeldCfg(hh)) heldAllOk = false;
                         if (heldAllOk)
-                            SaveAllWeaponsToIniFile(outPathH, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2);
+                            SaveAllWeaponsToIniFile(outPathH, g_uiWeapon1, g_uiWeapon2, &g_uiHeld1, &g_uiHeld2, &g_uiHeldCustom1, &g_uiHeldCustom2);
                         InvalidatePerSkinWeaponCache();
-                        g_livePreviewWeaponsActive = false;
-                        g_livePreviewWeaponSkinDff.clear();
-                        g_livePreviewWeapon1.clear();
-                        g_livePreviewWeapon2.clear();
-                        g_livePreviewHeldActive = false;
-                        g_livePreviewHeldSkinDff.clear();
-                        g_livePreviewHeld1.clear();
-                        g_livePreviewHeld2.clear();
-                        g_livePreviewHeldUseSecondary = false;
                     }
                 }
             }
@@ -591,6 +638,13 @@ void OrcWeaponsUiDrawWeaponsTab() {
         g_livePreviewWeapon2 = g_uiWeapon2;
         g_livePreviewHeld1 = g_uiHeld1;
         g_livePreviewHeld2 = g_uiHeld2;
+        g_livePreviewHeldCustom1 = g_uiHeldCustom1;
+        g_livePreviewHeldCustom2 = g_uiHeldCustom2;
+        g_livePreviewHeldCustomKey = g_uiHeldCustomKey;
+        g_livePreviewHeldCustomWeaponType = g_uiWeaponIdx;
+        g_livePreviewHeldBaseWeaponType = g_uiWeaponIdx;
+        g_livePreviewHeldCustomForceActive = !g_uiHeldCustomKey.empty();
+        g_livePreviewHeldBaseForceVanilla = weaponHeldTabActiveThisFrame && g_uiHeldCustomKey.empty();
         g_livePreviewHeldUseSecondary = g_uiWeaponSecondary && weaponHeldTabActiveThisFrame;
     }
 }

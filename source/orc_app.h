@@ -64,6 +64,15 @@ extern bool g_livePreviewHeldActive;
 extern std::string g_livePreviewHeldSkinDff;
 extern std::vector<HeldWeaponPoseCfg> g_livePreviewHeld1;
 extern std::vector<HeldWeaponPoseCfg> g_livePreviewHeld2;
+extern HeldWeaponCustomOverridesByWeapon g_livePreviewHeldCustom1;
+extern HeldWeaponCustomOverridesByWeapon g_livePreviewHeldCustom2;
+extern std::string g_livePreviewHeldCustomKey;
+extern int g_livePreviewHeldCustomWeaponType;
+extern bool g_livePreviewHeldCustomForceActive;
+/// Вкладка «В руке»: при выбранной "Базовая поза" форсируем vanilla mesh для локального ped,
+/// чтобы редактирование base-позы не шло поверх случайного `wprand` replacement.
+extern int g_livePreviewHeldBaseWeaponType;
+extern bool g_livePreviewHeldBaseForceVanilla;
 /// Вкладка «В руке»: пользователь крутит Held для строки «… 2» / второго набора — live preview читает `g_livePreviewHeld2`.
 extern bool g_livePreviewHeldUseSecondary;
 // Weapon types discovered in current game (weapon.dat / modded weapon.dat).
@@ -136,7 +145,10 @@ bool IsValidStandardObjectModel(int modelId);
 void SaveWeaponSection(int weaponIndex);
 void SaveWeaponSection2(int weaponIndex);
 void SaveAllWeaponsToIniFile(const char* iniPath, const std::vector<WeaponCfg>& w1, const std::vector<WeaponCfg>& w2,
-    const std::vector<HeldWeaponPoseCfg>* held1 = nullptr, const std::vector<HeldWeaponPoseCfg>* held2 = nullptr);
+    const std::vector<HeldWeaponPoseCfg>* held1 = nullptr,
+    const std::vector<HeldWeaponPoseCfg>* held2 = nullptr,
+    const HeldWeaponCustomOverridesByWeapon* heldCustom1 = nullptr,
+    const HeldWeaponCustomOverridesByWeapon* heldCustom2 = nullptr);
 void SaveSkinCfgToIni(const CustomSkinCfg& s);
 void SaveStandardSkinCfgToIni(const StandardSkinCfg& s);
 void SaveSkinModeIni();
@@ -149,7 +161,10 @@ void InvalidateStandardObjectSkinParamCache();
 void InvalidateStandardSkinLookupCache();
 
 void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, std::vector<WeaponCfg>& w2,
-    std::vector<HeldWeaponPoseCfg>* outHeld1 = nullptr, std::vector<HeldWeaponPoseCfg>* outHeld2 = nullptr);
+    std::vector<HeldWeaponPoseCfg>* outHeld1 = nullptr,
+    std::vector<HeldWeaponPoseCfg>* outHeld2 = nullptr,
+    HeldWeaponCustomOverridesByWeapon* outHeldCustom1 = nullptr,
+    HeldWeaponCustomOverridesByWeapon* outHeldCustom2 = nullptr);
 
 // ped.dat DFF basename for ped (LoadPedObject hook); empty if unknown.
 const char* OrcTryGetPedModelNameById(int modelId);
@@ -204,6 +219,8 @@ const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt);
 const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt);
 /// `secondary`: пресет с диска — вторая строка (twin / секции `*_2` в Weapons\<skin>.ini). Рантайм RWCB/слот пока всегда `false`.
 const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary);
+/// Совпадает ли выбранный в UI `Weapons\<picker>.ini` с реальным путём пресета педа (lookup/raw DFF сравнение, как в оружейном live-preview).
+bool OrcWeaponUiLivePreviewMatchesPedWeaponsIni(CPed* ped);
 /// Сброс live-preview оружия/«В руке», когда меню закрыто (иначе INI с диска может игнорироваться).
 void OrcClearWeaponUiLivePreviewWhenMenuClosed();
 /// Детальный лог, почему пресет held не активен (throttled внутри).
