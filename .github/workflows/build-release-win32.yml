@@ -45,12 +45,40 @@ jobs:
             const rawMessage = (commit.data?.commit?.message || "").trim();
             const subject = (rawMessage.split("\n")[0] || "manual dispatch").trim();
             const runName = `manual · ${ref} · Commit ${shortSha} ${subject} (#${context.runNumber})`;
-            await github.request("PATCH /repos/{owner}/{repo}/actions/runs/{run_id}", {
-              owner,
-              repo,
-              run_id: context.runId,
-              name: runName
-            });
+            try {
+              await github.rest.actions.getWorkflowRun({
+                owner,
+                repo,
+                run_id: context.runId
+              });
+            } catch (error) {
+              const status = error?.status || "unknown";
+              if (status === 403 || status === 404) {
+                core.info(`Skipping workflow run rename (status: ${status}) - token cannot access this run.`);
+                return;
+              }
+              core.warning(`Unexpected error while checking workflow run access (status: ${status}).`);
+              core.info(error?.message || String(error));
+              return;
+            }
+
+            try {
+              await github.request("PATCH /repos/{owner}/{repo}/actions/runs/{run_id}", {
+                owner,
+                repo,
+                run_id: context.runId,
+                name: runName
+              });
+              core.info(`Workflow run renamed to: ${runName}`);
+            } catch (error) {
+              const status = error?.status || "unknown";
+              if (status === 403 || status === 404) {
+                core.info(`Skipping workflow run rename (status: ${status}) - patch is not allowed.`);
+                return;
+              }
+              core.warning(`Failed to rename workflow run (status: ${status}). Keeping default run-name.`);
+              core.info(error?.message || String(error));
+            }
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2

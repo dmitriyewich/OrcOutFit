@@ -94,7 +94,7 @@
     X(SkinsPathFormat, "Скины: %s", "Skins: %s") \
     X(ReloadIni, "Перезагрузить INI", "Reload INI") \
     X(RescanObjects, "Пересканировать объекты", "Rescan objects") \
-    X(PedSkinEditingTarget, "Скин ped (цель редактирования) - из ped.dat / кеша LoadPedObject", "Ped skin (editing target) - from ped.dat / LoadPedObject cache") \
+    X(PedSkinEditingTarget, "Скин ped для редактирования (из ped.dat)", "Ped skin to edit (from ped.dat)") \
     X(MySkin, "Мой скин", "My skin") \
     X(NoPedModelsInCacheReconnect, "В кеше пока нет моделей ped (загрузите мир / переподключитесь).", "No ped models in cache yet (load game world / reconnect).") \
     X(NoPedModelsInCache, "В кеше пока нет моделей ped.", "No ped models in cache yet.") \
