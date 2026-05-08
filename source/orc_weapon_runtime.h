@@ -45,6 +45,8 @@ void OrcWeaponEnsurePedModelHooksInstalled();
 void OrcWeaponEnsureFireFxHooksInstalled();
 /// Мировая дельта точки `m_vecFireOffset` (как в `muzzlePosn`): Held − ванильная кость R_Hand; `false` если Held выкл. или нет данных.
 bool OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(CPed* ped, int wt, RwV3d* outDw);
+/// Клумп, в котором реально ищется dummy `gunflash` при Guns held replacement: если в слоте сток, а меш — клон, возвращается клон (RWCB / DoGunFlash).
+RpClump* OrcPedResolveGunflashTargetClump(CPed* ped);
 /// После подмены `m_pWeaponObject` (клон/сток) перевыставить `m_pGunflashObject` на кадр `"gunflash"` в текущем клумпе (как в ванильном `AddWeaponModel`).
 void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped);
 /// Сдвиг кадра `gunflash` на muzzle-дельту Held (сброс дедупа на клумпе); после `OrcPedSyncGunflashFrameFromCurrentWeaponObject` в `Fire` / RWCB.

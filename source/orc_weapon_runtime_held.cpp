@@ -299,6 +299,48 @@ static RwObject* OrcResolveHeldWeaponRwObject(CPed* ped) {
     return it->second.rwObject;
 }
 
+RpClump* OrcPedResolveGunflashTargetClump(CPed* ped) {
+    if (!ped)
+        return nullptr;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return nullptr;
+    auto tryState = [&](const HeldWeaponReplacementState& st) -> RpClump* {
+        if (!st.rwObject || st.rwObject->type != rpCLUMP)
+            return nullptr;
+        // Слот временно на стоке (IK / RemoveWeaponModel), а отрисовка и dummy — у клона замены.
+        if (st.originalObject && ped->m_pWeaponObject == st.originalObject)
+            return reinterpret_cast<RpClump*>(st.rwObject);
+        if (ped->m_pWeaponObject == st.rwObject)
+            return reinterpret_cast<RpClump*>(st.rwObject);
+        return nullptr;
+    };
+    auto it = g_heldWeaponReplacements.find(pedRef);
+    if (it != g_heldWeaponReplacements.end()) {
+        if (RpClump* c = tryState(it->second))
+            return c;
+    }
+    CPlayerPed* fp = FindPlayerPed(0);
+    if (fp && ped != fp && samp_bridge::IsSampBuildKnown()) {
+        for (const auto& kv : g_heldWeaponReplacements) {
+            CPed* owner = CPools::GetPed(kv.first);
+            if (!owner)
+                continue;
+            if (OrcSampMirrorReplacementOwnerPedRef(owner) != pedRef)
+                continue;
+            if (RpClump* c = tryState(kv.second))
+                return c;
+        }
+    }
+    RwObject* wo = ped->m_pWeaponObject;
+    if (wo && wo->type == rpCLUMP)
+        return reinterpret_cast<RpClump*>(wo);
+    RwObject* repl = OrcResolveActiveReplacementWeaponObject(ped);
+    if (repl && repl->type == rpCLUMP)
+        return reinterpret_cast<RpClump*>(repl);
+    return nullptr;
+}
+
 // `Events::pedRenderEvent` wraps an inner CALL inside `CPed::Render`, not the whole function. Restoring the
 // stock `m_pWeaponObject` in the event's "after" callback runs *before* the rest of `CPed::Render` draws the
 // vanilla held weapon, so the engine paints stock on top. Queue the stock pointer and write it in
@@ -872,8 +914,10 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
         return false;
     }
 
-    if (applyGunflashMuzzleDeltaToClump && obj->type == rpCLUMP)
-        OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, reinterpret_cast<RpClump*>(obj), wt);
+    if (applyGunflashMuzzleDeltaToClump) {
+        if (RpClump* gfClump = OrcPedResolveGunflashTargetClump(ped))
+            OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, gfClump, wt);
+    }
 
     if (g_heldPoseDebug) {
         OrcLogInfoThrottled(
@@ -991,10 +1035,9 @@ void OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(CPed* ped, int wt) {
     const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
     if (!h.enabled)
         return;
-    RwObject* wo = OrcResolveHeldWeaponRwObject(ped);
-    if (!wo || wo->type != rpCLUMP)
+    RpClump* clump = OrcPedResolveGunflashTargetClump(ped);
+    if (!clump)
         return;
-    RpClump* clump = reinterpret_cast<RpClump*>(wo);
     const uintptr_t ck = reinterpret_cast<uintptr_t>(clump);
     s_gunflashMuzzleNudgeAppliedClumps.erase(ck);
     RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
@@ -1211,14 +1254,12 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel)
         OrcLogHeldPoseCfgDisabled(ped, wtSel);
         return false;
     }
-    RwObject* woRwcb = OrcResolveHeldWeaponRwObject(ped);
-    if (woRwcb && woRwcb->type == rpCLUMP)
-        OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, reinterpret_cast<RpClump*>(woRwcb), wtSel);
-    if (woRwcb && woRwcb->type == rpCLUMP) {
-        RwFrame* gunf = CClumpModelInfo::GetFrameFromName(reinterpret_cast<RpClump*>(woRwcb), "gunflash");
-        if (gunf && OrcHeldAtomicFrameIsUnderGunflashDummy(af, gunf))
-            return false;
-    }
+    RpClump* gfClump = OrcPedResolveGunflashTargetClump(ped);
+    if (gfClump)
+        OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, gfClump, wtSel);
+    RwFrame* gunf = gfClump ? CClumpModelInfo::GetFrameFromName(gfClump, "gunflash") : nullptr;
+    if (gunf && OrcHeldAtomicFrameIsUnderGunflashDummy(af, gunf))
+        return false;
     OrcHeldPoseInvalidateBaselineForRwFrame(af);
     if (!OrcTryApplyHeldPoseOneFrame(af, h)) {
         OrcLogInfoThrottled(493, 2500u, "held pose: skip apply failed (rwcbAtomic) wt=%d pedRef=%d", wtSel, pedRef);

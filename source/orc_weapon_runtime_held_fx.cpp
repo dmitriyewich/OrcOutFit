@@ -34,36 +34,30 @@ static bool g_weaponFireFxHooksInstalled = false;
 void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped) {
     if (!ped)
         return;
-    RwObject* wo = ped->m_pWeaponObject;
+    RwObject* const woSlot = ped->m_pWeaponObject;
     RwFrame* const prevGf = ped->m_pGunflashObject;
-    if (!wo) {
+    RpClump* clump = OrcPedResolveGunflashTargetClump(ped);
+    if (!clump) {
         ped->m_pGunflashObject = nullptr;
         if (prevGf && g_orcLogLevel >= OrcLogLevel::Info) {
-            OrcLogInfoThrottled(937u, 4000u, "gunflash: cleared (weapon slot null) pedRef=%d", CPools::GetPedRef(ped));
+            OrcLogInfoThrottled(937u, 4000u, "gunflash: cleared (no target clump) pedRef=%d slotWo=%p",
+                CPools::GetPedRef(ped), woSlot);
         }
         return;
     }
-    if (wo->type != rpCLUMP) {
-        ped->m_pGunflashObject = nullptr;
-        if (prevGf && g_orcLogLevel >= OrcLogLevel::Info) {
-            OrcLogInfoThrottled(936u, 6000u, "gunflash: cleared (weapon not clump type=%d) pedRef=%d wo=%p",
-                static_cast<int>(wo->type), CPools::GetPedRef(ped), wo);
-        }
-        return;
-    }
-    RpClump* clump = reinterpret_cast<RpClump*>(wo);
     RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
     ped->m_pGunflashObject = gf;
     const int pedRef = CPools::GetPedRef(ped);
     if (g_orcLogLevel >= OrcLogLevel::Info) {
         if (gf != prevGf) {
-            OrcLogInfoThrottled(938u, 2500u, "gunflash: frame rebound pedRef=%d wo=%p gf=%p (was %p)", pedRef, wo, gf,
+            OrcLogInfoThrottled(938u, 2500u,
+                "gunflash: frame rebound pedRef=%d clump=%p slotWo=%p gf=%p (was %p)", pedRef, clump, woSlot, gf,
                 prevGf);
         }
         if (!gf) {
             OrcLogInfoThrottled(939u, 12000u,
-                "gunflash: no \"gunflash\" frame in weapon clump pedRef=%d wo=%p (custom mesh may omit dummy)", pedRef,
-                wo);
+                "gunflash: no \"gunflash\" frame in weapon clump pedRef=%d clump=%p slotWo=%p (custom mesh may omit dummy)",
+                pedRef, clump, woSlot);
         }
     }
 }
