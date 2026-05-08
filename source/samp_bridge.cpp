@@ -9,6 +9,8 @@
 
 #include "plugin.h"
 #include "CPlayerPed.h"
+#include "CPed.h"
+#include "eEntityType.h"
 
 #include "samp_bridge.h"
 #include "orc_log.h"
@@ -178,6 +180,62 @@ void Poll(const char* command, ToggleCallback onToggle) {
     }
     g_state.commandHookInstalled = true;
     OrcLogInfo("samp_bridge: chat command hook OK (client %s)", g_state.version->name);
+}
+
+bool IsLocalPlayerGtaPed(const void* gtaPed) {
+    if (!gtaPed || !g_state.version || !g_state.base)
+        return false;
+    CPlayerPed* local = FindPlayerPed(0);
+    if (!local)
+        return false;
+    if (gtaPed == local)
+        return true;
+    __try {
+        std::uint32_t netGameRef = 0;
+        switch (g_state.version->version) {
+        case SampVersion::R1: netGameRef = 0x0021A0F8; break;
+        case SampVersion::R2: netGameRef = 0x0021A100; break;
+        case SampVersion::R3:
+        case SampVersion::R3_1: netGameRef = 0x0026E8DC; break;
+        case SampVersion::R4:
+        case SampVersion::R4_2: netGameRef = 0x0026EA0C; break;
+        case SampVersion::R5_1: netGameRef = 0x0026EB94; break;
+        case SampVersion::DL_R1: netGameRef = 0x002ACA24; break;
+        default: return false;
+        }
+        void* netGame = *reinterpret_cast<void**>(g_state.base + netGameRef);
+        if (!netGame)
+            return false;
+        auto getPlayerPool = reinterpret_cast<GetPlayerPoolFn>(g_state.base + g_state.version->getPlayerPoolOffset);
+        void* playerPool = getPlayerPool(netGame);
+        if (!playerPool)
+            return false;
+        auto idFind = reinterpret_cast<IdFindFn>(g_state.base + g_state.version->idFindOffset);
+        unsigned short id = idFind(playerPool, gtaPed);
+        unsigned short localId = 0xFFFF;
+        if (g_state.version->localPlayerIdOffset != 0) {
+            localId = *reinterpret_cast<unsigned short*>(
+                reinterpret_cast<std::uint8_t*>(playerPool) + g_state.version->localPlayerIdOffset);
+        }
+        if (localId != 0xFFFF && id != 0xFFFF && id == localId)
+            return true;
+
+        const CPed* p = reinterpret_cast<const CPed*>(gtaPed);
+        if (p->m_nType != ENTITY_TYPE_PED)
+            return false;
+        CVector pa = local->GetPosition();
+        CVector pb = p->GetPosition();
+        const float dx = pa.x - pb.x, dy = pa.y - pb.y, dz = pa.z - pb.z;
+        constexpr float kMaxDist = 0.15f;
+        if (dx * dx + dy * dy + dz * dz > kMaxDist * kMaxDist)
+            return false;
+        if ((int)local->m_nSelectedWepSlot != (int)p->m_nSelectedWepSlot)
+            return false;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 bool GetPedNickname(const void* gtaPed, char* outName, int outNameLen, bool* isLocal) {

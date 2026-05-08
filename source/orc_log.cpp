@@ -103,8 +103,8 @@ void OrcLogInfo(const char* fmt, ...) {
 
 void OrcLogInfoThrottled(int slot, unsigned intervalMs, const char* fmt, ...) {
     if (g_orcLogLevel < OrcLogLevel::Info || !fmt) return;
-    // Large enough for "numeric" slot tags (e.g. 401, 404, 406) used across modules; each must stay distinct.
-    enum { kMaxSlots = 512 };
+    // Numeric slot tags are used across modules (throttle buckets). Must stay within range.
+    enum { kMaxSlots = 1024 };
     if (slot < 0 || slot >= kMaxSlots)
         slot = 0;
     static DWORD s_lastTick[kMaxSlots] = {};

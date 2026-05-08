@@ -1323,6 +1323,11 @@ bool ResolveWeaponsPresetIniForPed(CPed* ped, char* outPath, size_t outPathChars
 static void EnsureWeaponSkinOverrideLoaded(const std::string& skinKeyLower, const char* iniPath) {
     if (skinKeyLower.empty() || !iniPath || !iniPath[0]) return;
 
+    // Парс пресета идёт в воркере; готовый результат попадает в `g_completed` до `drawingEvent`.
+    // RWCB может вызвать `GetHeldPoseForPed` раньше — без drain здесь `LoadInFlightForKey`
+    // блокирует Ensure, а карты custom held ещё пусты → кадр без оффсета и неверная точка FX.
+    OrcWeaponSkinPresetDrainCompletedLoads();
+
     const bool cached = g_weaponSkinOv1.find(skinKeyLower) != g_weaponSkinOv1.end();
 
     if (cached) {
@@ -1357,6 +1362,29 @@ static void EnsureWeaponSkinOverrideLoaded(const std::string& skinKeyLower, cons
         g_weaponSkinHeldOv2[skinKeyLower] = std::move(h2);
         g_weaponSkinHeldCustomOv1[skinKeyLower] = std::move(ch1);
         g_weaponSkinHeldCustomOv2[skinKeyLower] = std::move(ch2);
+        return;
+    }
+
+    // Пока async только в `g_pending`, старый Ensure выходил по `LoadInFlightForKey` и RWCB видел пустые
+    // `g_weaponSkinHeld*` → `no base held section` / один кадр без custom held (орcoutfit ~701).
+    if (g_weaponSkinOv1.find(skinKeyLower) == g_weaponSkinOv1.end()) {
+        std::vector<WeaponCfg> w1 = g_cfg;
+        std::vector<WeaponCfg> w2 = g_cfg2;
+        std::vector<HeldWeaponPoseCfg> h1, h2;
+        HeldWeaponCustomOverridesByWeapon ch1, ch2;
+        const OrcIniDocument* presetDoc = OrcIniCacheGet(iniPath);
+        OrcIniDocument emptyDoc;
+        const OrcIniDocument& docUse = (presetDoc && presetDoc->IsLoaded()) ? *presetDoc : emptyDoc;
+        OrcBuildWeaponSkinPresetFromIniDocument(docUse, g_cfg, g_cfg2, w1, w2, h1, h2, &ch1, &ch2);
+        g_weaponSkinOv1[skinKeyLower] = std::move(w1);
+        g_weaponSkinOv2[skinKeyLower] = std::move(w2);
+        g_weaponSkinHeldOv1[skinKeyLower] = std::move(h1);
+        g_weaponSkinHeldOv2[skinKeyLower] = std::move(h2);
+        g_weaponSkinHeldCustomOv1[skinKeyLower] = std::move(ch1);
+        g_weaponSkinHeldCustomOv2[skinKeyLower] = std::move(ch2);
+        const uint64_t wtimeSnap = OrcWeaponSkinIniLastWriteTicks(iniPath);
+        if (wtimeSnap != 0)
+            g_weaponSkinIniLoadedWriteTime[skinKeyLower] = wtimeSnap;
         return;
     }
 
@@ -2267,11 +2295,13 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_module = module;
         DisableThreadLibraryCalls(module);
         LogInit();
-        OrcLogInfo("DllMain PROCESS_ATTACH build=%s %s ini=%s", __DATE__, __TIME__, g_iniPath);
+        OrcLogInfo("DllMain PROCESS_ATTACH build=%s %s weaponRuntime=%s ini=%s", __DATE__, __TIME__,
+            OrcWeaponRuntimeCompileStamp(), g_iniPath);
         // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon.dat load.
         OrcWeaponsEnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();
         OrcWeaponEnsurePedModelHooksInstalled();
+        OrcWeaponEnsureFireFxHooksInstalled();
         OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
         OrcTextureRemapInstallHooks();
     }

@@ -29,6 +29,9 @@ void OrcDestroyRenderedWeapon(RenderedWeapon& r);
 void OrcWeaponClearLocalRendered();
 void OrcWeaponClearOtherPedsRendered();
 void OrcClearAllWeaponReplacementInstances();
+/// После `DiscoverWeaponReplacements` заранее создаёт RwObject клона в `g_heldWeaponReplacements` без подмены `m_pWeaponObject`
+/// (полный `OrcPrepareHeldWeaponReplacementBefore` только из `pedRenderEvent`, иначе возможен AV в отрисовке).
+void OrcHeldWeaponReplacementWarmupAfterDiscover();
 
 void OrcPruneHeldWeaponReplacementInstances();
 
@@ -38,6 +41,8 @@ void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* 
 int OrcRenderPedWeapons(CPed* ped, RenderedWeapon* arr);
 
 void OrcWeaponEnsurePedModelHooksInstalled();
+/// Хуки `CWeapon::Fire` / `FireInstantHit`: смещение `muzzlePosn` по Held-позе (FX выстрела: дым, гильзы и т.п.).
+void OrcWeaponEnsureFireFxHooksInstalled();
 /// Same weapon-type resolution path as held replacement / Guns TXD (`m_aWeapons`, `m_nWeaponModelId`, saved weapon).
 int OrcResolveWeaponHeldVisualWeaponType(CPed* ped);
 /// If ped slots read empty but Guns held clone exists (SA:MP), reuse its weapon type for HUD icon resolution.
@@ -54,3 +59,6 @@ void OrcHeldPoseBeginSimFrame();
 /// Периодический `held status:` + при `HeldWeaponTrace` уже логируются хуки из `orc_weapon_runtime.cpp`.
 void OrcHeldWeaponTraceGameProcessTick();
 bool OrcApplyHeldWeaponPoseAdjust(CPed* ped);
+
+/// `__DATE__`/`__TIME__` из `orc_weapon_runtime.cpp` (при инкрементальной сборке может отличаться от строки в DllMain).
+const char* OrcWeaponRuntimeCompileStamp();

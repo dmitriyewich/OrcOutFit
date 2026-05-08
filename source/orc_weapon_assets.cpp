@@ -411,6 +411,7 @@ void DiscoverWeaponReplacements() {
         g_weaponReplacementStats.randomWeaponWeapons,
         g_weaponReplacementStats.randomSkinWeapons,
         g_weaponReplacementStats.nickWeapons);
+    OrcHeldWeaponReplacementWarmupAfterDiscover();
 }
 
 WeaponReplacementStats OrcGetWeaponReplacementStats() {
