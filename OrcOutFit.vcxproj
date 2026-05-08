@@ -106,6 +106,10 @@
     <ClCompile Include="source\orc_path.cpp" />
     <ClCompile Include="source\orc_weapon_assets.cpp" />
     <ClCompile Include="source\orc_weapon_runtime.cpp" />
+    <ClCompile Include="source\orc_weapon_runtime_body.cpp" />
+    <ClCompile Include="source\orc_weapon_runtime_held.cpp" />
+    <ClCompile Include="source\orc_weapon_runtime_held_fx.cpp" />
+    <ClCompile Include="source\orc_weapon_runtime_hud.cpp" />
     <ClCompile Include="source\orc_render.cpp" />
     <ClCompile Include="source\orc_ui_bones.cpp" />
     <ClCompile Include="source\orc_weapons.cpp" />
