@@ -41,10 +41,14 @@ void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* 
 int OrcRenderPedWeapons(CPed* ped, RenderedWeapon* arr);
 
 void OrcWeaponEnsurePedModelHooksInstalled();
-/// Хуки `CWeapon::Fire` / `FireInstantHit`: смещение `muzzlePosn` по Held-позе; синхронизация `m_pGunflashObject` с текущим клумпом в `orc_weapon_runtime_held_fx.cpp`.
+/// Хуки `CWeapon::Fire` / `FireInstantHit`: смещение `muzzlePosn` по Held-позе; синхронизация `m_pGunflashObject` в `orc_weapon_runtime_held_fx.cpp`.
 void OrcWeaponEnsureFireFxHooksInstalled();
+/// Мировая дельта точки `m_vecFireOffset` (как в `muzzlePosn`): Held − ванильная кость R_Hand; `false` если Held выкл. или нет данных.
+bool OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(CPed* ped, int wt, RwV3d* outDw);
 /// После подмены `m_pWeaponObject` (клон/сток) перевыставить `m_pGunflashObject` на кадр `"gunflash"` в текущем клумпе (как в ванильном `AddWeaponModel`).
 void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped);
+/// Сдвиг кадра `gunflash` на muzzle-дельту Held (сброс дедупа на клумпе); после `OrcPedSyncGunflashFrameFromCurrentWeaponObject` в `Fire` / RWCB.
+void OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(CPed* ped, int wt);
 /// Same weapon-type resolution path as held replacement / Guns TXD (`m_aWeapons`, `m_nWeaponModelId`, saved weapon).
 int OrcResolveWeaponHeldVisualWeaponType(CPed* ped);
 /// If ped slots read empty but Guns held clone exists (SA:MP), reuse its weapon type for HUD icon resolution.

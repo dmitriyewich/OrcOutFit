@@ -44,6 +44,11 @@
 #include "samp_bridge.h"
 
 using namespace plugin;
+
+static RwFrame* OrcRwFrameGetParent(RwFrame* f);
+static void OrcHeldGunflashMuzzleDeltaResetForSimTick();
+static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump, int wt);
+
 static bool g_pedWeaponModelHooksInstalled = false;
 using AddWeaponModel_t = void(__thiscall*)(CPed*, int);
 using RemoveWeaponModel_t = void(__thiscall*)(CPed*, int);
@@ -701,14 +706,14 @@ struct HeldClumpApplyCtx {
     float logAtZ = 0.0f;
 };
 
-/// Кадр атомика — сам dummy `gunflash` или потомок в иерархии (Held на этих узлах ломает DoGunFlash/альфу).
+/// Кадр атомика — сам dummy `gunflash` или потомок: на них **не** крутим `OrcTryApplyHeldPoseOneFrame`
+/// (локальные LTMs ≠ база «оружие в руке» — ломает DoGunFlash / альфу). Смещение вспышки — отдельно через muzzle-дельту.
 static bool OrcHeldAtomicFrameIsUnderGunflashDummy(RwFrame* atomicFrame, RwFrame* gunflashFrame) {
     if (!atomicFrame || !gunflashFrame)
         return false;
     constexpr int kMaxSteps = 64;
     int steps = 0;
-    for (RwFrame* x = atomicFrame; x && steps < kMaxSteps;
-         x = reinterpret_cast<RwFrame*>(plugin::GetObjectParent(reinterpret_cast<RwObject*>(x))), ++steps) {
+    for (RwFrame* x = atomicFrame; x && steps < kMaxSteps; x = OrcRwFrameGetParent(x), ++steps) {
         if (x == gunflashFrame)
             return true;
     }
@@ -769,6 +774,7 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
     int heldPoseAtomCount = 0;
     int heldPoseOkCount = 0;
     const char* heldPoseTgt = "atomic";
+    bool applyGunflashMuzzleDeltaToClump = false;
     float logAtX = 0.0f;
     float logAtY = 0.0f;
     float logAtZ = 0.0f;
@@ -828,6 +834,7 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
                 }
             } else {
                 heldPoseTgt = "replEachAtomic";
+                applyGunflashMuzzleDeltaToClump = true;
             }
         } else {
             HeldClumpApplyCtx ctx{};
@@ -857,12 +864,16 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
                 }
             } else {
                 heldPoseTgt = "eachAtomic";
+                applyGunflashMuzzleDeltaToClump = true;
             }
         }
     } else {
         OrcLogInfoThrottled(434, 3000u, "held pose: skip unknown obj type phase=%s t=%d wt=%d", phase, (int)obj->type, wt);
         return false;
     }
+
+    if (applyGunflashMuzzleDeltaToClump && obj->type == rpCLUMP)
+        OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, reinterpret_cast<RpClump*>(obj), wt);
 
     if (g_heldPoseDebug) {
         OrcLogInfoThrottled(
@@ -950,6 +961,98 @@ static RwFrame* OrcRwFrameGetParent(RwFrame* f) {
     if (!f)
         return nullptr;
     return reinterpret_cast<RwFrame*>(plugin::GetObjectParent(reinterpret_cast<RwObject*>(f)));
+}
+
+/// `dw` в мировых осях → приращение `pos` дочернего `RwFrame` в локали родителя (ортогональная часть `parentLtm`).
+static RwV3d OrcRwDeltaWorldToParentLocalPos(const RwMatrix* parentLtm, const RwV3d& dw) {
+    RwV3d o{};
+    if (!parentLtm) {
+        o = dw;
+        return o;
+    }
+    o.x = parentLtm->right.x * dw.x + parentLtm->right.y * dw.y + parentLtm->right.z * dw.z;
+    o.y = parentLtm->up.x * dw.x + parentLtm->up.y * dw.y + parentLtm->up.z * dw.z;
+    o.z = parentLtm->at.x * dw.x + parentLtm->at.y * dw.y + parentLtm->at.z * dw.z;
+    return o;
+}
+
+// За один `gameProcess`-тик: не копим сдвиг на `gunflash` и не дублируем между preRw / RWCB.
+static std::unordered_set<uintptr_t> s_gunflashMuzzleNudgeAppliedClumps;
+static std::unordered_map<uintptr_t, RwV3d> s_gunflashOrigLocalByGfFrame;
+
+static void OrcHeldGunflashMuzzleDeltaResetForSimTick() {
+    s_gunflashMuzzleNudgeAppliedClumps.clear();
+    s_gunflashOrigLocalByGfFrame.clear();
+}
+
+void OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(CPed* ped, int wt) {
+    if (!g_enabled || !ped || wt <= 0)
+        return;
+    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
+    if (!h.enabled)
+        return;
+    RwObject* wo = OrcResolveHeldWeaponRwObject(ped);
+    if (!wo || wo->type != rpCLUMP)
+        return;
+    RpClump* clump = reinterpret_cast<RpClump*>(wo);
+    const uintptr_t ck = reinterpret_cast<uintptr_t>(clump);
+    s_gunflashMuzzleNudgeAppliedClumps.erase(ck);
+    RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+    if (gf)
+        s_gunflashOrigLocalByGfFrame.erase(reinterpret_cast<uintptr_t>(gf));
+    OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, clump, wt);
+}
+
+static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump, int wt) {
+    if (!g_enabled || !ped || !clump || wt <= 0)
+        return;
+    const uintptr_t ck = reinterpret_cast<uintptr_t>(clump);
+    if (s_gunflashMuzzleNudgeAppliedClumps.count(ck) != 0)
+        return;
+    RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+    if (!gf)
+        return;
+    RwV3d dw{};
+    if (!OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(ped, wt, &dw))
+        return;
+    const float d2 = dw.x * dw.x + dw.y * dw.y + dw.z * dw.z;
+    if (d2 < 1e-12f)
+        return;
+    RwFrame* par = OrcRwFrameGetParent(gf);
+    const RwMatrix* parLtm = par ? RwFrameGetLTM(par) : nullptr;
+    const RwV3d dpar = OrcRwDeltaWorldToParentLocalPos(parLtm, dw);
+    RwMatrix* Lm = RwFrameGetMatrix(gf);
+    // У dummy gunflash / FX-атомиков матрица часто почти вырождена по осям — `OrcRwMatrixAxesNonDegenerate` режет nudge целиком.
+    if (!Lm || !OrcRwMatrixFinite(Lm)) {
+        if (g_orcLogLevel >= OrcLogLevel::Info) {
+            OrcLogInfoThrottled(941u, 4000u,
+                "held gunflash: muzzle delta skip (bad Lm) pedRef=%d wt=%d clump=%p gf=%p dW=(%.4f,%.4f,%.4f)",
+                CPools::GetPedRef(ped), wt, clump, gf, dw.x, dw.y, dw.z);
+        }
+        return;
+    }
+    const uintptr_t gfk = reinterpret_cast<uintptr_t>(gf);
+    if (s_gunflashOrigLocalByGfFrame.find(gfk) == s_gunflashOrigLocalByGfFrame.end()) {
+        RwV3d o{ Lm->pos.x, Lm->pos.y, Lm->pos.z };
+        s_gunflashOrigLocalByGfFrame.emplace(gfk, o);
+    }
+    const RwV3d& orig = s_gunflashOrigLocalByGfFrame[gfk];
+    __try {
+        Lm->pos.x = orig.x + dpar.x;
+        Lm->pos.y = orig.y + dpar.y;
+        Lm->pos.z = orig.z + dpar.z;
+        RwMatrixUpdate(Lm);
+        RwFrameUpdateObjects(gf);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OrcHeldMaybeApplyGunflashFrameMuzzleDelta: SEH ex=0x%08X", GetExceptionCode());
+        return;
+    }
+    s_gunflashMuzzleNudgeAppliedClumps.insert(ck);
+    if (g_orcLogLevel >= OrcLogLevel::Info) {
+        OrcLogInfoThrottled(940u, 1200u,
+            "held gunflash: muzzle delta nudge pedRef=%d wt=%d clump=%p gf=%p dW=(%.4f,%.4f,%.4f) dPar=(%.4f,%.4f,%.4f)",
+            CPools::GetPedRef(ped), wt, clump, gf, dw.x, dw.y, dw.z, dpar.x, dpar.y, dpar.z);
+    }
 }
 
 static bool OrcAtomicBelongsToClump(RpAtomic* atomic, RpClump* clump) {
@@ -1096,12 +1199,6 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel)
     RwFrame* af = RpAtomicGetFrame(atomic);
     if (!af)
         return false;
-    RwObject* woRwcb = OrcResolveHeldWeaponRwObject(ped);
-    if (woRwcb && woRwcb->type == rpCLUMP) {
-        RwFrame* gunf = CClumpModelInfo::GetFrameFromName(reinterpret_cast<RpClump*>(woRwcb), "gunflash");
-        if (gunf && OrcHeldAtomicFrameIsUnderGunflashDummy(af, gunf))
-            return false;
-    }
     const int pedRef = CPools::GetPedRef(ped);
     const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wtSel, false);
     if (g_heldPoseDebug || g_heldWeaponTrace >= 2) {
@@ -1113,6 +1210,14 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel)
     if (!h.enabled) {
         OrcLogHeldPoseCfgDisabled(ped, wtSel);
         return false;
+    }
+    RwObject* woRwcb = OrcResolveHeldWeaponRwObject(ped);
+    if (woRwcb && woRwcb->type == rpCLUMP)
+        OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, reinterpret_cast<RpClump*>(woRwcb), wtSel);
+    if (woRwcb && woRwcb->type == rpCLUMP) {
+        RwFrame* gunf = CClumpModelInfo::GetFrameFromName(reinterpret_cast<RpClump*>(woRwcb), "gunflash");
+        if (gunf && OrcHeldAtomicFrameIsUnderGunflashDummy(af, gunf))
+            return false;
     }
     OrcHeldPoseInvalidateBaselineForRwFrame(af);
     if (!OrcTryApplyHeldPoseOneFrame(af, h)) {
@@ -1571,6 +1676,7 @@ void OrcHeldWeaponTraceGameProcessTick() {
 
 void OrcHeldPoseBeginSimFrame() {
     ++s_heldPrepSimSerial;
+    OrcHeldGunflashMuzzleDeltaResetForSimTick();
     s_heldPreRwDrawAppliedPedRefs.clear();
     s_heldPoseEngineBaselineByFrame.clear();
     s_heldPreRwNearbyPeds.clear();
@@ -1603,6 +1709,8 @@ static void __cdecl RenderWeaponPedsForPC_Detour() {
             static_cast<unsigned long long>(s_heldRwpfcBatchCounter), static_cast<unsigned>(CTimer::m_snTimeInMilliseconds));
     }
     s_heldPoseEngineBaselineByFrame.clear();
+    // Разрешаем повторный nudge gunflash в следующем RWCB-проходе (зеркала/доп. батчи), не сбрасывая snap `orig` за тик.
+    s_gunflashMuzzleNudgeAppliedClumps.clear();
     if (g_RenderWeaponPedsForPC_Orig)
         g_RenderWeaponPedsForPC_Orig();
 }

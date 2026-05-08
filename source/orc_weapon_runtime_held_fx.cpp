@@ -68,6 +68,27 @@ void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped) {
     }
 }
 
+static bool OrcComputeVanillaMuzzleWorldForPed(CPed* ped, int wt, CVector& out) {
+    if (!ped || wt <= 0)
+        return false;
+    RwMatrix* bone = OrcGetBoneMatrix(ped, BONE_R_HAND);
+    if (!bone)
+        return false;
+    const unsigned char skill = static_cast<unsigned char>(ped->GetWeaponSkill(static_cast<eWeaponType>(wt)));
+    CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), skill);
+    if (!wi)
+        return false;
+    RwMatrix M{};
+    std::memcpy(&M, bone, sizeof(RwMatrix));
+    const float vx = wi->m_vecFireOffset.x;
+    const float vy = wi->m_vecFireOffset.y;
+    const float vz = wi->m_vecFireOffset.z;
+    out.x = M.right.x * vx + M.up.x * vy + M.at.x * vz + M.pos.x;
+    out.y = M.right.y * vx + M.up.y * vy + M.at.y * vz + M.pos.y;
+    out.z = M.right.z * vx + M.up.z * vy + M.at.z * vz + M.pos.z;
+    return true;
+}
+
 static bool OrcComputeAdjustedMuzzleForPed(CPed* ped, int wt, CVector& out) {
     if (!ped || wt <= 0)
         return false;
@@ -95,6 +116,24 @@ static bool OrcComputeAdjustedMuzzleForPed(CPed* ped, int wt, CVector& out) {
     out.x = M.right.x * vx + M.up.x * vy + M.at.x * vz + M.pos.x;
     out.y = M.right.y * vx + M.up.y * vy + M.at.y * vz + M.pos.y;
     out.z = M.right.z * vx + M.up.z * vy + M.at.z * vz + M.pos.z;
+    return true;
+}
+
+bool OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(CPed* ped, int wt, RwV3d* outDw) {
+    if (!ped || wt <= 0 || !outDw)
+        return false;
+    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
+    if (!h.enabled)
+        return false;
+    CVector vHeld{};
+    CVector vVan{};
+    if (!OrcComputeAdjustedMuzzleForPed(ped, wt, vHeld))
+        return false;
+    if (!OrcComputeVanillaMuzzleWorldForPed(ped, wt, vVan))
+        return false;
+    outDw->x = vHeld.x - vVan.x;
+    outDw->y = vHeld.y - vVan.y;
+    outDw->z = vHeld.z - vVan.z;
     return true;
 }
 
@@ -144,8 +183,10 @@ static bool __fastcall CWeapon_Fire_Detour(CWeapon* self, void* /*edx*/, CEntity
     if (firingEntity && firingEntity->m_nType == ENTITY_TYPE_PED && muzzlePosn) {
         CPed* ped = reinterpret_cast<CPed*>(firingEntity);
         const int wtFire = static_cast<int>(self->m_eWeaponType);
-        if (GetHeldPoseForPed(ped, wtFire, false).enabled)
+        if (GetHeldPoseForPed(ped, wtFire, false).enabled) {
             OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
+            OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(ped, wtFire);
+        }
         OrcTryPatchMuzzlePosnForPedWeaponFx(ped, self, muzzlePosn, "Fire");
     }
     if (!g_CWeaponFire_Orig)
@@ -158,8 +199,10 @@ static bool __fastcall CWeapon_FireInstantHit_Detour(CWeapon* self, void* /*edx*
     if (firingEntity && firingEntity->m_nType == ENTITY_TYPE_PED && muzzlePosn) {
         CPed* ped = reinterpret_cast<CPed*>(firingEntity);
         const int wtFire = static_cast<int>(self->m_eWeaponType);
-        if (GetHeldPoseForPed(ped, wtFire, false).enabled)
+        if (GetHeldPoseForPed(ped, wtFire, false).enabled) {
             OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
+            OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(ped, wtFire);
+        }
         OrcTryPatchMuzzlePosnForPedWeaponFx(ped, self, muzzlePosn, "FireInstantHit");
     }
     if (!g_CWeaponFireInstantHit_Orig)
