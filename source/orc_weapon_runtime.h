@@ -49,7 +49,7 @@ bool OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(CPed* ped, int wt, RwV3d* out
 RpClump* OrcPedResolveGunflashTargetClump(CPed* ped);
 /// После подмены `m_pWeaponObject` (клон/сток) перевыставить `m_pGunflashObject` на кадр `"gunflash"` в текущем клумпе (как в ванильном `AddWeaponModel`).
 void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped);
-/// Сдвиг кадра `gunflash` на muzzle-дельту Held (сброс дедупа на клумпе); после `OrcPedSyncGunflashFrameFromCurrentWeaponObject` в `Fire` / RWCB.
+/// Сдвиг кадра `gunflash` на muzzle-дельту Held в клумпе `OrcPedResolveGunflashTargetClump` (тот же, что при sync `m_pGunflashObject`), без привязки к устаревшему кадру из другого инстанса.
 void OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(CPed* ped, int wt);
 /// Same weapon-type resolution path as held replacement / Guns TXD (`m_aWeapons`, `m_nWeaponModelId`, saved weapon).
 int OrcResolveWeaponHeldVisualWeaponType(CPed* ped);

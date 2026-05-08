@@ -48,6 +48,7 @@ using namespace plugin;
 static RwFrame* OrcRwFrameGetParent(RwFrame* f);
 static void OrcHeldGunflashMuzzleDeltaResetForSimTick();
 static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump, int wt, RwFrame* gfOverride = nullptr);
+static void OrcHeldApplyGunflashMuzzleDeltaUsingResolvedClump(CPed* ped, int wt);
 
 static bool g_pedWeaponModelHooksInstalled = false;
 using AddWeaponModel_t = void(__thiscall*)(CPed*, int);
@@ -918,10 +919,8 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
         return false;
     }
 
-    if (applyGunflashMuzzleDeltaToClump) {
-        if (RpClump* gfClump = OrcPedResolveGunflashTargetClump(ped))
-            OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, gfClump, wt);
-    }
+    if (applyGunflashMuzzleDeltaToClump)
+        OrcHeldApplyGunflashMuzzleDeltaUsingResolvedClump(ped, wt);
 
     if (g_heldPoseDebug) {
         OrcLogInfoThrottled(
@@ -1022,6 +1021,88 @@ static bool OrcHeldRwFrameIsDescendantOf(RwFrame* frame, RwFrame* ancestor) {
     return false;
 }
 
+/// Корень иерархии `RwFrame` (родитель `nullptr`) — совпадает с `RpClumpGetFrame` для клумпа оружия.
+static RwFrame* OrcRwFrameHierarchyRoot(RwFrame* f) {
+    if (!f)
+        return nullptr;
+    int steps = 0;
+    RwFrame* x = f;
+    while (x && steps < kOrcMaxRwFrameAncestors) {
+        RwFrame* p = OrcRwFrameGetParent(x);
+        if (!p)
+            return x;
+        x = p;
+        ++steps;
+    }
+    return nullptr;
+}
+
+/// Клумп оружия педа, чей корневой `RwFrame` совпадает с `hierRoot` (слот, клон замены, defer SA:MP, активный repl).
+static RpClump* OrcHeldFindWeaponClumpForHierarchyRoot(CPed* ped, RwFrame* hierRoot) {
+    if (!ped || !hierRoot)
+        return nullptr;
+    const auto rootMatch = [](RpClump* c, RwFrame* root) -> bool { return c && RpClumpGetFrame(c) == root; };
+    RwObject* wo = ped->m_pWeaponObject;
+    if (wo && wo->type == rpCLUMP) {
+        RpClump* c = reinterpret_cast<RpClump*>(wo);
+        if (rootMatch(c, hierRoot))
+            return c;
+    }
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef > 0) {
+        auto it = g_heldWeaponReplacements.find(pedRef);
+        if (it != g_heldWeaponReplacements.end() && it->second.rwObject && it->second.rwObject->type == rpCLUMP) {
+            RpClump* c = reinterpret_cast<RpClump*>(it->second.rwObject);
+            if (rootMatch(c, hierRoot))
+                return c;
+        }
+        auto d = g_deferredHeldWeaponStockRestore.find(pedRef);
+        if (d != g_deferredHeldWeaponStockRestore.end()) {
+            const DeferredHeldWeaponSlotRestore& r = d->second;
+            if (r.stock && r.stock->type == rpCLUMP) {
+                RpClump* c = reinterpret_cast<RpClump*>(r.stock);
+                if (rootMatch(c, hierRoot))
+                    return c;
+            }
+            if (r.clone && r.clone->type == rpCLUMP) {
+                RpClump* c = reinterpret_cast<RpClump*>(r.clone);
+                if (rootMatch(c, hierRoot))
+                    return c;
+            }
+        }
+    }
+    RwObject* repl = OrcResolveActiveReplacementWeaponObject(ped);
+    if (repl && repl->type == rpCLUMP) {
+        RpClump* c = reinterpret_cast<RpClump*>(repl);
+        if (rootMatch(c, hierRoot))
+            return c;
+    }
+    CPlayerPed* fp = FindPlayerPed(0);
+    if (fp && ped != fp && samp_bridge::IsSampBuildKnown()) {
+        const int pedRefMirror = CPools::GetPedRef(ped);
+        for (const auto& kv : g_heldWeaponReplacements) {
+            CPed* owner = CPools::GetPed(kv.first);
+            if (!owner)
+                continue;
+            if (OrcSampMirrorReplacementOwnerPedRef(owner) != pedRefMirror)
+                continue;
+            if (!kv.second.rwObject || kv.second.rwObject->type != rpCLUMP)
+                continue;
+            RpClump* c = reinterpret_cast<RpClump*>(kv.second.rwObject);
+            if (rootMatch(c, hierRoot))
+                return c;
+        }
+    }
+    return nullptr;
+}
+
+static RpClump* OrcHeldFindWeaponClumpContainingFrame(CPed* ped, RwFrame* anyFrame) {
+    if (!anyFrame)
+        return nullptr;
+    RwFrame* hr = OrcRwFrameHierarchyRoot(anyFrame);
+    return OrcHeldFindWeaponClumpForHierarchyRoot(ped, hr);
+}
+
 /// `dw` в мировых осях → приращение `pos` дочернего `RwFrame` в локали родителя (ортогональная часть `parentLtm`).
 static RwV3d OrcRwDeltaWorldToParentLocalPos(const RwMatrix* parentLtm, const RwV3d& dw) {
     RwV3d o{};
@@ -1044,26 +1125,29 @@ static void OrcHeldGunflashMuzzleDeltaResetForSimTick() {
     s_gunflashOrigLocalByGfFrame.clear();
 }
 
-void OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(CPed* ped, int wt) {
+/// Muzzle-delta только на кадре `"gunflash"` в **том же** `RpClump*`, что `OrcPedSyncGunflashFrameFromCurrentWeaponObject`
+/// (резолвер слот/клон/defer). Иначе после смены инстанса стока `m_pGunflashObject` / `obj` / иерархия RWCB могут
+/// указывать на другой клумп (`1374BA10` vs `1374BA50` в логе) → «плавание» и ванильная точка вспышки.
+static void OrcHeldApplyGunflashMuzzleDeltaUsingResolvedClump(CPed* ped, int wt) {
     if (!g_enabled || !ped || wt <= 0)
         return;
     const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
     if (!h.enabled)
         return;
     RpClump* clump = OrcPedResolveGunflashTargetClump(ped);
-    RwFrame* root = clump ? RpClumpGetFrame(clump) : nullptr;
-    RwFrame* syncGf = ped->m_pGunflashObject;
-    RwFrame* gf = nullptr;
-    if (syncGf && root && OrcHeldRwFrameIsDescendantOf(syncGf, root))
-        gf = syncGf;
-    else if (clump)
-        gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+    if (!clump)
+        return;
+    RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
     if (!gf)
         return;
     const uintptr_t gfk = reinterpret_cast<uintptr_t>(gf);
     s_gunflashMuzzleNudgeAppliedClumps.erase(gfk);
     s_gunflashOrigLocalByGfFrame.erase(gfk);
     OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, clump, wt, gf);
+}
+
+void OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(CPed* ped, int wt) {
+    OrcHeldApplyGunflashMuzzleDeltaUsingResolvedClump(ped, wt);
 }
 
 static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump, int wt, RwFrame* gfOverride) {
@@ -1278,10 +1362,14 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel)
         OrcLogHeldPoseCfgDisabled(ped, wtSel);
         return false;
     }
-    RpClump* gfClump = OrcPedResolveGunflashTargetClump(ped);
-    if (gfClump)
-        OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, gfClump, wtSel);
-    RwFrame* gunf = gfClump ? CClumpModelInfo::GetFrameFromName(gfClump, "gunflash") : nullptr;
+    // Nudge только по резолверу (совпадает с rebound / DoGunFlash). Иерархию атомика — только для skip Held на dummy.
+    OrcHeldApplyGunflashMuzzleDeltaUsingResolvedClump(ped, wtSel);
+    RpClump* drawClump = nullptr;
+    if (RwFrame* hr = OrcRwFrameHierarchyRoot(af))
+        drawClump = OrcHeldFindWeaponClumpForHierarchyRoot(ped, hr);
+    if (!drawClump)
+        drawClump = OrcPedResolveGunflashTargetClump(ped);
+    RwFrame* gunf = drawClump ? CClumpModelInfo::GetFrameFromName(drawClump, "gunflash") : nullptr;
     if (gunf && OrcHeldAtomicFrameIsUnderGunflashDummy(af, gunf))
         return false;
     OrcHeldPoseInvalidateBaselineForRwFrame(af);
