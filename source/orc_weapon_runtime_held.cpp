@@ -1140,9 +1140,8 @@ static void OrcHeldApplyGunflashMuzzleDeltaUsingResolvedClump(CPed* ped, int wt)
     RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
     if (!gf)
         return;
-    const uintptr_t gfk = reinterpret_cast<uintptr_t>(gf);
-    s_gunflashMuzzleNudgeAppliedClumps.erase(gfk);
-    s_gunflashOrigLocalByGfFrame.erase(gfk);
+    // Не сбрасывать дедуп/`orig` здесь: несколько RWCB за кадр иначе заново берут `Lm->pos` уже после nudge →
+    // «плавание» и накопление ошибки. Полный сброс — `OrcHeldGunflashMuzzleDeltaResetForSimTick` на игровой тик.
     OrcHeldMaybeApplyGunflashFrameMuzzleDelta(ped, clump, wt, gf);
 }
 
