@@ -47,6 +47,8 @@ void OrcWeaponEnsureFireFxHooksInstalled();
 bool OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(CPed* ped, int wt, RwV3d* outDw);
 /// Клумп, в котором реально ищется dummy `gunflash` при Guns held replacement: если в слоте сток, а меш — клон, возвращается клон (RWCB / DoGunFlash).
 RpClump* OrcPedResolveGunflashTargetClump(CPed* ped);
+/// Кадр `gunflash` и владеющий клумп: `OrcPedResolveGunflashTargetClump` → слот → клон `g_heldWeaponReplacements` → `OrcResolveActiveReplacementWeaponObject` (если в primary нет dummy — не гасить FX).
+bool OrcHeldTryResolveGunflashClumpAndFrame(CPed* ped, RpClump** outClump, RwFrame** outGf);
 /// После подмены `m_pWeaponObject` (клон/сток) перевыставить `m_pGunflashObject` на кадр `"gunflash"` в текущем клумпе (как в ванильном `AddWeaponModel`).
 void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped);
 /// Сброс кэша muzzle-nudge для старого кадра `gunflash` (смена инстанса / rebound); Win32, ключ кэша включает `gf`.

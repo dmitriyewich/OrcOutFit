@@ -300,6 +300,47 @@ static RwObject* OrcResolveHeldWeaponRwObject(CPed* ped) {
     return it->second.rwObject;
 }
 
+bool OrcHeldTryResolveGunflashClumpAndFrame(CPed* ped, RpClump** outClump, RwFrame** outGf) {
+    if (!ped || !outClump || !outGf)
+        return false;
+    *outClump = nullptr;
+    *outGf = nullptr;
+    RpClump* slotC = nullptr;
+    if (ped->m_pWeaponObject && ped->m_pWeaponObject->type == rpCLUMP)
+        slotC = reinterpret_cast<RpClump*>(ped->m_pWeaponObject);
+    const auto tryClump = [&](RpClump* c) -> bool {
+        if (!c)
+            return false;
+        RwFrame* g = CClumpModelInfo::GetFrameFromName(c, "gunflash");
+        if (!g)
+            return false;
+        *outClump = c;
+        *outGf = g;
+        return true;
+    };
+    RpClump* primary = OrcPedResolveGunflashTargetClump(ped);
+    if (tryClump(primary))
+        return true;
+    if (slotC && slotC != primary && tryClump(slotC))
+        return true;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef > 0) {
+        auto it = g_heldWeaponReplacements.find(pedRef);
+        if (it != g_heldWeaponReplacements.end() && it->second.rwObject && it->second.rwObject->type == rpCLUMP) {
+            RpClump* c = reinterpret_cast<RpClump*>(it->second.rwObject);
+            if (c != primary && c != slotC && tryClump(c))
+                return true;
+        }
+    }
+    RwObject* repl = OrcResolveActiveReplacementWeaponObject(ped);
+    if (repl && repl->type == rpCLUMP) {
+        RpClump* c = reinterpret_cast<RpClump*>(repl);
+        if (c != primary && c != slotC && tryClump(c))
+            return true;
+    }
+    return false;
+}
+
 RpClump* OrcPedResolveGunflashTargetClump(CPed* ped) {
     if (!ped)
         return nullptr;
@@ -1165,11 +1206,9 @@ static void OrcHeldApplyGunflashMuzzleDeltaUsingResolvedClump(CPed* ped, int wt)
     const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
     if (!h.enabled)
         return;
-    RpClump* clump = OrcPedResolveGunflashTargetClump(ped);
-    if (!clump)
-        return;
-    RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
-    if (!gf)
+    RpClump* clump = nullptr;
+    RwFrame* gf = nullptr;
+    if (!OrcHeldTryResolveGunflashClumpAndFrame(ped, &clump, &gf))
         return;
     // Не сбрасывать дедуп/`orig` здесь: несколько RWCB за кадр иначе заново берут `Lm->pos` уже после nudge →
     // «плавание» и накопление ошибки. Полный сброс — `OrcHeldGunflashMuzzleDeltaResetForSimTick` на игровой тик.
@@ -1191,15 +1230,6 @@ static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump,
     }
     if (!gf || !clump)
         return;
-    RwFrame* root = RpClumpGetFrame(clump);
-    if (!root || !OrcHeldRwFrameIsDescendantOf(gf, root)) {
-        if (g_orcLogLevel >= OrcLogLevel::Info) {
-            OrcLogInfoThrottled(942u, 8000u,
-                "held gunflash: muzzle delta skip (gf not under clump root) pedRef=%d wt=%d clump=%p gf=%p",
-                CPools::GetPedRef(ped), wt, static_cast<void*>(clump), static_cast<void*>(gf));
-        }
-        return;
-    }
     RwFrame* par = OrcRwFrameGetParent(gf);
     if (!par) {
         if (g_orcLogLevel >= OrcLogLevel::Info) {
@@ -1210,10 +1240,13 @@ static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump,
         return;
     }
     const RwMatrix* parLtm = RwFrameGetLTM(par);
+    RwFrame* clumpRoot = RpClumpGetFrame(clump);
+    if ((!parLtm || !OrcRwMatrixFinite(parLtm)) && clumpRoot)
+        parLtm = RwFrameGetLTM(clumpRoot);
     if (!parLtm || !OrcRwMatrixFinite(parLtm)) {
         if (g_orcLogLevel >= OrcLogLevel::Info) {
             OrcLogInfoThrottled(944u, 8000u,
-                "held gunflash: muzzle delta skip (bad parent LTM) pedRef=%d wt=%d gf=%p",
+                "held gunflash: muzzle delta skip (bad parent/root LTM) pedRef=%d wt=%d gf=%p",
                 CPools::GetPedRef(ped), wt, static_cast<void*>(gf));
         }
         return;
