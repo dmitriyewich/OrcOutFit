@@ -6,6 +6,7 @@
 #include "CEntity.h"
 #include "CWeapon.h"
 #include "CVector.h"
+#include "CClumpModelInfo.h"
 #include "RenderWare.h"
 #include "eWeaponType.h"
 
@@ -29,6 +30,43 @@ static constexpr uintptr_t kAddr_CWeapon_Fire = 0x742300;
 static constexpr uintptr_t kAddr_CWeapon_FireInstantHit = 0x73FB10;
 
 static bool g_weaponFireFxHooksInstalled = false;
+
+void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped) {
+    if (!ped)
+        return;
+    RwObject* wo = ped->m_pWeaponObject;
+    RwFrame* const prevGf = ped->m_pGunflashObject;
+    if (!wo) {
+        ped->m_pGunflashObject = nullptr;
+        if (prevGf && g_orcLogLevel >= OrcLogLevel::Info) {
+            OrcLogInfoThrottled(937u, 4000u, "gunflash: cleared (weapon slot null) pedRef=%d", CPools::GetPedRef(ped));
+        }
+        return;
+    }
+    if (wo->type != rpCLUMP) {
+        ped->m_pGunflashObject = nullptr;
+        if (prevGf && g_orcLogLevel >= OrcLogLevel::Info) {
+            OrcLogInfoThrottled(936u, 6000u, "gunflash: cleared (weapon not clump type=%d) pedRef=%d wo=%p",
+                static_cast<int>(wo->type), CPools::GetPedRef(ped), wo);
+        }
+        return;
+    }
+    RpClump* clump = reinterpret_cast<RpClump*>(wo);
+    RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+    ped->m_pGunflashObject = gf;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (g_orcLogLevel >= OrcLogLevel::Info) {
+        if (gf != prevGf) {
+            OrcLogInfoThrottled(938u, 2500u, "gunflash: frame rebound pedRef=%d wo=%p gf=%p (was %p)", pedRef, wo, gf,
+                prevGf);
+        }
+        if (!gf) {
+            OrcLogInfoThrottled(939u, 12000u,
+                "gunflash: no \"gunflash\" frame in weapon clump pedRef=%d wo=%p (custom mesh may omit dummy)", pedRef,
+                wo);
+        }
+    }
+}
 
 static bool OrcComputeAdjustedMuzzleForPed(CPed* ped, int wt, CVector& out) {
     if (!ped || wt <= 0)
@@ -105,6 +143,9 @@ static bool __fastcall CWeapon_Fire_Detour(CWeapon* self, void* /*edx*/, CEntity
     CVector* muzzlePosn, CEntity* targetEntity, CVector* target, CVector* originForDriveBy) {
     if (firingEntity && firingEntity->m_nType == ENTITY_TYPE_PED && muzzlePosn) {
         CPed* ped = reinterpret_cast<CPed*>(firingEntity);
+        const int wtFire = static_cast<int>(self->m_eWeaponType);
+        if (GetHeldPoseForPed(ped, wtFire, false).enabled)
+            OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
         OrcTryPatchMuzzlePosnForPedWeaponFx(ped, self, muzzlePosn, "Fire");
     }
     if (!g_CWeaponFire_Orig)
@@ -116,6 +157,9 @@ static bool __fastcall CWeapon_FireInstantHit_Detour(CWeapon* self, void* /*edx*
     CVector* muzzlePosn, CEntity* targetEntity, CVector* target, CVector* originForDriveBy, bool arg6, bool muzzle) {
     if (firingEntity && firingEntity->m_nType == ENTITY_TYPE_PED && muzzlePosn) {
         CPed* ped = reinterpret_cast<CPed*>(firingEntity);
+        const int wtFire = static_cast<int>(self->m_eWeaponType);
+        if (GetHeldPoseForPed(ped, wtFire, false).enabled)
+            OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
         OrcTryPatchMuzzlePosnForPedWeaponFx(ped, self, muzzlePosn, "FireInstantHit");
     }
     if (!g_CWeaponFireInstantHit_Orig)

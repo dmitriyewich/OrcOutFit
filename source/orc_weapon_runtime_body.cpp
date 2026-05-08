@@ -62,6 +62,36 @@ static bool OrcRwFrameIsDescendantOf(RwFrame* frame, RwFrame* ancestor) {
     return false;
 }
 
+#ifndef rpATOMICRENDER
+#define rpATOMICRENDER 4
+#endif
+
+struct OrcBodyGunflashVisStash {
+    RwFrame* gunflashRoot = nullptr;
+    std::vector<std::pair<RpAtomic*, RwUInt32>> savedFlags;
+};
+
+static RpAtomic* OrcBodyWeaponStashGunflashVisCb(RpAtomic* atomic, void* data) {
+    auto* ctx = reinterpret_cast<OrcBodyGunflashVisStash*>(data);
+    if (!ctx || !ctx->gunflashRoot || !atomic)
+        return atomic;
+    RwFrame* af = RpAtomicGetFrame(atomic);
+    if (!af || !OrcRwFrameIsDescendantOf(af, ctx->gunflashRoot))
+        return atomic;
+    const RwUInt32 f = RpAtomicGetFlags(atomic);
+    ctx->savedFlags.push_back({ atomic, f });
+    RpAtomicSetFlags(atomic, f & ~(RwUInt32)rpATOMICRENDER);
+    return atomic;
+}
+
+static void OrcBodyWeaponRestoreGunflashVis(OrcBodyGunflashVisStash& ctx) {
+    for (const auto& pr : ctx.savedFlags) {
+        if (pr.first)
+            RpAtomicSetFlags(pr.first, pr.second);
+    }
+    ctx.savedFlags.clear();
+}
+
 void OrcDestroyRenderedWeapon(RenderedWeapon& r) {
     if (!r.rwObject) {
         r = {};
@@ -198,7 +228,12 @@ static void RenderOneWeapon(CPed* ped, RenderedWeapon& r) {
             return;
         }
         RpClumpForAllAtomics(clump, OrcPrepAtomicCB, nullptr);
+        OrcBodyGunflashVisStash gfVis{};
+        gfVis.gunflashRoot = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+        if (gfVis.gunflashRoot)
+            RpClumpForAllAtomics(clump, OrcBodyWeaponStashGunflashVisCb, &gfVis);
         RpClumpRender(clump);
+        OrcBodyWeaponRestoreGunflashVis(gfVis);
     } else {
         OrcPrepAtomicCB(atomic, nullptr);
         atomic->renderCallBack(atomic);

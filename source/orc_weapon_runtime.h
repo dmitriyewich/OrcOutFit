@@ -41,8 +41,10 @@ void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* 
 int OrcRenderPedWeapons(CPed* ped, RenderedWeapon* arr);
 
 void OrcWeaponEnsurePedModelHooksInstalled();
-/// Хуки `CWeapon::Fire` / `FireInstantHit`: смещение `muzzlePosn` по Held-позе (FX выстрела: дым, гильзы и т.п.).
+/// Хуки `CWeapon::Fire` / `FireInstantHit`: смещение `muzzlePosn` по Held-позе; синхронизация `m_pGunflashObject` с текущим клумпом в `orc_weapon_runtime_held_fx.cpp`.
 void OrcWeaponEnsureFireFxHooksInstalled();
+/// После подмены `m_pWeaponObject` (клон/сток) перевыставить `m_pGunflashObject` на кадр `"gunflash"` в текущем клумпе (как в ванильном `AddWeaponModel`).
+void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped);
 /// Same weapon-type resolution path as held replacement / Guns TXD (`m_aWeapons`, `m_nWeaponModelId`, saved weapon).
 int OrcResolveWeaponHeldVisualWeaponType(CPed* ped);
 /// If ped slots read empty but Guns held clone exists (SA:MP), reuse its weapon type for HUD icon resolution.

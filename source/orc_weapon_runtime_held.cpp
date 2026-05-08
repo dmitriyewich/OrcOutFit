@@ -323,6 +323,7 @@ static void OrcRestoreDeferredHeldStockIfSlotStillHasClone(CPed* ped) {
     const DeferredHeldWeaponSlotRestore& r = d->second;
     if (r.stock && r.clone && ped->m_pWeaponObject == r.clone) {
         ped->m_pWeaponObject = r.stock;
+        OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
         g_deferredHeldWeaponStockRestore.erase(pedRef);
     }
 }
@@ -343,6 +344,7 @@ void OrcFlushDeferredHeldWeaponSlotRestore() {
         const DeferredHeldWeaponSlotRestore& r = kv.second;
         if (r.stock && r.clone && ped->m_pWeaponObject == r.clone) {
             ped->m_pWeaponObject = r.stock;
+            OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
         }
     }
     g_deferredHeldWeaponStockRestore.clear();
@@ -432,6 +434,7 @@ static void OrcEnsureStockWeaponClumpInHeldSlotBeforeVanillaWeaponModelOp(CPed* 
     }
 
     ped->m_pWeaponObject = stock;
+    OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
     g_deferredHeldWeaponStockRestore.erase(pedRef);
 }
 
@@ -690,6 +693,7 @@ static bool OrcTryApplyHeldPoseOneFrame(RwFrame* frame, const HeldWeaponPoseCfg&
 
 struct HeldClumpApplyCtx {
     const HeldWeaponPoseCfg* h = nullptr;
+    RwFrame* gunflashRoot = nullptr;
     int nAtom = 0;
     int nOk = 0;
     float logAtX = 0.0f;
@@ -697,11 +701,27 @@ struct HeldClumpApplyCtx {
     float logAtZ = 0.0f;
 };
 
+/// Кадр атомика — сам dummy `gunflash` или потомок в иерархии (Held на этих узлах ломает DoGunFlash/альфу).
+static bool OrcHeldAtomicFrameIsUnderGunflashDummy(RwFrame* atomicFrame, RwFrame* gunflashFrame) {
+    if (!atomicFrame || !gunflashFrame)
+        return false;
+    constexpr int kMaxSteps = 64;
+    int steps = 0;
+    for (RwFrame* x = atomicFrame; x && steps < kMaxSteps;
+         x = reinterpret_cast<RwFrame*>(plugin::GetObjectParent(reinterpret_cast<RwObject*>(x))), ++steps) {
+        if (x == gunflashFrame)
+            return true;
+    }
+    return false;
+}
+
 static RpAtomic* OrcHeldPoseApplyEachAtomicCb(RpAtomic* atomic, void* data) {
     auto* ctx = reinterpret_cast<HeldClumpApplyCtx*>(data);
     ctx->nAtom++;
     RwFrame* f = RpAtomicGetFrame(atomic);
     if (!f || !ctx->h)
+        return atomic;
+    if (ctx->gunflashRoot && OrcHeldAtomicFrameIsUnderGunflashDummy(f, ctx->gunflashRoot))
         return atomic;
     if (OrcTryApplyHeldPoseOneFrame(f, *ctx->h)) {
         ctx->nOk++;
@@ -780,6 +800,7 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
         if (isReplClone) {
             HeldClumpApplyCtx ctx{};
             ctx.h = &h;
+            ctx.gunflashRoot = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
             RpClumpForAllAtomics(clump, OrcHeldPoseApplyEachAtomicCb, &ctx);
             heldPoseAtomCount = ctx.nAtom;
             heldPoseOkCount = ctx.nOk;
@@ -811,6 +832,7 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
         } else {
             HeldClumpApplyCtx ctx{};
             ctx.h = &h;
+            ctx.gunflashRoot = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
             RpClumpForAllAtomics(clump, OrcHeldPoseApplyEachAtomicCb, &ctx);
             heldPoseAtomCount = ctx.nAtom;
             heldPoseOkCount = ctx.nOk;
@@ -1074,6 +1096,12 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel)
     RwFrame* af = RpAtomicGetFrame(atomic);
     if (!af)
         return false;
+    RwObject* woRwcb = OrcResolveHeldWeaponRwObject(ped);
+    if (woRwcb && woRwcb->type == rpCLUMP) {
+        RwFrame* gunf = CClumpModelInfo::GetFrameFromName(reinterpret_cast<RpClump*>(woRwcb), "gunflash");
+        if (gunf && OrcHeldAtomicFrameIsUnderGunflashDummy(af, gunf))
+            return false;
+    }
     const int pedRef = CPools::GetPedRef(ped);
     const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wtSel, false);
     if (g_heldPoseDebug || g_heldWeaponTrace >= 2) {
@@ -1611,6 +1639,7 @@ void OrcDestroyAllHeldWeaponReplacementInstances() {
             // hideBase + captureActive: как раньше — вернуть сток, даже если слот уже не указывает на клон.
             if (slotIsClone || (st.captureActive && st.hideBaseMode)) {
                 ped->m_pWeaponObject = st.originalObject;
+                OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
             }
         }
         st.captureActive = false;
@@ -1820,6 +1849,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
             state.hideBaseMode = false;
             state.captureActive = true;
             ped->m_pWeaponObject = state.rwObject;
+            OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
             return;
         }
         if (stockForCopy && ped->m_pWeaponObject == state.rwObject) {
@@ -1900,6 +1930,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     state.hideBaseMode = false;
     state.captureActive = true;
     ped->m_pWeaponObject = state.rwObject;
+    OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
 }
 
 void OrcRestoreHeldWeaponReplacementAfter(CPed* ped) {
@@ -2025,6 +2056,7 @@ static void OrcApplyHeldWeaponReplacementAfterAddWeaponModel(CPed* ped, int mode
     state.hideBaseMode = false;
     state.captureActive = true;
     ped->m_pWeaponObject = state.rwObject;
+    OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
 }
 
 // `__thiscall` cannot be used on static free functions in MSVC; `__fastcall` matches the register ABI
@@ -2094,6 +2126,7 @@ static void __fastcall RemoveWeaponModel_Hook(CPed* ped, void* /*edx*/, int mode
                 }
                 if (stock) {
                     ped->m_pWeaponObject = stock;
+                    OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped);
                 }
             }
         }
