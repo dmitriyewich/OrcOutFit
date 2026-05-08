@@ -318,6 +318,13 @@ RpClump* OrcPedResolveGunflashTargetClump(CPed* ped) {
             return reinterpret_cast<RpClump*>(st.rwObject);
         if (st.captureActive)
             return reinterpret_cast<RpClump*>(st.rwObject);
+        // В слоте сток без dummy `gunflash` (Malorian и т.п.) — `GetFrameFromName` на слоте даёт nullptr или
+        // первый случайный узел в другом инстансе; для FX/gunflash берём клон замены, если он есть.
+        if (slot->type == rpCLUMP) {
+            RpClump* slotC = reinterpret_cast<RpClump*>(slot);
+            if (!CClumpModelInfo::GetFrameFromName(slotC, "gunflash"))
+                return reinterpret_cast<RpClump*>(st.rwObject);
+        }
         return nullptr;
     };
     auto it = g_heldWeaponReplacements.find(pedRef);
@@ -1117,12 +1124,36 @@ static RwV3d OrcRwDeltaWorldToParentLocalPos(const RwMatrix* parentLtm, const Rw
 }
 
 // За один `gameProcess`-тик: не копим сдвиг на `gunflash` и не дублируем между preRw / RWCB.
-static std::unordered_set<uintptr_t> s_gunflashMuzzleNudgeAppliedClumps;
-static std::unordered_map<uintptr_t, RwV3d> s_gunflashOrigLocalByGfFrame;
+// Ключ (clump,gf): один и тот же адрес `gf` после Destroy/Create на другом клумпе давал мусорный `orig`.
+static std::unordered_set<uint64_t> s_gunflashMuzzleNudgeAppliedTags;
+static std::unordered_map<uint64_t, RwV3d> s_gunflashOrigLocalByClumpGf;
+
+static uint64_t OrcHeldGunflashMuzzleTag(RpClump* c, RwFrame* g) {
+    return (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(c)) << 32) |
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g));
+}
+
+void OrcHeldGunflashMuzzleCacheForgetGf(RwFrame* oldGf) {
+    if (!oldGf)
+        return;
+    const uint32_t gLo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(oldGf));
+    for (auto it = s_gunflashOrigLocalByClumpGf.begin(); it != s_gunflashOrigLocalByClumpGf.end();) {
+        if (static_cast<uint32_t>(it->first) == gLo)
+            it = s_gunflashOrigLocalByClumpGf.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = s_gunflashMuzzleNudgeAppliedTags.begin(); it != s_gunflashMuzzleNudgeAppliedTags.end();) {
+        if (static_cast<uint32_t>(*it) == gLo)
+            it = s_gunflashMuzzleNudgeAppliedTags.erase(it);
+        else
+            ++it;
+    }
+}
 
 static void OrcHeldGunflashMuzzleDeltaResetForSimTick() {
-    s_gunflashMuzzleNudgeAppliedClumps.clear();
-    s_gunflashOrigLocalByGfFrame.clear();
+    s_gunflashMuzzleNudgeAppliedTags.clear();
+    s_gunflashOrigLocalByClumpGf.clear();
 }
 
 /// Muzzle-delta только на кадре `"gunflash"` в **том же** `RpClump*`, что `OrcPedSyncGunflashFrameFromCurrentWeaponObject`
@@ -1158,10 +1189,37 @@ static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump,
             return;
         gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
     }
-    if (!gf)
+    if (!gf || !clump)
         return;
-    const uintptr_t gfk = reinterpret_cast<uintptr_t>(gf);
-    if (s_gunflashMuzzleNudgeAppliedClumps.count(gfk) != 0)
+    RwFrame* root = RpClumpGetFrame(clump);
+    if (!root || !OrcHeldRwFrameIsDescendantOf(gf, root)) {
+        if (g_orcLogLevel >= OrcLogLevel::Info) {
+            OrcLogInfoThrottled(942u, 8000u,
+                "held gunflash: muzzle delta skip (gf not under clump root) pedRef=%d wt=%d clump=%p gf=%p",
+                CPools::GetPedRef(ped), wt, static_cast<void*>(clump), static_cast<void*>(gf));
+        }
+        return;
+    }
+    RwFrame* par = OrcRwFrameGetParent(gf);
+    if (!par) {
+        if (g_orcLogLevel >= OrcLogLevel::Info) {
+            OrcLogInfoThrottled(943u, 8000u,
+                "held gunflash: muzzle delta skip (gunflash frame has no parent) pedRef=%d wt=%d gf=%p",
+                CPools::GetPedRef(ped), wt, static_cast<void*>(gf));
+        }
+        return;
+    }
+    const RwMatrix* parLtm = RwFrameGetLTM(par);
+    if (!parLtm || !OrcRwMatrixFinite(parLtm)) {
+        if (g_orcLogLevel >= OrcLogLevel::Info) {
+            OrcLogInfoThrottled(944u, 8000u,
+                "held gunflash: muzzle delta skip (bad parent LTM) pedRef=%d wt=%d gf=%p",
+                CPools::GetPedRef(ped), wt, static_cast<void*>(gf));
+        }
+        return;
+    }
+    const uint64_t tag = OrcHeldGunflashMuzzleTag(clump, gf);
+    if (s_gunflashMuzzleNudgeAppliedTags.count(tag) != 0)
         return;
     RwV3d dw{};
     if (!OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(ped, wt, &dw))
@@ -1169,8 +1227,6 @@ static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump,
     const float d2 = dw.x * dw.x + dw.y * dw.y + dw.z * dw.z;
     if (d2 < 1e-12f)
         return;
-    RwFrame* par = OrcRwFrameGetParent(gf);
-    const RwMatrix* parLtm = par ? RwFrameGetLTM(par) : nullptr;
     const RwV3d dpar = OrcRwDeltaWorldToParentLocalPos(parLtm, dw);
     RwMatrix* Lm = RwFrameGetMatrix(gf);
     // У dummy gunflash / FX-атомиков матрица часто почти вырождена по осям — `OrcRwMatrixAxesNonDegenerate` режет nudge целиком.
@@ -1178,15 +1234,15 @@ static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump,
         if (g_orcLogLevel >= OrcLogLevel::Info) {
             OrcLogInfoThrottled(941u, 4000u,
                 "held gunflash: muzzle delta skip (bad Lm) pedRef=%d wt=%d clump=%p gf=%p dW=(%.4f,%.4f,%.4f)",
-                CPools::GetPedRef(ped), wt, static_cast<void*>(clump), gf, dw.x, dw.y, dw.z);
+                CPools::GetPedRef(ped), wt, static_cast<void*>(clump), static_cast<void*>(gf), dw.x, dw.y, dw.z);
         }
         return;
     }
-    if (s_gunflashOrigLocalByGfFrame.find(gfk) == s_gunflashOrigLocalByGfFrame.end()) {
+    if (s_gunflashOrigLocalByClumpGf.find(tag) == s_gunflashOrigLocalByClumpGf.end()) {
         RwV3d o{ Lm->pos.x, Lm->pos.y, Lm->pos.z };
-        s_gunflashOrigLocalByGfFrame.emplace(gfk, o);
+        s_gunflashOrigLocalByClumpGf.emplace(tag, o);
     }
-    const RwV3d& orig = s_gunflashOrigLocalByGfFrame[gfk];
+    const RwV3d& orig = s_gunflashOrigLocalByClumpGf[tag];
     __try {
         Lm->pos.x = orig.x + dpar.x;
         Lm->pos.y = orig.y + dpar.y;
@@ -1197,11 +1253,12 @@ static void OrcHeldMaybeApplyGunflashFrameMuzzleDelta(CPed* ped, RpClump* clump,
         OrcLogError("OrcHeldMaybeApplyGunflashFrameMuzzleDelta: SEH ex=0x%08X", GetExceptionCode());
         return;
     }
-    s_gunflashMuzzleNudgeAppliedClumps.insert(gfk);
+    s_gunflashMuzzleNudgeAppliedTags.insert(tag);
     if (g_orcLogLevel >= OrcLogLevel::Info) {
         OrcLogInfoThrottled(940u, 1200u,
             "held gunflash: muzzle delta nudge pedRef=%d wt=%d clump=%p gf=%p dW=(%.4f,%.4f,%.4f) dPar=(%.4f,%.4f,%.4f)",
-            CPools::GetPedRef(ped), wt, static_cast<void*>(clump), gf, dw.x, dw.y, dw.z, dpar.x, dpar.y, dpar.z);
+            CPools::GetPedRef(ped), wt, static_cast<void*>(clump), static_cast<void*>(gf), dw.x, dw.y, dw.z, dpar.x,
+            dpar.y, dpar.z);
     }
 }
 
@@ -1862,7 +1919,7 @@ static void __cdecl RenderWeaponPedsForPC_Detour() {
     }
     s_heldPoseEngineBaselineByFrame.clear();
     // Разрешаем повторный nudge gunflash в следующем RWCB-проходе (зеркала/доп. батчи), не сбрасывая snap `orig` за тик.
-    s_gunflashMuzzleNudgeAppliedClumps.clear();
+    s_gunflashMuzzleNudgeAppliedTags.clear();
     if (g_RenderWeaponPedsForPC_Orig)
         g_RenderWeaponPedsForPC_Orig();
 }

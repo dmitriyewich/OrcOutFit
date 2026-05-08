@@ -38,6 +38,8 @@ void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped) {
     RwFrame* const prevGf = ped->m_pGunflashObject;
     RpClump* clump = OrcPedResolveGunflashTargetClump(ped);
     if (!clump) {
+        if (prevGf)
+            OrcHeldGunflashMuzzleCacheForgetGf(prevGf);
         ped->m_pGunflashObject = nullptr;
         if (prevGf && g_orcLogLevel >= OrcLogLevel::Info) {
             OrcLogInfoThrottled(937u, 4000u, "gunflash: cleared (no target clump) pedRef=%d slotWo=%p",
@@ -46,6 +48,8 @@ void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped) {
         return;
     }
     RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+    if (prevGf != gf && prevGf)
+        OrcHeldGunflashMuzzleCacheForgetGf(prevGf);
     ped->m_pGunflashObject = gf;
     const int pedRef = CPools::GetPedRef(ped);
     if (g_orcLogLevel >= OrcLogLevel::Info) {
