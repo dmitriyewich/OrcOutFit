@@ -694,6 +694,16 @@ static bool OrcRwMatrixRenormalizeRigidBasis(RwMatrix* m) {
 // накладывался повторно на уже изменённую матрицу (см. лог: два repl:firstSwap, скачок at=).
 static std::unordered_map<uintptr_t, RwMatrix> s_heldPoseEngineBaselineByFrame;
 
+bool OrcHeldTryGetPoseEngineBaselineForFrame(RwFrame* frame, RwMatrix& out) {
+    if (!frame)
+        return false;
+    const auto it = s_heldPoseEngineBaselineByFrame.find(reinterpret_cast<uintptr_t>(frame));
+    if (it == s_heldPoseEngineBaselineByFrame.end())
+        return false;
+    out = it->second;
+    return OrcRwMatrixFinite(&out) && OrcRwMatrixAxesNonDegenerate(&out);
+}
+
 static RpAtomic* OrcHeldPoseInvalidateAtomicBaselineCb(RpAtomic* atomic, void*) {
     RwFrame* f = RpAtomicGetFrame(atomic);
     if (f)

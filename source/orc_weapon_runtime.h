@@ -67,6 +67,7 @@ void OrcHeldPoseBeginSimFrame();
 /// Периодический `held status:` + при `HeldWeaponTrace` уже логируются хуки из `orc_weapon_runtime_held*.cpp`.
 void OrcHeldWeaponTraceGameProcessTick();
 bool OrcApplyHeldWeaponPoseAdjust(CPed* ped);
+bool OrcHeldTryGetPoseEngineBaselineForFrame(RwFrame* frame, RwMatrix& out);
 
 /// `__DATE__`/`__TIME__` из `orc_weapon_runtime.cpp` (тонкий TU; при инкрементальной сборке может отличаться от строки в DllMain).
 const char* OrcWeaponRuntimeCompileStamp();
