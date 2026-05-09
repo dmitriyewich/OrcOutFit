@@ -778,6 +778,31 @@ struct HeldClumpApplyCtx {
     float logAtZ = 0.0f;
 };
 
+struct HeldRwcbFrameRestore {
+    RwFrame* frame = nullptr;
+    RwMatrix matrix{};
+    bool active = false;
+};
+
+static int s_heldRenderWeaponCbDepth = 0;
+static RpAtomic* s_heldRenderWeaponCbAtomic = nullptr;
+
+static void OrcHeldRestoreRwcbFrame(HeldRwcbFrameRestore& restore) {
+    if (!restore.active || !restore.frame)
+        return;
+    __try {
+        RwMatrix* m = RwFrameGetMatrix(restore.frame);
+        if (m) {
+            *m = restore.matrix;
+            RwMatrixUpdate(m);
+            RwFrameUpdateObjects(restore.frame);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OrcHeldRestoreRwcbFrame: SEH ex=0x%08X", GetExceptionCode());
+    }
+    restore.active = false;
+}
+
 /// Кадр атомика — сам dummy `gunflash` или потомок: на них **не** крутим `OrcTryApplyHeldPoseOneFrame`
 /// (локальные LTMs ≠ база «оружие в руке» — ломает DoGunFlash / альфу). Смещение вспышки — отдельно через muzzle-дельту.
 static bool OrcHeldAtomicFrameIsUnderGunflashDummy(RwFrame* atomicFrame, RwFrame* gunflashFrame) {
@@ -1285,7 +1310,7 @@ static bool OrcHeldRwcbShouldApplyAtomicImpl(CPed* ped, RpAtomic* atomic, int wt
     return OrcAtomicAttachedUnderPedRwClump(atomic, ped);
 }
 
-static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel) {
+static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel, HeldRwcbFrameRestore* restore) {
     if (!g_enabled || !ped || !atomic || wtSel <= 0)
         return false;
     RwFrame* af = RpAtomicGetFrame(atomic);
@@ -1309,8 +1334,19 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel)
     RwFrame* gunf = gfClump ? CClumpModelInfo::GetFrameFromName(gfClump, "gunflash") : nullptr;
     if (gunf && OrcHeldAtomicFrameIsUnderGunflashDummy(af, gunf))
         return false;
-    OrcHeldPoseInvalidateBaselineForRwFrame(af);
+    RwObject* wo = OrcResolveHeldWeaponRwObject(ped);
+    const bool stockVisual = !wo || !HeldWeaponRwObjectIsReplacementClone(ped, wo);
+    if (restore && stockVisual) {
+        if (RwMatrix* m = RwFrameGetMatrix(af)) {
+            restore->frame = af;
+            restore->matrix = *m;
+            restore->active = OrcRwMatrixFinite(&restore->matrix);
+        }
+        OrcHeldPoseInvalidateBaselineForRwFrame(af);
+    }
     if (!OrcTryApplyHeldPoseOneFrame(af, h)) {
+        if (restore)
+            restore->active = false;
         OrcLogInfoThrottled(493, 2500u, "held pose: skip apply failed (rwcbAtomic) wt=%d pedRef=%d", wtSel, pedRef);
         return false;
     }
@@ -1418,7 +1454,8 @@ static bool OrcHeldWeaponAtomicUsesRenderWeaponCbOnly(RpAtomic* atomic) {
 }
 
 /// `outLocalPlayerRwcbMatch` — для `HeldWeaponTrace`: совпадение атома с локальным `wo` без второго прохода `ShouldApply`.
-static bool OrcTryApplyHeldPoseForRenderWeaponAtomic(RpAtomic* atomic, bool* outLocalPlayerRwcbMatch) {
+static bool OrcTryApplyHeldPoseForRenderWeaponAtomic(RpAtomic* atomic, bool* outLocalPlayerRwcbMatch,
+    HeldRwcbFrameRestore* restore) {
     if (outLocalPlayerRwcbMatch)
         *outLocalPlayerRwcbMatch = false;
     if (!atomic)
@@ -1440,7 +1477,7 @@ static bool OrcTryApplyHeldPoseForRenderWeaponAtomic(RpAtomic* atomic, bool* out
             return false;
         if (outLocalPlayerRwcbMatch)
             *outLocalPlayerRwcbMatch = true;
-        return OrcApplyHeldPoseToRwcbAtomic(pl, atomic, wtSel);
+        return OrcApplyHeldPoseToRwcbAtomic(pl, atomic, wtSel, restore);
     }
     if (!g_renderAllPedsWeapons || !CPools::ms_pPedPool)
         return false;
@@ -1456,7 +1493,7 @@ static bool OrcTryApplyHeldPoseForRenderWeaponAtomic(RpAtomic* atomic, bool* out
         RwObject* wo = OrcResolveHeldWeaponRwObject(p);
         if (!OrcHeldRwcbShouldApplyAtomicImpl(p, atomic, wtSel, wo))
             return false;
-        return OrcApplyHeldPoseToRwcbAtomic(p, atomic, wtSel);
+        return OrcApplyHeldPoseToRwcbAtomic(p, atomic, wtSel, restore);
     };
     if (!s_heldPreRwNearbyPeds.empty()) {
         for (CPed* p : s_heldPreRwNearbyPeds) {
@@ -1599,12 +1636,12 @@ static void OrcTryApplyHeldPoseIfClumpMatches(RpClump* clump) {
     }
 }
 
-static void OrcTryApplyHeldPoseIfAtomicMatches(RpAtomic* atomic) {
+static void OrcTryApplyHeldPoseIfAtomicMatches(RpAtomic* atomic, HeldRwcbFrameRestore* restore) {
     if (!atomic)
         return;
     // Unified atomic matching/apply path (same matcher as RenderWeaponCB):
     // needed for replacement clump atomics that may skip RWCB and go through AtomicDefaultRenderCallBack.
-    if (OrcTryApplyHeldPoseForRenderWeaponAtomic(atomic, nullptr))
+    if (OrcTryApplyHeldPoseForRenderWeaponAtomic(atomic, nullptr, restore))
         return;
     if (OrcHeldWeaponAtomicUsesRenderWeaponCbOnly(atomic)) {
         if (g_heldPoseDebug)
@@ -1661,23 +1698,28 @@ static RpClump* __cdecl RpClumpRender_Detour(RpClump* clump) {
 }
 
 static RpAtomic* __cdecl AtomicDefaultRenderCallBack_Detour(RpAtomic* atomic) {
+    HeldRwcbFrameRestore restore{};
     if (g_enabled) {
         const bool allPeds = g_renderAllPedsWeapons;
         CPlayerPed* pl = FindPlayerPed(0);
-        if (allPeds || (pl && pl->m_pWeaponObject)) {
+        const bool insideRenderWeaponCb = s_heldRenderWeaponCbDepth > 0 && s_heldRenderWeaponCbAtomic == atomic;
+        if (!insideRenderWeaponCb && (allPeds || (pl && pl->m_pWeaponObject))) {
             __try {
-                OrcTryApplyHeldPoseIfAtomicMatches(atomic);
+                OrcTryApplyHeldPoseIfAtomicMatches(atomic, &restore);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 OrcLogError("AtomicDefaultRenderCallBack_Detour: SEH ex=0x%08X", GetExceptionCode());
             }
         }
     }
-    return g_AtomicDefaultRender_Orig ? g_AtomicDefaultRender_Orig(atomic) : nullptr;
+    RpAtomic* result = g_AtomicDefaultRender_Orig ? g_AtomicDefaultRender_Orig(atomic) : nullptr;
+    OrcHeldRestoreRwcbFrame(restore);
+    return result;
 }
 
 static void __cdecl RenderWeaponCB_Detour(RpAtomic* atomic) {
     bool appliedPose = false;
     bool rwcbMatchLocal = false;
+    HeldRwcbFrameRestore restore{};
     if (g_enabled) {
         const bool needRemote = g_renderAllPedsWeapons && CPools::ms_pPedPool != nullptr;
         CPlayerPed* plrw = FindPlayerPed(0);
@@ -1687,7 +1729,7 @@ static void __cdecl RenderWeaponCB_Detour(RpAtomic* atomic) {
             __try {
                 const bool needMatchForTrace = g_heldWeaponTrace >= 1 && g_orcLogLevel >= OrcLogLevel::Info;
                 appliedPose =
-                    OrcTryApplyHeldPoseForRenderWeaponAtomic(atomic, needMatchForTrace ? &rwcbMatchLocal : nullptr);
+                    OrcTryApplyHeldPoseForRenderWeaponAtomic(atomic, needMatchForTrace ? &rwcbMatchLocal : nullptr, &restore);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 OrcLogError("RenderWeaponCB_Detour: SEH ex=0x%08X", GetExceptionCode());
             }
@@ -1695,7 +1737,13 @@ static void __cdecl RenderWeaponCB_Detour(RpAtomic* atomic) {
     }
     if (g_heldWeaponTrace >= 1 && g_orcLogLevel >= OrcLogLevel::Info)
         OrcHeldTraceLogRenderWeaponCb(atomic, g_enabled && appliedPose, rwcbMatchLocal);
+    ++s_heldRenderWeaponCbDepth;
+    RpAtomic* prevRwcbAtomic = s_heldRenderWeaponCbAtomic;
+    s_heldRenderWeaponCbAtomic = atomic;
     OrcCallRenderWeaponCbOrigSafe(atomic, "rwcb:tail");
+    s_heldRenderWeaponCbAtomic = prevRwcbAtomic;
+    --s_heldRenderWeaponCbDepth;
+    OrcHeldRestoreRwcbFrame(restore);
 }
 
 void OrcHeldWeaponTraceGameProcessTick() {
