@@ -48,6 +48,13 @@ static std::string MakeWeaponReplacementKey(const std::string& weaponLower, cons
     return weaponLower + "|" + matchLower;
 }
 
+struct WeaponReplacementStickyChoiceSnapshot {
+    bool vanilla = false;
+    std::string assetKeyLower;
+};
+
+static std::unordered_map<std::string, WeaponReplacementStickyChoiceSnapshot> g_weaponReplacementRerollAvoidChoiceByPed;
+
 static WeaponReplacementAsset* FindWeaponReplacementAssetByKey(const std::string& keyLower) {
     if (keyLower.empty())
         return nullptr;
@@ -56,6 +63,60 @@ static WeaponReplacementAsset* FindWeaponReplacementAssetByKey(const std::string
             return &asset;
     }
     return nullptr;
+}
+
+static int FindWeaponReplacementAssetIndexByKeyLower(const std::string& keyLower) {
+    if (keyLower.empty())
+        return -1;
+    for (int i = 0; i < (int)g_weaponReplacementAssets.size(); ++i) {
+        if (OrcToLowerAscii(g_weaponReplacementAssets[(size_t)i].key) == keyLower)
+            return i;
+    }
+    return -1;
+}
+
+static std::unordered_map<std::string, WeaponReplacementStickyChoiceSnapshot> SnapshotWeaponReplacementStickyChoices() {
+    std::unordered_map<std::string, WeaponReplacementStickyChoiceSnapshot> snapshot;
+    snapshot.reserve(g_weaponReplacementRandomChoiceByPed.size());
+    for (const auto& kv : g_weaponReplacementRandomChoiceByPed) {
+        WeaponReplacementStickyChoiceSnapshot choice{};
+        if (kv.second == kWeaponReplacementVanillaChoice) {
+            choice.vanilla = true;
+            snapshot.emplace(kv.first, std::move(choice));
+            continue;
+        }
+        if (kv.second < 0 || kv.second >= (int)g_weaponReplacementAssets.size())
+            continue;
+        choice.assetKeyLower = OrcToLowerAscii(g_weaponReplacementAssets[(size_t)kv.second].key);
+        if (!choice.assetKeyLower.empty())
+            snapshot.emplace(kv.first, std::move(choice));
+    }
+    return snapshot;
+}
+
+static void RestoreWeaponReplacementStickyChoices(
+    const std::unordered_map<std::string, WeaponReplacementStickyChoiceSnapshot>& snapshot) {
+    if (snapshot.empty())
+        return;
+    for (const auto& kv : snapshot) {
+        if (kv.second.vanilla) {
+            if (g_weaponReplacementRandomIncludeVanilla)
+                g_weaponReplacementRandomChoiceByPed[kv.first] = kWeaponReplacementVanillaChoice;
+            continue;
+        }
+        const int assetIndex = FindWeaponReplacementAssetIndexByKeyLower(kv.second.assetKeyLower);
+        if (assetIndex >= 0)
+            g_weaponReplacementRandomChoiceByPed[kv.first] = assetIndex;
+    }
+}
+
+static bool WeaponReplacementChoiceMatchesSnapshot(int choice, const WeaponReplacementStickyChoiceSnapshot& snapshot) {
+    if (choice == kWeaponReplacementVanillaChoice)
+        return snapshot.vanilla;
+    if (choice < 0 || choice >= (int)g_weaponReplacementAssets.size())
+        return false;
+    return !snapshot.assetKeyLower.empty() &&
+        OrcToLowerAscii(g_weaponReplacementAssets[(size_t)choice].key) == snapshot.assetKeyLower;
 }
 
 static std::string StripSampColorCodes(std::string value) {
@@ -273,7 +334,8 @@ static void AddWeaponReplacementAsset(const std::string& key,
         (*randomByWeaponMap)[weaponLower].push_back(index);
 }
 
-void DiscoverWeaponReplacements() {
+void DiscoverWeaponReplacements(bool rerollStickyChoices) {
+    const auto stickyChoices = SnapshotWeaponReplacementStickyChoices();
     OrcClearAllWeaponReplacementInstances();
     DestroyWeaponReplacementAssets();
 
@@ -407,10 +469,17 @@ void DiscoverWeaponReplacements() {
     for (const auto& kv : g_weaponReplacementRandomBySkin)
         g_weaponReplacementStats.randomSkinWeapons += (int)kv.second.size();
     g_weaponReplacementStats.nickWeapons = (int)g_weaponReplacementByNick.size();
-    OrcLogInfo("DiscoverWeaponReplacements: weaponRandom=%d skinRandom=%d nick=%d",
+    if (rerollStickyChoices)
+        g_weaponReplacementRerollAvoidChoiceByPed = stickyChoices;
+    else {
+        g_weaponReplacementRerollAvoidChoiceByPed.clear();
+        RestoreWeaponReplacementStickyChoices(stickyChoices);
+    }
+    OrcLogInfo("DiscoverWeaponReplacements: weaponRandom=%d skinRandom=%d nick=%d reroll=%d",
         g_weaponReplacementStats.randomWeaponWeapons,
         g_weaponReplacementStats.randomSkinWeapons,
-        g_weaponReplacementStats.nickWeapons);
+        g_weaponReplacementStats.nickWeapons,
+        rerollStickyChoices ? 1 : 0);
     OrcHeldWeaponReplacementWarmupAfterDiscover();
 }
 
@@ -2160,9 +2229,31 @@ static int PickStickyWeaponReplacementChoice(CPed* ped,
     if (chosen != g_weaponReplacementRandomChoiceByPed.end())
         return chosen->second;
     const int pick = PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool);
-    if (pick != -2)
-        g_weaponReplacementRandomChoiceByPed[choiceKey] = pick;
-    return pick;
+    int finalPick = pick;
+    auto avoidIt = g_weaponReplacementRerollAvoidChoiceByPed.find(choiceKey);
+    if (avoidIt != g_weaponReplacementRerollAvoidChoiceByPed.end() &&
+        WeaponReplacementChoiceMatchesSnapshot(finalPick, avoidIt->second)) {
+        std::vector<int> skipped;
+        skipped.push_back(finalPick);
+        const size_t maxAttempts = sourcePool.size() + (g_weaponReplacementRandomIncludeVanilla ? 1u : 0u);
+        for (size_t attempt = 0; attempt < maxAttempts; ++attempt) {
+            const int alt = PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool);
+            if (alt == -2)
+                break;
+            if (!WeaponReplacementChoiceMatchesSnapshot(alt, avoidIt->second)) {
+                finalPick = alt;
+                break;
+            }
+            skipped.push_back(alt);
+        }
+        std::vector<int>& bag = g_weaponReplacementRandomBags[bagPoolKey];
+        for (int skippedPick : skipped)
+            bag.push_back(skippedPick);
+        g_weaponReplacementRerollAvoidChoiceByPed.erase(avoidIt);
+    }
+    if (finalPick != -2)
+        g_weaponReplacementRandomChoiceByPed[choiceKey] = finalPick;
+    return finalPick;
 }
 
 WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom) {

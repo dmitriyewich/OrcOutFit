@@ -2190,7 +2190,7 @@ static void OnDrawingEvent() {
             LoadStandardObjectsFromIni();
             DiscoverCustomSkins();
             LoadStandardSkinsFromIni();
-            DiscoverWeaponReplacements();
+            DiscoverWeaponReplacements(false);
             DiscoverWeaponTextures();
             overlay::SetDrawCallback(&OrcUiDraw);
         }
@@ -2307,5 +2307,4 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     }
     return TRUE;
 }
-
 

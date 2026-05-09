@@ -133,7 +133,7 @@ void LoadConfig();
 void RefreshActivationRouting();
 void DiscoverCustomObjectsAndEnsureIni();
 void DiscoverCustomSkins();
-void DiscoverWeaponReplacements();
+void DiscoverWeaponReplacements(bool rerollStickyChoices);
 void DiscoverWeaponTextures();
 void LoadStandardObjectsFromIni();
 void LoadStandardSkinsFromIni();

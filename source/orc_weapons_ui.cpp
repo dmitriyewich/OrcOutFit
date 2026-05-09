@@ -590,7 +590,7 @@ void OrcWeaponsUiDrawWeaponsTab() {
             if (save)
                 SaveMainIni();
             if (rescan)
-                DiscoverWeaponReplacements();
+                DiscoverWeaponReplacements(true);
             ImGui::EndTabItem();
         }
 
@@ -643,7 +643,7 @@ void OrcWeaponsUiDrawWeaponsTab() {
         g_livePreviewHeldCustomKey = g_uiHeldCustomKey;
         g_livePreviewHeldCustomWeaponType = g_uiWeaponIdx;
         g_livePreviewHeldBaseWeaponType = g_uiWeaponIdx;
-        g_livePreviewHeldCustomForceActive = !g_uiHeldCustomKey.empty();
+        g_livePreviewHeldCustomForceActive = weaponHeldTabActiveThisFrame && !g_uiHeldCustomKey.empty();
         g_livePreviewHeldBaseForceVanilla = weaponHeldTabActiveThisFrame && g_uiHeldCustomKey.empty();
         g_livePreviewHeldUseSecondary = g_uiWeaponSecondary && weaponHeldTabActiveThisFrame;
     }

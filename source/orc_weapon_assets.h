@@ -33,7 +33,7 @@ struct WeaponTextureAsset {
     bool loadFailedLogged = false;
 };
 
-void DiscoverWeaponReplacements();
+void DiscoverWeaponReplacements(bool rerollStickyChoices);
 void DiscoverWeaponTextures();
 
 WeaponReplacementStats OrcGetWeaponReplacementStats();
