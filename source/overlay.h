@@ -13,6 +13,7 @@ void Shutdown();
 bool IsOpen();
 void SetOpen(bool);
 void Toggle();
+void ReleaseInputCaptureIfClosed();
 void SetToggleVirtualKey(int vk);
 int  GetToggleVirtualKey();
 void SetHotkeyEnabled(bool enabled);

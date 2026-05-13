@@ -29,9 +29,6 @@ void OrcDestroyRenderedWeapon(RenderedWeapon& r);
 void OrcWeaponClearLocalRendered();
 void OrcWeaponClearOtherPedsRendered();
 void OrcClearAllWeaponReplacementInstances();
-/// После `DiscoverWeaponReplacements` заранее создаёт RwObject клона в `g_heldWeaponReplacements` без подмены `m_pWeaponObject`
-/// (полный `OrcPrepareHeldWeaponReplacementBefore` только из `pedRenderEvent`, иначе возможен AV в отрисовке).
-void OrcHeldWeaponReplacementWarmupAfterDiscover();
 
 void OrcPruneHeldWeaponReplacementInstances();
 

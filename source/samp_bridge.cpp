@@ -324,7 +324,7 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
     const bool enabled = wantUiCursor;
     const std::uint64_t now = GetTickCount64();
     const bool sameAsCache = (g_sampOverlayCursorMode == mode && g_sampOverlayCursorEnabled == enabled);
-    const bool reassert = enabled && (now - g_sampOverlayCursorLastApplyMs >= kReassertIntervalMs);
+    const bool reassert = now - g_sampOverlayCursorLastApplyMs >= kReassertIntervalMs;
     if (sameAsCache && !reassert)
         return;
 

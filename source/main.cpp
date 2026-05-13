@@ -1516,7 +1516,7 @@ const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
     const auto logPoseDecision = [&](int logId, const char* source, const char* detail, const char* replKey, const HeldWeaponPoseCfg* pose) {
         if (!g_heldPoseDebug || g_orcLogLevel < OrcLogLevel::Info)
             return;
-        OrcLogInfoThrottled(logId, 900u,
+        OrcLogInfoThrottled(logId, 5000u,
             "held pose: source=%s pedRef=%d wt=%d secondary=%d detail=%s replKey=%s liveAct=%d liveForced=%d liveWt=%d liveKey=%s en=%d xyz=%.3f %.3f %.3f rot=%.2f %.2f %.2f sc=%.3f",
             source ? source : "-", CPools::GetPedRef(ped), wt, secondary ? 1 : 0, detail ? detail : "-",
             (replKey && replKey[0]) ? replKey : "-", g_livePreviewHeldActive ? 1 : 0,
@@ -1543,7 +1543,7 @@ const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
                     return it->second;
                 }
                 if (g_heldPoseDebug && g_orcLogLevel >= OrcLogLevel::Info) {
-                    OrcLogInfoThrottled(970, 1000u,
+                    OrcLogInfoThrottled(970, 5000u,
                         "held pose: live custom forced but key missing -> runtime fallback pedRef=%d wt=%d key=%s",
                         CPools::GetPedRef(ped), wt, g_livePreviewHeldCustomKey.c_str());
                 }
@@ -1579,7 +1579,7 @@ const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
             auto itPose = itCustom->second[(size_t)wt].find(activeReplKeyLower);
             if (itPose != itCustom->second[(size_t)wt].end()) {
                 if (g_heldPoseDebug && g_orcLogLevel >= OrcLogLevel::Info) {
-                    OrcLogInfoThrottled(968, 1200u,
+                    OrcLogInfoThrottled(968, 5000u,
                         "held pose: custom match pedRef=%d wt=%d secondary=%d key=%s src=%s",
                         CPools::GetPedRef(ped), wt, secondary ? 1 : 0, activeReplKeyLower.c_str(),
                         activeKeyFromHeldCapture ? "heldCapture" : "resolver");
@@ -1589,7 +1589,7 @@ const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
                 return itPose->second;
             }
             if (g_heldPoseDebug && g_orcLogLevel >= OrcLogLevel::Info) {
-                OrcLogInfoThrottled(969, 1200u,
+                OrcLogInfoThrottled(969, 5000u,
                     "held pose: custom miss -> base fallback pedRef=%d wt=%d secondary=%d key=%s src=%s",
                     CPools::GetPedRef(ped), wt, secondary ? 1 : 0, activeReplKeyLower.c_str(),
                     activeKeyFromHeldCapture ? "heldCapture" : "resolver");
@@ -2239,6 +2239,8 @@ static void OnPedRenderAfter(CPed* ped) {
 }
 
 static void OnGameProcessBegin() {
+    overlay::ReleaseInputCaptureIfClosed();
+    OrcFlushDeferredHeldWeaponSlotRestore();
     OrcHeldPoseBeginSimFrame();
     OrcHeldWeaponTraceGameProcessTick();
 }
@@ -2307,4 +2309,3 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     }
     return TRUE;
 }
-

@@ -6,6 +6,7 @@
 #include "orc_ui_shared.h"
 #include "orc_ui_bones.h"
 #include "orc_weapon_assets.h"
+#include "orc_weapon_runtime.h"
 
 #include "samp_bridge.h"
 
@@ -170,17 +171,6 @@ void OrcWeaponsUiDrawWeaponsTab() {
         g_livePreviewWeaponSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
         g_livePreviewWeapon1 = g_uiWeapon1;
         g_livePreviewWeapon2 = g_uiWeapon2;
-        g_livePreviewHeldActive = true;
-        g_livePreviewHeldSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
-        g_livePreviewHeld1 = g_uiHeld1;
-        g_livePreviewHeld2 = g_uiHeld2;
-        g_livePreviewHeldCustom1 = g_uiHeldCustom1;
-        g_livePreviewHeldCustom2 = g_uiHeldCustom2;
-        g_livePreviewHeldCustomKey = g_uiHeldCustomKey;
-        g_livePreviewHeldCustomWeaponType = g_uiWeaponIdx;
-        g_livePreviewHeldBaseWeaponType = g_uiWeaponIdx;
-        g_livePreviewHeldCustomForceActive = false;
-        g_livePreviewHeldBaseForceVanilla = false;
     }
 
     bool weaponHeldTabActiveThisFrame = false;
@@ -568,7 +558,8 @@ void OrcWeaponsUiDrawWeaponsTab() {
         if (ImGui::BeginTabItem(WT(OrcTextId::TabWeaponReplacement))) {
             OrcUiCheckbox("weapon_replacement_enabled", WT(OrcTextId::EnableWeaponReplacement), &g_weaponReplacementEnabled);
             OrcUiCheckbox("weapon_replacement_body", WT(OrcTextId::ReplaceWeaponsOnBody), &g_weaponReplacementOnBody);
-            OrcUiCheckbox("weapon_replacement_hands", WT(OrcTextId::ReplaceWeaponsInHands), &g_weaponReplacementInHands);
+            if (OrcUiCheckbox("weapon_replacement_hands", WT(OrcTextId::ReplaceWeaponsInHands), &g_weaponReplacementInHands))
+                OrcDestroyAllHeldWeaponReplacementInstances();
             OrcUiCheckbox("weapon_hud_icon_guns_txd", WT(OrcTextId::WeaponHudIconFromGunsTxd), &g_weaponHudIconFromGunsTxd);
             ImGui::TextWrapped("%s", WT(OrcTextId::WeaponHudIconFromGunsTxdHint));
             OrcUiCheckbox("weapon_replacement_rand_vanilla",
@@ -636,6 +627,10 @@ void OrcWeaponsUiDrawWeaponsTab() {
     if (skinRowOk) {
         g_livePreviewWeapon1 = g_uiWeapon1;
         g_livePreviewWeapon2 = g_uiWeapon2;
+    }
+    if (skinRowOk && weaponHeldTabActiveThisFrame) {
+        g_livePreviewHeldActive = true;
+        g_livePreviewHeldSkinDff = pedSkins[(size_t)g_uiWeaponSkinListIdx].first;
         g_livePreviewHeld1 = g_uiHeld1;
         g_livePreviewHeld2 = g_uiHeld2;
         g_livePreviewHeldCustom1 = g_uiHeldCustom1;

@@ -144,6 +144,29 @@ bool IsKeyMsg(UINT message) {
     }
 }
 
+bool IsWindowChromeMsg(UINT message, WPARAM wparam) {
+    if (message == WM_CLOSE)
+        return true;
+    if (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_CLOSE)
+        return true;
+    switch (message) {
+    case WM_NCHITTEST:
+    case WM_NCMOUSEMOVE:
+    case WM_NCLBUTTONDOWN:
+    case WM_NCLBUTTONUP:
+    case WM_NCLBUTTONDBLCLK:
+    case WM_NCRBUTTONDOWN:
+    case WM_NCRBUTTONUP:
+    case WM_NCRBUTTONDBLCLK:
+    case WM_NCMBUTTONDOWN:
+    case WM_NCMBUTTONUP:
+    case WM_NCMBUTTONDBLCLK:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool WantsUiCursorNow() {
     return (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0;
 }
@@ -1175,7 +1198,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) 
             return TRUE;
         }
 
-        if (g_menuOpen) {
+        if (g_menuOpen && !IsWindowChromeMsg(message, wparam)) {
             ImGui_ImplWin32_WndProcHandler(hwnd, message, wparam, lparam);
             const ImGuiIO& io = ImGui::GetIO();
             const bool wantsUiCursor = WantsUiCursorNow();
@@ -1304,6 +1327,21 @@ bool IsOpen() { return g_menuOpen; }
 void SetOpen(bool open) { g_menuOpen = open; }
 
 void Toggle() { g_menuOpen = !g_menuOpen; }
+
+void ReleaseInputCaptureIfClosed() {
+    if (g_menuOpen)
+        return;
+    if (samp_bridge::IsSampBuildKnown()) {
+        if (g_cursorPatched)
+            PatchCursor(false);
+        samp_bridge::SyncSampOverlayCursor(false);
+    } else if (g_cursorPatched) {
+        PatchCursor(false);
+    }
+    SetPlayerControlsBlocked(false);
+    g_lastWantCursor = false;
+    g_stickyMouseCapture = false;
+}
 
 void SetToggleVirtualKey(int vk) { g_toggleVk = vk; }
 

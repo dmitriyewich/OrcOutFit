@@ -44,8 +44,36 @@ static WeaponReplacementStats g_weaponReplacementStats;
 
 static constexpr int kWeaponReplacementVanillaChoice = -1;
 
+std::string OrcGetWeaponModelBaseNameLower(int wt);
+
 static std::string MakeWeaponReplacementKey(const std::string& weaponLower, const std::string& matchLower) {
     return weaponLower + "|" + matchLower;
+}
+
+static void AppendUniqueLower(std::vector<std::string>& out, const std::string& value) {
+    if (value.empty())
+        return;
+    const std::string lower = OrcToLowerAscii(value);
+    if (std::find(out.begin(), out.end(), lower) == out.end())
+        out.push_back(lower);
+}
+
+static std::vector<std::string> WeaponLookupNamesLower(int wt) {
+    std::vector<std::string> names;
+    AppendUniqueLower(names, OrcGetWeaponModelBaseNameLower(wt));
+    switch (wt) {
+    case WEAPONTYPE_SHOTGUN:
+        AppendUniqueLower(names, "chromegun");
+        AppendUniqueLower(names, "shotgun");
+        break;
+    case WEAPONTYPE_MP5:
+        AppendUniqueLower(names, "mp5lng");
+        AppendUniqueLower(names, "mp5");
+        break;
+    default:
+        break;
+    }
+    return names;
 }
 
 struct WeaponReplacementStickyChoiceSnapshot {
@@ -157,11 +185,10 @@ std::string OrcGetWeaponModelBaseNameLower(int wt) {
 static std::vector<std::string> KnownWeaponModelNamesLower() {
     std::vector<std::string> names;
     for (int wt : g_availableWeaponTypes) {
-        std::string name = OrcGetWeaponModelBaseNameLower(wt);
-        if (!name.empty())
-            names.push_back(name);
+        for (const std::string& name : WeaponLookupNamesLower(wt))
+            AppendUniqueLower(names, name);
         if (wt > 0 && wt < (int)g_cfg.size() && g_cfg[(size_t)wt].name && g_cfg[(size_t)wt].name[0])
-            names.push_back(OrcToLowerAscii(g_cfg[(size_t)wt].name));
+            AppendUniqueLower(names, g_cfg[(size_t)wt].name);
     }
     std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
         if (a.size() != b.size()) return a.size() > b.size();
@@ -480,7 +507,6 @@ void DiscoverWeaponReplacements(bool rerollStickyChoices) {
         g_weaponReplacementStats.randomSkinWeapons,
         g_weaponReplacementStats.nickWeapons,
         rerollStickyChoices ? 1 : 0);
-    OrcHeldWeaponReplacementWarmupAfterDiscover();
 }
 
 WeaponReplacementStats OrcGetWeaponReplacementStats() {
@@ -1137,7 +1163,7 @@ static WeaponTextureAsset* PickStickyRandomWeaponTextureAsset(CPed* ped, const s
 
 /// `wprand:<weapon_folder>:<dff_basename>` (e.g. `wprand:desert_eagle:markvii`) — same match key as
 /// `Weapons\Guns\<weapon>\<basename>.txd` indexed under `weapon|basename`.
-static bool WeaponTextureParseWprandReplacementKey(const std::string& weaponLowerExpected,
+static bool WeaponTextureParseWprandReplacementKey(const std::vector<std::string>& weaponLowerExpected,
     const std::string& replacementKey,
     std::string* variantBasenameLowerOut) {
     static constexpr char kPref[] = "wprand:";
@@ -1149,7 +1175,7 @@ static bool WeaponTextureParseWprandReplacementKey(const std::string& weaponLowe
         return false;
     const std::string weaponPart = OrcToLowerAscii(rest.substr(0, col));
     const std::string basePartRaw = rest.substr(col + 1);
-    if (weaponPart != weaponLowerExpected)
+    if (std::find(weaponLowerExpected.begin(), weaponLowerExpected.end(), weaponPart) == weaponLowerExpected.end())
         return false;
     *variantBasenameLowerOut = OrcToLowerAscii(OrcBaseNameNoExt(basePartRaw));
     return !variantBasenameLowerOut->empty();
@@ -1161,8 +1187,8 @@ static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped,
     const std::string* replacementKeyHint) {
     if (!g_enabled || !g_weaponTexturesEnabled || !ped || wt <= 0)
         return nullptr;
-    const std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
-    if (weaponLower.empty())
+    std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    if (weaponNames.empty())
         return nullptr;
 
     if (g_weaponTextureNickMode && samp_bridge::IsSampBuildKnown()) {
@@ -1171,11 +1197,13 @@ static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped,
         if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocal)) {
             const std::string nickLower = OrcToLowerAscii(StripSampColorCodes(nick));
             if (!nickLower.empty()) {
-                const std::string nickKey = MakeWeaponReplacementKey(weaponLower, nickLower);
-                auto nickIt = g_weaponTextureByNick.find(nickKey);
-                if (nickIt != g_weaponTextureByNick.end() &&
-                    nickIt->second >= 0 && nickIt->second < (int)g_weaponTextureAssets.size()) {
-                    return &g_weaponTextureAssets[(size_t)nickIt->second];
+                for (const std::string& weaponName : weaponNames) {
+                    const std::string nickKey = MakeWeaponReplacementKey(weaponName, nickLower);
+                    auto nickIt = g_weaponTextureByNick.find(nickKey);
+                    if (nickIt != g_weaponTextureByNick.end() &&
+                        nickIt->second >= 0 && nickIt->second < (int)g_weaponTextureAssets.size()) {
+                        return &g_weaponTextureAssets[(size_t)nickIt->second];
+                    }
                 }
             }
         }
@@ -1190,14 +1218,15 @@ static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped,
     }
     if (wprandKeyPtr && !wprandKeyPtr->empty()) {
         std::string variantLower;
-        if (WeaponTextureParseWprandReplacementKey(weaponLower, *wprandKeyPtr, &variantLower)) {
-            const std::string replTexKey = MakeWeaponReplacementKey(weaponLower, variantLower);
+        if (WeaponTextureParseWprandReplacementKey(weaponNames, *wprandKeyPtr, &variantLower)) {
+            const std::string replWeaponLower = OrcToLowerAscii(wprandKeyPtr->substr(7, wprandKeyPtr->find(':', 7) - 7));
+            const std::string replTexKey = MakeWeaponReplacementKey(replWeaponLower, variantLower);
             auto replIt = g_weaponTextureBySkin.find(replTexKey);
             if (replIt != g_weaponTextureBySkin.end() &&
                 replIt->second >= 0 && replIt->second < (int)g_weaponTextureAssets.size()) {
                 OrcLogInfoThrottled(402, 10000u,
                     "weapon texture: Guns\\%s\\%s.txd via replacement key \"%s\" (wt=%d)",
-                    weaponLower.c_str(),
+                    replWeaponLower.c_str(),
                     variantLower.c_str(),
                     wprandKeyPtr->c_str(),
                     wt);
@@ -1207,33 +1236,37 @@ static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped,
     }
 
     const std::string skinLowerRaw = OrcToLowerAscii(GetPedStdSkinDffName(ped));
-    // `Weapons\Guns\<weapon>\<weapon>.txd` is indexed as match key `<weapon>|<weapon>` (same string twice).
-    // Used when ped skin has no `<weapon>\<dff>.txd` entry (many packs ship one bundle as desert_eagle\desert_eagle.txd).
-    const std::string defaultWeaponSkinKey = MakeWeaponReplacementKey(weaponLower, weaponLower);
 
     if (!skinLowerRaw.empty()) {
-        const std::string skinKey = MakeWeaponReplacementKey(weaponLower, skinLowerRaw);
-        auto skinIt = g_weaponTextureBySkin.find(skinKey);
-        if (skinIt != g_weaponTextureBySkin.end() &&
-            skinIt->second >= 0 && skinIt->second < (int)g_weaponTextureAssets.size()) {
-            return &g_weaponTextureAssets[(size_t)skinIt->second];
-        }
-        if (allowRandom && g_weaponTextureRandomMode) {
-            if (WeaponTextureAsset* picked = PickStickyRandomWeaponTextureAsset(ped, skinKey))
-                return picked;
+        for (const std::string& weaponName : weaponNames) {
+            const std::string skinKey = MakeWeaponReplacementKey(weaponName, skinLowerRaw);
+            auto skinIt = g_weaponTextureBySkin.find(skinKey);
+            if (skinIt != g_weaponTextureBySkin.end() &&
+                skinIt->second >= 0 && skinIt->second < (int)g_weaponTextureAssets.size()) {
+                return &g_weaponTextureAssets[(size_t)skinIt->second];
+            }
+            if (allowRandom && g_weaponTextureRandomMode) {
+                if (WeaponTextureAsset* picked = PickStickyRandomWeaponTextureAsset(ped, skinKey))
+                    return picked;
+            }
         }
     }
 
-    auto defIt = g_weaponTextureBySkin.find(defaultWeaponSkinKey);
-    if (defIt != g_weaponTextureBySkin.end() &&
-        defIt->second >= 0 && defIt->second < (int)g_weaponTextureAssets.size()) {
-        OrcLogInfoThrottled(401, 8000u,
-            "weapon texture: using default Guns\\%s\\%s.txd (wt=%d pedSkin=\"%s\")",
-            weaponLower.c_str(),
-            weaponLower.c_str(),
-            wt,
-            GetPedStdSkinDffName(ped).c_str());
-        return &g_weaponTextureAssets[(size_t)defIt->second];
+    // `Weapons\Guns\<weapon>\<weapon>.txd` is indexed as match key `<weapon>|<weapon>` (same string twice).
+    // Used when ped skin has no `<weapon>\<dff>.txd` entry (many packs ship one bundle as desert_eagle\desert_eagle.txd).
+    for (const std::string& weaponName : weaponNames) {
+        const std::string defaultWeaponSkinKey = MakeWeaponReplacementKey(weaponName, weaponName);
+        auto defIt = g_weaponTextureBySkin.find(defaultWeaponSkinKey);
+        if (defIt != g_weaponTextureBySkin.end() &&
+            defIt->second >= 0 && defIt->second < (int)g_weaponTextureAssets.size()) {
+            OrcLogInfoThrottled(401, 8000u,
+                "weapon texture: using default Guns\\%s\\%s.txd (wt=%d pedSkin=\"%s\")",
+                weaponName.c_str(),
+                weaponName.c_str(),
+                wt,
+                GetPedStdSkinDffName(ped).c_str());
+            return &g_weaponTextureAssets[(size_t)defIt->second];
+        }
     }
     return nullptr;
 }
@@ -2274,8 +2307,8 @@ WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt
                 return forced;
         }
     }
-    const std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
-    if (weaponLower.empty())
+    const std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    if (weaponNames.empty())
         return nullptr;
 
     if (samp_bridge::IsSampBuildKnown()) {
@@ -2284,11 +2317,13 @@ WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt
         if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocal)) {
             const std::string nickLower = OrcToLowerAscii(StripSampColorCodes(nick));
             if (!nickLower.empty()) {
-                const std::string nickKey = MakeWeaponReplacementKey(weaponLower, nickLower);
-                auto nickIt = g_weaponReplacementByNick.find(nickKey);
-                if (nickIt != g_weaponReplacementByNick.end() &&
-                    nickIt->second >= 0 && nickIt->second < (int)g_weaponReplacementAssets.size()) {
-                    return &g_weaponReplacementAssets[(size_t)nickIt->second];
+                for (const std::string& weaponName : weaponNames) {
+                    const std::string nickKey = MakeWeaponReplacementKey(weaponName, nickLower);
+                    auto nickIt = g_weaponReplacementByNick.find(nickKey);
+                    if (nickIt != g_weaponReplacementByNick.end() &&
+                        nickIt->second >= 0 && nickIt->second < (int)g_weaponReplacementAssets.size()) {
+                        return &g_weaponReplacementAssets[(size_t)nickIt->second];
+                    }
                 }
             }
         }
@@ -2297,24 +2332,26 @@ WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt
     const std::string skinLower = OrcToLowerAscii(GetPedStdSkinDffName(ped));
     if (skinLower.empty())
         return nullptr;
-    const std::string skinKey = MakeWeaponReplacementKey(weaponLower, skinLower);
     if (allowRandom) {
-        auto skinIt = g_weaponReplacementRandomBySkin.find(skinKey);
-        if (skinIt != g_weaponReplacementRandomBySkin.end() && !skinIt->second.empty()) {
-            const int pick = PickStickyWeaponReplacementChoice(ped, "sr|" + skinKey, skinKey, skinIt->second);
-            if (pick == kWeaponReplacementVanillaChoice)
-                return nullptr;
-            if (pick >= 0 && pick < (int)g_weaponReplacementAssets.size())
-                return &g_weaponReplacementAssets[(size_t)pick];
-        }
-        auto wIt = g_weaponReplacementRandomByWeapon.find(weaponLower);
-        if (wIt != g_weaponReplacementRandomByWeapon.end() && !wIt->second.empty()) {
-            const std::string bagKey = std::string("w|") + weaponLower;
-            const int pick = PickStickyWeaponReplacementChoice(ped, "wr|" + weaponLower, bagKey, wIt->second);
-            if (pick == kWeaponReplacementVanillaChoice)
-                return nullptr;
-            if (pick >= 0 && pick < (int)g_weaponReplacementAssets.size())
-                return &g_weaponReplacementAssets[(size_t)pick];
+        for (const std::string& weaponName : weaponNames) {
+            const std::string skinKey = MakeWeaponReplacementKey(weaponName, skinLower);
+            auto skinIt = g_weaponReplacementRandomBySkin.find(skinKey);
+            if (skinIt != g_weaponReplacementRandomBySkin.end() && !skinIt->second.empty()) {
+                const int pick = PickStickyWeaponReplacementChoice(ped, "sr|" + skinKey, skinKey, skinIt->second);
+                if (pick == kWeaponReplacementVanillaChoice)
+                    return nullptr;
+                if (pick >= 0 && pick < (int)g_weaponReplacementAssets.size())
+                    return &g_weaponReplacementAssets[(size_t)pick];
+            }
+            auto wIt = g_weaponReplacementRandomByWeapon.find(weaponName);
+            if (wIt != g_weaponReplacementRandomByWeapon.end() && !wIt->second.empty()) {
+                const std::string bagKey = std::string("w|") + weaponName;
+                const int pick = PickStickyWeaponReplacementChoice(ped, "wr|" + weaponName, bagKey, wIt->second);
+                if (pick == kWeaponReplacementVanillaChoice)
+                    return nullptr;
+                if (pick >= 0 && pick < (int)g_weaponReplacementAssets.size())
+                    return &g_weaponReplacementAssets[(size_t)pick];
+            }
         }
     }
     return nullptr;
@@ -2350,8 +2387,8 @@ bool OrcPinWeaponReplacementChoiceForPed(CPed* ped, int wt, const std::string& r
     const int pedRef = CPools::GetPedRef(ped);
     if (pedRef <= 0)
         return false;
-    const std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
-    if (weaponLower.empty())
+    const std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    if (weaponNames.empty())
         return false;
 
     const std::string keyLower = OrcToLowerAscii(replacementKey);
@@ -2368,33 +2405,37 @@ bool OrcPinWeaponReplacementChoiceForPed(CPed* ped, int wt, const std::string& r
     bool pinned = false;
     const std::string pedPrefix = std::to_string(pedRef) + "|";
     const std::string skinRaw = GetPedStdSkinDffName(ped);
-    if (!skinRaw.empty()) {
-        const std::string skinKey = MakeWeaponReplacementKey(weaponLower, OrcToLowerAscii(skinRaw));
-        auto itSkinPool = g_weaponReplacementRandomBySkin.find(skinKey);
-        if (itSkinPool != g_weaponReplacementRandomBySkin.end() && !itSkinPool->second.empty()) {
-            g_weaponReplacementRandomChoiceByPed[pedPrefix + "sr|" + skinKey] = assetIndex;
+    for (const std::string& weaponName : weaponNames) {
+        if (!skinRaw.empty()) {
+            const std::string skinKey = MakeWeaponReplacementKey(weaponName, OrcToLowerAscii(skinRaw));
+            auto itSkinPool = g_weaponReplacementRandomBySkin.find(skinKey);
+            if (itSkinPool != g_weaponReplacementRandomBySkin.end() && !itSkinPool->second.empty()) {
+                g_weaponReplacementRandomChoiceByPed[pedPrefix + "sr|" + skinKey] = assetIndex;
+                pinned = true;
+            }
+        }
+        auto itWPool = g_weaponReplacementRandomByWeapon.find(weaponName);
+        if (itWPool != g_weaponReplacementRandomByWeapon.end() && !itWPool->second.empty()) {
+            g_weaponReplacementRandomChoiceByPed[pedPrefix + "wr|" + weaponName] = assetIndex;
             pinned = true;
         }
-    }
-    auto itWPool = g_weaponReplacementRandomByWeapon.find(weaponLower);
-    if (itWPool != g_weaponReplacementRandomByWeapon.end() && !itWPool->second.empty()) {
-        g_weaponReplacementRandomChoiceByPed[pedPrefix + "wr|" + weaponLower] = assetIndex;
-        pinned = true;
     }
     return pinned;
 }
 
 void OrcCollectWeaponReplacementVariantKeys(int wt, std::vector<std::string>& outKeys) {
     outKeys.clear();
-    const std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
-    if (weaponLower.empty())
+    const std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    if (weaponNames.empty())
         return;
-    const std::string pref = std::string("wprand:") + weaponLower + ":";
     outKeys.reserve(g_weaponReplacementAssets.size());
-    for (const WeaponReplacementAsset& asset : g_weaponReplacementAssets) {
-        if (asset.key.rfind(pref, 0) != 0)
-            continue;
-        outKeys.push_back(asset.key);
+    for (const std::string& weaponName : weaponNames) {
+        const std::string pref = std::string("wprand:") + weaponName + ":";
+        for (const WeaponReplacementAsset& asset : g_weaponReplacementAssets) {
+            if (asset.key.rfind(pref, 0) != 0)
+                continue;
+            outKeys.push_back(asset.key);
+        }
     }
     std::sort(outKeys.begin(), outKeys.end());
     outKeys.erase(std::unique(outKeys.begin(), outKeys.end()), outKeys.end());
@@ -2416,21 +2457,25 @@ bool OrcWeaponReplacementIsStickyVanillaChoice(CPed* ped, int wt) {
     const int pedRef = CPools::GetPedRef(ped);
     if (pedRef <= 0)
         return false;
-    std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
-    if (weaponLower.empty())
+    const std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    if (weaponNames.empty())
         return false;
     const std::string pedPrefix = std::to_string(pedRef) + "|";
     const std::string skinRaw = GetPedStdSkinDffName(ped);
-    if (!skinRaw.empty()) {
-        const std::string skinKey = MakeWeaponReplacementKey(weaponLower, OrcToLowerAscii(skinRaw));
-        auto itSkin = g_weaponReplacementRandomChoiceByPed.find(pedPrefix + "sr|" + skinKey);
-        if (itSkin != g_weaponReplacementRandomChoiceByPed.end() &&
-            itSkin->second == kWeaponReplacementVanillaChoice)
+    for (const std::string& weaponName : weaponNames) {
+        if (!skinRaw.empty()) {
+            const std::string skinKey = MakeWeaponReplacementKey(weaponName, OrcToLowerAscii(skinRaw));
+            auto itSkin = g_weaponReplacementRandomChoiceByPed.find(pedPrefix + "sr|" + skinKey);
+            if (itSkin != g_weaponReplacementRandomChoiceByPed.end() &&
+                itSkin->second == kWeaponReplacementVanillaChoice)
+                return true;
+        }
+        auto itW = g_weaponReplacementRandomChoiceByPed.find(pedPrefix + "wr|" + weaponName);
+        if (itW != g_weaponReplacementRandomChoiceByPed.end() &&
+            itW->second == kWeaponReplacementVanillaChoice)
             return true;
     }
-    auto itW = g_weaponReplacementRandomChoiceByPed.find(pedPrefix + "wr|" + weaponLower);
-    return itW != g_weaponReplacementRandomChoiceByPed.end() &&
-        itW->second == kWeaponReplacementVanillaChoice;
+    return false;
 }
 
 size_t OrcWeaponAssetsDbgReplacementNickKeys() {
