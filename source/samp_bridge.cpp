@@ -324,7 +324,7 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
     const bool enabled = wantUiCursor;
     const std::uint64_t now = GetTickCount64();
     const bool sameAsCache = (g_sampOverlayCursorMode == mode && g_sampOverlayCursorEnabled == enabled);
-    const bool reassert = now - g_sampOverlayCursorLastApplyMs >= kReassertIntervalMs;
+    const bool reassert = wantUiCursor && now - g_sampOverlayCursorLastApplyMs >= kReassertIntervalMs;
     if (sameAsCache && !reassert)
         return;
 
@@ -336,6 +336,8 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
         auto setCursorMode = reinterpret_cast<SetCursorModeFn>(
             g_state.base + g_state.version->setCursorModeOffset);
         setCursorMode(reinterpret_cast<void*>(static_cast<std::uintptr_t>(game)), mode, enabled);
+        if (!sameAsCache)
+            OrcLogInfo("samp_bridge: overlay cursor mode=%d enabled=%d", mode, enabled ? 1 : 0);
         g_sampOverlayCursorMode = mode;
         g_sampOverlayCursorEnabled = enabled;
         g_sampOverlayCursorLastApplyMs = now;

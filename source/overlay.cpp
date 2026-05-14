@@ -616,12 +616,14 @@ void SetPlayerControlsBlocked(bool blocked) {
 void ApplyCursorState(IDirect3DDevice9* device, bool wantCursor) {
     const bool sampCursorApi = samp_bridge::IsSampBuildKnown();
     ImGuiIO* io = ImGui::GetCurrentContext() ? &ImGui::GetIO() : nullptr;
+    const bool cursorStateChanged = wantCursor != g_lastWantCursor;
 
     if (sampCursorApi) {
         if (g_cursorPatched)
             PatchCursor(false);
-        samp_bridge::SyncSampOverlayCursor(wantCursor);
-    } else if (wantCursor != g_lastWantCursor) {
+        if (wantCursor || cursorStateChanged)
+            samp_bridge::SyncSampOverlayCursor(wantCursor);
+    } else if (cursorStateChanged) {
         PatchCursor(wantCursor);
         if (device)
             device->ShowCursor(wantCursor ? TRUE : FALSE);
@@ -630,7 +632,7 @@ void ApplyCursorState(IDirect3DDevice9* device, bool wantCursor) {
     if (io)
         io->MouseDrawCursor = wantCursor && !sampCursorApi;
 
-    if (wantCursor || g_lastWantCursor != wantCursor)
+    if (wantCursor || cursorStateChanged)
         ResetPadMouseState();
     SetPlayerControlsBlocked(wantCursor);
     g_lastWantCursor = wantCursor;
@@ -1160,10 +1162,12 @@ void CleanupImGui() {
 
 void ForceCursorAndControlsOff(IDirect3DDevice9* device) {
     if (samp_bridge::IsSampBuildKnown()) {
-        samp_bridge::SyncSampOverlayCursor(false);
+        if (g_lastWantCursor)
+            samp_bridge::SyncSampOverlayCursor(false);
     } else {
+        const bool hadPluginCursor = g_cursorPatched || g_lastWantCursor;
         PatchCursor(false);
-        if (device)
+        if (device && hadPluginCursor)
             device->ShowCursor(FALSE);
     }
 
@@ -1289,7 +1293,8 @@ void Shutdown() {
         g_initThread = nullptr;
     }
 
-    samp_bridge::SyncSampOverlayCursor(false);
+    if (g_lastWantCursor)
+        samp_bridge::SyncSampOverlayCursor(false);
     PatchCursor(false);
     SetPlayerControlsBlocked(false);
     ResetPadMouseState();
@@ -1334,7 +1339,8 @@ void ReleaseInputCaptureIfClosed() {
     if (samp_bridge::IsSampBuildKnown()) {
         if (g_cursorPatched)
             PatchCursor(false);
-        samp_bridge::SyncSampOverlayCursor(false);
+        if (g_lastWantCursor)
+            samp_bridge::SyncSampOverlayCursor(false);
     } else if (g_cursorPatched) {
         PatchCursor(false);
     }
