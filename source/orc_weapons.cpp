@@ -11,12 +11,24 @@
 #include <cstring>
 #include <cstdlib>
 
+std::vector<int> g_weaponDatModelId;
+std::vector<std::string> g_weaponDatIdeName;
+static std::vector<std::string> g_weaponObjectDffByModelId;
+
 namespace {
 
 bool g_weaponDatHookInstalled = false;
 int(__cdecl* g_LoadWeaponObject_Orig)(const char* line) = nullptr;
 
-// SA `CFileLoader::LoadWeaponObject` receives a processed line, not raw weapon.dat:
+static void StoreWeaponObjectDffByModelId(int modelId, const char* dffName) {
+    if (modelId <= 0 || !dffName || !dffName[0])
+        return;
+    if ((int)g_weaponObjectDffByModelId.size() <= modelId)
+        g_weaponObjectDffByModelId.resize(modelId + 1);
+    g_weaponObjectDffByModelId[(size_t)modelId] = dffName;
+}
+
+// SA `CFileLoader::LoadWeaponObject` receives a processed weapon IDE object line:
 //   "<modelId> <dffName> <txdName> ..."  e.g. "346 colt45 colt45 colt45 1 30 0"
 int __cdecl LoadWeaponObject_Detour(const char* line) {
     int modelId = 0;
@@ -40,6 +52,7 @@ int __cdecl LoadWeaponObject_Detour(const char* line) {
 
     const int resolvedModel = (modelId > 0) ? modelId : idFromLine;
     if (resolvedModel <= 0) return modelId;
+    StoreWeaponObjectDffByModelId(resolvedModel, dff);
 
     int wt = WEAPONTYPE_UNARMED;
     if (dff[0]) {
@@ -91,14 +104,33 @@ int __cdecl LoadWeaponObject_Detour(const char* line) {
 
 } // namespace
 
-std::vector<int> g_weaponDatModelId;
-std::vector<std::string> g_weaponDatIdeName;
+const char* OrcTryGetWeaponObjectDffNameByModelId(int modelId) {
+    if (modelId <= 0 || modelId >= (int)g_weaponObjectDffByModelId.size())
+        return nullptr;
+    const std::string& dff = g_weaponObjectDffByModelId[(size_t)modelId];
+    return dff.empty() ? nullptr : dff.c_str();
+}
+
+void OrcWeaponsMapLoadedModelIdToType(int wt, int modelId) {
+    if (wt <= 0 || wt > 255 || modelId <= 0)
+        return;
+    if ((int)g_weaponDatModelId.size() <= wt)
+        g_weaponDatModelId.resize(wt + 1, 0);
+    if ((int)g_weaponDatIdeName.size() <= wt)
+        g_weaponDatIdeName.resize(wt + 1);
+
+    g_weaponDatModelId[(size_t)wt] = modelId;
+
+    if (const char* dff = OrcTryGetWeaponObjectDffNameByModelId(modelId))
+        g_weaponDatIdeName[(size_t)wt] = dff;
+}
 
 void OrcWeaponsEnsureWeaponDatHookInstalled() {
     if (g_weaponDatHookInstalled) return;
     g_weaponDatHookInstalled = true;
     g_weaponDatModelId.assign(256 + 1, 0);
     g_weaponDatIdeName.assign(256 + 1, {});
+    g_weaponObjectDffByModelId.assign(512, {});
 
     MH_STATUS st = MH_Initialize();
     if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {

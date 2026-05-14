@@ -163,6 +163,25 @@ using RemoveWeaponModel_t = void(__thiscall*)(CPed*, int);
 static AddWeaponModel_t g_AddWeaponModel_Orig = nullptr;
 static RemoveWeaponModel_t g_RemoveWeaponModel_Orig = nullptr;
 
+static bool IsUsablePedIdeName(const char* name) {
+    return name && name[0] && _stricmp(name, "null") != 0;
+}
+
+static void StorePedObjectNamesByModelId(int modelId, const char* dff, const char* txd) {
+    if (modelId < 0)
+        return;
+    if (IsUsablePedIdeName(dff)) {
+        if ((int)g_pedModelNameById.size() <= modelId)
+            g_pedModelNameById.resize(modelId + 1);
+        g_pedModelNameById[(size_t)modelId] = dff;
+    }
+    if (IsUsablePedIdeName(txd)) {
+        if ((int)g_pedDatTxdById.size() <= modelId)
+            g_pedDatTxdById.resize(modelId + 1);
+        g_pedDatTxdById[(size_t)modelId] = txd;
+    }
+}
+
 static int __cdecl LoadPedObject_Detour(const char* line) {
     int modelId = 0;
     if (g_LoadPedObject_Orig) modelId = g_LoadPedObject_Orig(line);
@@ -174,9 +193,9 @@ static int __cdecl LoadPedObject_Detour(const char* line) {
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
     char* endNum = nullptr;
     const long parsedId = strtol(p, &endNum, 10);
-    const int idFromLine = (endNum != p && parsedId > 0) ? (int)parsedId : 0;
-    const int resolvedId = (modelId > 0) ? modelId : idFromLine;
-    if (resolvedId <= 0) return modelId;
+    const int idFromLine = (endNum != p && parsedId >= 0 && parsedId <= 30000) ? (int)parsedId : -1;
+    const int resolvedId = (idFromLine >= 0) ? idFromLine : modelId;
+    if (resolvedId < 0) return modelId;
 
     char dff[64] = {};
     char txd[64] = {};
@@ -192,12 +211,7 @@ static int __cdecl LoadPedObject_Detour(const char* line) {
         txd[ti++] = *p++;
     txd[ti] = 0;
 
-    if ((dff[0] || txd[0]) && resolvedId > 0) {
-        if ((int)g_pedModelNameById.size() <= resolvedId) g_pedModelNameById.resize(resolvedId + 1);
-        if ((int)g_pedDatTxdById.size() <= resolvedId) g_pedDatTxdById.resize(resolvedId + 1);
-        if (dff[0] && g_pedModelNameById[resolvedId].empty()) g_pedModelNameById[resolvedId] = dff;
-        if (txd[0] && g_pedDatTxdById[resolvedId].empty()) g_pedDatTxdById[resolvedId] = txd;
-    }
+    StorePedObjectNamesByModelId(resolvedId, dff, txd);
     return modelId;
 }
 
@@ -228,7 +242,7 @@ static void EnsurePedDatHookInstalled() {
 }
 
 const char* OrcTryGetPedModelNameById(int modelId) {
-    if (modelId <= 0) return nullptr;
+    if (modelId < 0) return nullptr;
     if (modelId >= (int)g_pedModelNameById.size()) return nullptr;
     if (g_pedModelNameById[modelId].empty()) return nullptr;
     return g_pedModelNameById[modelId].c_str();
@@ -240,13 +254,13 @@ static void InitWeaponTypesAndStorage() {
     if (g_weaponTypesReady) return;
     g_weaponTypesReady = false;
 
-    // Ensure we capture weapon.dat loads as early as possible.
+    // Ensure we capture weapon IDE object names as early as possible.
     OrcWeaponsEnsureWeaponDatHookInstalled();
     EnsurePedDatHookInstalled();
 
     __try {
 
-        // Primary source of truth: weapon.dat hook results (wt -> modelId).
+        // Primary source of truth: LoadWeaponObject hook results (model id -> DFF name) + weapon info model ids.
         // Fallback: `aWeaponInfo[]` (SDK fixed array).
         const int baseMax = MAX_WEAPON_INFOS - 1;
         int maxId = 0;
@@ -257,6 +271,7 @@ static void InitWeaponTypesAndStorage() {
             if (wt < (int)g_weaponDatModelId.size()) mid = g_weaponDatModelId[wt];
             if (mid <= 0 && wt <= baseMax) mid = aWeaponInfo[wt].m_nModelId;
             if (mid > 0) {
+                OrcWeaponsMapLoadedModelIdToType(wt, mid);
                 g_availableWeaponTypes.push_back(wt);
                 if (wt > maxId) maxId = wt;
             }
@@ -298,6 +313,8 @@ static void InitWeaponTypesAndStorage() {
                             g_weaponModelId[wt] = wi->m_nModelId;
                         if (g_weaponModelId2[wt] <= 0 && wi->m_nModelId2 > 0)
                             g_weaponModelId2[wt] = wi->m_nModelId2;
+                        if (g_weaponModelId[wt] > 0)
+                            OrcWeaponsMapLoadedModelIdToType(wt, g_weaponModelId[wt]);
                     }
                 } __except (EXCEPTION_EXECUTE_HANDLER) {}
             }
@@ -307,7 +324,12 @@ static void InitWeaponTypesAndStorage() {
         static bool s_weaponTypesLogged = false;
         if (!s_weaponTypesLogged) {
             s_weaponTypesLogged = true;
-            OrcLogInfo("weapon types ready: %zu entries", g_availableWeaponTypes.size());
+            size_t namedFromIde = 0;
+            for (int wt : g_availableWeaponTypes) {
+                if (wt > 0 && wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[(size_t)wt].empty())
+                    ++namedFromIde;
+            }
+            OrcLogInfo("weapon types ready: %zu entries, dff names=%zu", g_availableWeaponTypes.size(), namedFromIde);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         OrcLogError("InitWeaponTypesAndStorage: SEH ex=0x%08X, using fallback weapon list",
@@ -329,12 +351,20 @@ static void InitWeaponTypesAndStorage() {
             g_weaponModelId2.assign(maxId + 1, 0);
             g_weaponNameStore.assign(maxId + 1, {});
             for (int wt : g_availableWeaponTypes) {
+                int mid = 0;
+                if (wt < (int)g_weaponDatModelId.size())
+                    mid = g_weaponDatModelId[(size_t)wt];
+                const int baseMax2 = MAX_WEAPON_INFOS - 1;
+                if (mid <= 0 && wt <= baseMax2)
+                    mid = aWeaponInfo[wt].m_nModelId;
+                if (mid > 0)
+                    OrcWeaponsMapLoadedModelIdToType(wt, mid);
+
                 if (wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[wt].empty())
                     g_weaponNameStore[wt] = g_weaponDatIdeName[wt];
                 else
                     g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
                 g_cfg[wt].name = g_weaponNameStore[wt].c_str();
-                const int baseMax2 = MAX_WEAPON_INFOS - 1;
                 if (wt <= baseMax2) {
                     g_weaponModelId[wt] = aWeaponInfo[wt].m_nModelId;
                     g_weaponModelId2[wt] = aWeaponInfo[wt].m_nModelId2;
@@ -351,7 +381,11 @@ static void InitWeaponTypesAndStorage() {
             g_weaponModelId2.assign(fallbackMax + 1, 0);
             g_weaponNameStore.assign(fallbackMax + 1, {});
             for (int wt : g_availableWeaponTypes) {
+                if (aWeaponInfo[wt].m_nModelId > 0)
+                    OrcWeaponsMapLoadedModelIdToType(wt, aWeaponInfo[wt].m_nModelId);
                 g_weaponNameStore[wt] = "Weapon" + std::to_string(wt);
+                if (wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[wt].empty())
+                    g_weaponNameStore[wt] = g_weaponDatIdeName[wt];
                 g_cfg[wt].name = g_weaponNameStore[wt].c_str();
                 g_weaponModelId[wt] = aWeaponInfo[wt].m_nModelId;
                 g_weaponModelId2[wt] = aWeaponInfo[wt].m_nModelId2;
@@ -2299,7 +2333,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         LogInit();
         OrcLogInfo("DllMain PROCESS_ATTACH build=%s %s weaponRuntime=%s ini=%s", __DATE__, __TIME__,
             OrcWeaponRuntimeCompileStamp(), g_iniPath);
-        // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon.dat load.
+        // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon IDE loading.
         OrcWeaponsEnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();
         OrcWeaponEnsurePedModelHooksInstalled();

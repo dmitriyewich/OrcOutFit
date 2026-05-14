@@ -75,7 +75,7 @@ extern int g_livePreviewHeldBaseWeaponType;
 extern bool g_livePreviewHeldBaseForceVanilla;
 /// Вкладка «В руке»: пользователь крутит Held для строки «… 2» / второго набора — live preview читает `g_livePreviewHeld2`.
 extern bool g_livePreviewHeldUseSecondary;
-// Weapon types discovered in current game (weapon.dat / modded weapon.dat).
+// Weapon types discovered in current game (weapon info + LoadWeaponObject IDE names).
 extern std::vector<int> g_availableWeaponTypes;
 // Cached model ids for each weapon type (same indexing as g_cfg).
 extern std::vector<int> g_weaponModelId;
@@ -111,7 +111,7 @@ extern std::string g_skinSelectedName;
 extern int g_skinSelectedSource;
 extern int g_standardSkinSelectedModelId;
 
-// LoadPedObject cache (model id -> ped.dat DFF name); shared with orc_skins.
+// LoadPedObject cache (model id -> ped IDE DFF name); shared with orc_skins.
 extern std::vector<std::string> g_pedModelNameById;
 
 bool OrcIsValidStandardSkinModel(int modelId);
@@ -166,7 +166,7 @@ void OrcLoadWeaponPresetFile(const char* fullPath, std::vector<WeaponCfg>& w1, s
     HeldWeaponCustomOverridesByWeapon* outHeldCustom1 = nullptr,
     HeldWeaponCustomOverridesByWeapon* outHeldCustom2 = nullptr);
 
-// ped.dat DFF basename for ped (LoadPedObject hook); empty if unknown.
+// Ped IDE DFF basename for ped (LoadPedObject hook); empty if unknown.
 const char* OrcTryGetPedModelNameById(int modelId);
 std::string GetPedStdSkinDffName(CPed* ped);
 /// Имя для пресета оружия / выбранного скина в UI. Для секций `[Skin.*]` объектов рантайм сначала пробует
