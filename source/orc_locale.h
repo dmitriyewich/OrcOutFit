@@ -24,6 +24,17 @@
     X(NoCustomVariantForWeapon, "Для этого оружия не найдено кастомных вариантов.", "No custom variants found for this weapon.") \
     X(WeaponPresetOverwriteHint, "Сохранение из UI перезаписывает файл пресета целиком, но в него попадают только секции оружия, которые отличаются от глобального OrcOutFit.ini и от выключенной коррекции в руках (Held). При ручных правках держите копию.", "Saving from the UI replaces the whole skin preset .ini, but only weapon sections that differ from global OrcOutFit.ini and from the default held pose (Held off, scale 1.0) are written. Keep a backup if you edit by hand.") \
     X(TabWeaponReplacement, "Замена оружия", "Weapon replacement") \
+    X(TabWeaponSounds, "Звуки", "Sounds") \
+    X(EnableCustomWeaponSounds, "Кастомные звуки оружия (OpenAL)", "Custom weapon sounds (OpenAL)") \
+    X(CustomWeaponSoundGain, "Громкость (близко / loop)", "Volume (close / loop)") \
+    X(CustomWeaponSoundDistantThreshold, "Порог distant (м)", "Distant threshold (m)") \
+    X(CustomWeaponSoundMaxAlternatives, "Макс. альтернатив (_shootN)", "Max alternatives (_shootN)") \
+    X(CustomWeaponSoundDistantGain, "Громкость distant", "Distant volume") \
+    X(WeaponSoundHint, "Моно PCM16 WAV рядом с DFF замены: <stem>_shoot.wav и др. (см. wiki). Только локальный игрок; нужна включённая замена оружия. OpenAL32.dll — рядом с OrcOutFit.asi.", "Mono PCM16 WAV next to the replacement DFF: <stem>_shoot.wav etc. (see wiki). Local player only; weapon replacement must be enabled. OpenAL32.dll next to OrcOutFit.asi.") \
+    X(WeaponSoundDistantGainHint, "0 — та же громкость, что «Громкость (близко / loop)».", "0 — same volume as «Volume (close / loop)».") \
+    X(WeaponSoundEarShotHint, "Не используйте EarShot.asi вместе с кастомными звуками OrcOutFit — возможен двойной OpenAL и Miles.", "Do not run EarShot.asi alongside OrcOutFit custom weapon audio — double OpenAL / Miles is possible.") \
+    X(WeaponSoundNeedsReplacementHint, "Замена оружия выключена — кастомные WAV не подставятся, пока не включите «Замена оружия».", "Weapon replacement is off — custom WAVs will not apply until you enable «Weapon replacement».") \
+    X(RescanWeaponSoundCache, "Сбросить кеш WAV", "Clear WAV cache") \
     X(TabObjects, "Объекты", "Objects") \
     X(TabSkins, "Скины", "Skins") \
     X(TabSettings, "Настройки", "Settings") \

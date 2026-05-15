@@ -6,6 +6,7 @@
 #include "orc_ui_shared.h"
 #include "orc_ui_bones.h"
 #include "orc_weapon_assets.h"
+#include "orc_weapon_audio.h"
 #include "orc_weapon_runtime.h"
 
 #include "samp_bridge.h"
@@ -26,6 +27,19 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+static void OrcWeaponSoundUiClampGlobals() {
+    if (g_weaponCustomSoundGain < 0.0f)
+        g_weaponCustomSoundGain = 0.0f;
+    if (g_weaponCustomSoundDistantThreshold < 1.0f)
+        g_weaponCustomSoundDistantThreshold = 1.0f;
+    if (g_weaponCustomSoundMaxAlternatives < 1)
+        g_weaponCustomSoundMaxAlternatives = 1;
+    if (g_weaponCustomSoundMaxAlternatives > 10)
+        g_weaponCustomSoundMaxAlternatives = 10;
+    if (g_weaponCustomSoundDistantGain < 0.0f)
+        g_weaponCustomSoundDistantGain = 0.0f;
+}
 
 static const char* WT(OrcTextId id) {
     return OrcText(id);
@@ -582,6 +596,36 @@ void OrcWeaponsUiDrawWeaponsTab() {
                 SaveMainIni();
             if (rescan)
                 DiscoverWeaponReplacements(true);
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(WT(OrcTextId::TabWeaponSounds))) {
+            OrcUiCheckbox("weapon_custom_sounds", WT(OrcTextId::EnableCustomWeaponSounds), &g_weaponCustomSounds);
+            if (!g_weaponReplacementEnabled)
+                ImGui::TextDisabled("%s", WT(OrcTextId::WeaponSoundNeedsReplacementHint));
+            ImGui::BeginDisabled(!g_weaponCustomSounds);
+            OrcUiDragFloat("weapon_sound_gain", WT(OrcTextId::CustomWeaponSoundGain), &g_weaponCustomSoundGain, 0.01f, 0.0f,
+                3.0f, "%.2f");
+            OrcUiDragFloat("weapon_sound_dist_thr", WT(OrcTextId::CustomWeaponSoundDistantThreshold),
+                &g_weaponCustomSoundDistantThreshold, 0.5f, 1.0f, 200.0f, "%.1f");
+            if (OrcUiInputInt("weapon_sound_max_alt", WT(OrcTextId::CustomWeaponSoundMaxAlternatives),
+                    &g_weaponCustomSoundMaxAlternatives, 1, 10))
+                OrcWeaponSoundUiClampGlobals();
+            OrcUiDragFloat("weapon_sound_dist_gain", WT(OrcTextId::CustomWeaponSoundDistantGain),
+                &g_weaponCustomSoundDistantGain, 0.01f, 0.0f, 3.0f, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("%s", WT(OrcTextId::WeaponSoundHint));
+            ImGui::TextWrapped("%s", WT(OrcTextId::WeaponSoundDistantGainHint));
+            ImGui::TextWrapped("%s", WT(OrcTextId::WeaponSoundEarShotHint));
+
+            bool save = false, invalidate = false;
+            OrcUiButtonPair(WT(OrcTextId::SaveMainFeatures), WT(OrcTextId::RescanWeaponSoundCache), &save, &invalidate);
+            if (save) {
+                OrcWeaponSoundUiClampGlobals();
+                SaveMainIni();
+            }
+            if (invalidate)
+                OrcWeaponAudioInvalidateCaches();
             ImGui::EndTabItem();
         }
 
