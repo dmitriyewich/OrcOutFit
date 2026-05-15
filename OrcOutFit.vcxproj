@@ -97,6 +97,9 @@
       <AdditionalLibraryDirectories>$(PluginSdkDir)\output\lib;$(PluginSdkDir)\shared\dxsdk;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>$(PluginSdkLibraryName);d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>if exist "$(ProjectDir)reference\EarShotOpenAL-main\EarShotMod\OpenAL32.dll" copy /Y "$(ProjectDir)reference\EarShotOpenAL-main\EarShotMod\OpenAL32.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />
@@ -105,6 +108,10 @@
     <ClCompile Include="source\orc_attach.cpp" />
     <ClCompile Include="source\orc_path.cpp" />
     <ClCompile Include="source\orc_weapon_assets.cpp" />
+    <ClCompile Include="source\orc_weapon_audio_openal.cpp" />
+    <ClCompile Include="source\orc_weapon_audio_paths.cpp" />
+    <ClCompile Include="source\orc_weapon_audio_hooks.cpp" />
+    <ClCompile Include="source\orc_weapon_audio_loops.cpp" />
     <ClCompile Include="source\orc_weapon_runtime.cpp" />
     <ClCompile Include="source\orc_weapon_runtime_body.cpp" />
     <ClCompile Include="source\orc_weapon_runtime_held.cpp" />

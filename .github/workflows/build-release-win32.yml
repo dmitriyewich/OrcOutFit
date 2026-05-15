@@ -93,11 +93,28 @@ jobs:
         shell: pwsh
         run: msbuild OrcOutFit.sln /t:Build "/p:Configuration=Release;Platform=x86;PlatformToolset=v143"
 
+      - name: Bundle OpenAL32.dll (Win32 soft_oal as OpenAL32)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:TEMP "openal-soft-bin.zip"
+          $uri = "https://github.com/kcat/openal-soft/releases/download/1.24.3/openal-soft-1.24.3-bin.zip"
+          Invoke-WebRequest -Uri $uri -OutFile $zip
+          $dest = Join-Path $env:TEMP "openal-soft-bin"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Expand-Archive -Path $zip -DestinationPath $dest
+          $soft = Get-ChildItem -Path $dest -Recurse -Filter "soft_oal.dll" | Where-Object { $_.Directory.Name -eq "Win32" } | Select-Object -First 1
+          if (-not $soft) { throw "Win32 soft_oal.dll not found in openal-soft zip" }
+          $outDir = Join-Path $PWD "build\Release"
+          Copy-Item -LiteralPath $soft.FullName -Destination (Join-Path $outDir "OpenAL32.dll") -Force
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: OrcOutFit-Release-Win32
-          path: build/Release/OrcOutFit.asi
+          path: |
+            build/Release/OrcOutFit.asi
+            build/Release/OpenAL32.dll
           if-no-files-found: error
           retention-days: 30
 
@@ -105,4 +122,6 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: build/Release/OrcOutFit.asi
+          files: |
+            build/Release/OrcOutFit.asi
+            build/Release/OpenAL32.dll

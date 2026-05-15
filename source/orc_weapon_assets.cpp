@@ -23,6 +23,7 @@
 #include "samp_bridge.h"
 
 #include "orc_app.h"
+#include "orc_weapon_audio.h"
 #include "orc_attach.h"
 #include "orc_log.h"
 #include "orc_path.h"
@@ -507,6 +508,7 @@ void DiscoverWeaponReplacements(bool rerollStickyChoices) {
         g_weaponReplacementStats.randomSkinWeapons,
         g_weaponReplacementStats.nickWeapons,
         rerollStickyChoices ? 1 : 0);
+    OrcWeaponAudioInvalidateCaches();
 }
 
 WeaponReplacementStats OrcGetWeaponReplacementStats() {

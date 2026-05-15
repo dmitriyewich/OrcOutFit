@@ -45,6 +45,16 @@ extern bool g_weaponTextureRandomMode;
 extern bool g_weaponTextureStandardRemap;
 /// HUD `DrawWeaponIcon`: if Guns/replacement dictionary has `<weapon>icon`, use as current TXD for the call (local player).
 extern bool g_weaponHudIconFromGunsTxd;
+/// Кастомные WAV выстрел/перезарядка рядом с DFF замены (`<stem>_shoot.wav`, `<stem>_reload.wav`), OpenAL32.dll рядом с ASI.
+extern bool g_weaponCustomSounds;
+/// Множитель громкости OpenAL (INI `[Features] CustomWeaponSoundGain`).
+extern float g_weaponCustomSoundGain;
+/// Порог «дальнего» выстрела, метры (`CustomWeaponSoundDistantThreshold`, по умолчанию 50).
+extern float g_weaponCustomSoundDistantThreshold;
+/// Макс. индекс альтернатив `_shoot0`… (`CustomWeaponSoundMaxAlternatives`, 1–10).
+extern int g_weaponCustomSoundMaxAlternatives;
+/// Громкость distant; ≤0 — как `CustomWeaponSoundGain`.
+extern float g_weaponCustomSoundDistantGain;
 /// Подробный лог «В руке»: `held chain:` / `held pose:` (в т.ч. phase=preRwDraw у RpClumpRender / AtomicDefaultRender), throttle короче.
 /// `[Features] HeldPoseDebug=1` и `DebugLogLevel=2` в `OrcOutFit.ini`.
 extern bool g_heldPoseDebug;

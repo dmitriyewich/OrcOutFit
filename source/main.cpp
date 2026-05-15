@@ -53,6 +53,7 @@
 #include "orc_ui.h"
 #include "orc_weapons_ui.h"
 #include "orc_texture_remap.h"
+#include "orc_weapon_audio.h"
 #include "orc_render.h"
 #include "orc_weapons.h"
 #include "orc_path.h"
@@ -123,6 +124,11 @@ bool g_weaponTextureNickMode = true;
 bool g_weaponTextureRandomMode = true;
 bool g_weaponTextureStandardRemap = true;
 bool g_weaponHudIconFromGunsTxd = true;
+bool g_weaponCustomSounds = false;
+float g_weaponCustomSoundGain = 1.0f;
+float g_weaponCustomSoundDistantThreshold = 50.0f;
+int g_weaponCustomSoundMaxAlternatives = 10;
+float g_weaponCustomSoundDistantGain = 0.0f;
 bool g_heldPoseDebug = false;
 int  g_heldWeaponTrace = 0;
 int  g_heldWeaponStatusIntervalMs = 10000;
@@ -754,6 +760,15 @@ void LoadConfig() {
     const bool v_weaponTextureRandomMode = ini.GetInt("Features", "WeaponTextureRandomMode", 1) != 0;
     const bool v_weaponTextureStandardRemap = ini.GetInt("Features", "WeaponTextureStandardRemap", 1) != 0;
     const bool v_weaponHudIconFromGunsTxd = ini.GetInt("Features", "WeaponHudIconFromGunsTxd", 1) != 0;
+    const bool v_weaponCustomSounds = ini.GetInt("Features", "CustomWeaponSounds", 0) != 0;
+    const float v_weaponCustomSoundGain = ReadIniFloat("Features", "CustomWeaponSoundGain", 1.0f, ini);
+    const float v_weaponCustomSoundDistantThreshold = ReadIniFloat("Features", "CustomWeaponSoundDistantThreshold", 50.0f, ini);
+    int v_weaponCustomSoundMaxAlternatives = ini.GetInt("Features", "CustomWeaponSoundMaxAlternatives", 10);
+    if (v_weaponCustomSoundMaxAlternatives < 1)
+        v_weaponCustomSoundMaxAlternatives = 1;
+    if (v_weaponCustomSoundMaxAlternatives > 10)
+        v_weaponCustomSoundMaxAlternatives = 10;
+    const float v_weaponCustomSoundDistantGain = ReadIniFloat("Features", "CustomWeaponSoundDistantGain", 0.0f, ini);
     const bool v_heldPoseDebug = ini.GetInt("Features", "HeldPoseDebug", 0) != 0;
     int v_heldWeaponTrace = ini.GetInt("Features", "HeldWeaponTrace", 0);
     if (v_heldWeaponTrace < 0)
@@ -845,6 +860,11 @@ void LoadConfig() {
     g_weaponTextureRandomMode = v_weaponTextureRandomMode;
     g_weaponTextureStandardRemap = v_weaponTextureStandardRemap;
     g_weaponHudIconFromGunsTxd = v_weaponHudIconFromGunsTxd;
+    g_weaponCustomSounds = v_weaponCustomSounds;
+    g_weaponCustomSoundGain = std::max(0.0f, v_weaponCustomSoundGain);
+    g_weaponCustomSoundDistantThreshold = std::max(1.0f, v_weaponCustomSoundDistantThreshold);
+    g_weaponCustomSoundMaxAlternatives = v_weaponCustomSoundMaxAlternatives;
+    g_weaponCustomSoundDistantGain = v_weaponCustomSoundDistantGain;
     g_heldPoseDebug = v_heldPoseDebug;
     g_heldWeaponTrace = v_heldWeaponTrace;
     g_heldWeaponStatusIntervalMs = v_heldWeaponStatusIntervalMs;
@@ -916,6 +936,11 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "WeaponTextureRandomMode", g_weaponTextureRandomMode ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextureStandardRemap", g_weaponTextureStandardRemap ? 1 : 0);
     AddIniInt(values, "Features", "WeaponHudIconFromGunsTxd", g_weaponHudIconFromGunsTxd ? 1 : 0);
+    AddIniInt(values, "Features", "CustomWeaponSounds", g_weaponCustomSounds ? 1 : 0);
+    AddIniFloat(values, "Features", "CustomWeaponSoundGain", g_weaponCustomSoundGain, "%.2f");
+    AddIniFloat(values, "Features", "CustomWeaponSoundDistantThreshold", g_weaponCustomSoundDistantThreshold, "%.1f");
+    AddIniInt(values, "Features", "CustomWeaponSoundMaxAlternatives", g_weaponCustomSoundMaxAlternatives);
+    AddIniFloat(values, "Features", "CustomWeaponSoundDistantGain", g_weaponCustomSoundDistantGain, "%.2f");
     OrcAppendSkinFeatureIniValues(values);
     AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
     AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
@@ -972,6 +997,12 @@ static void SaveDefaultConfig() {
           "WeaponTextureStandardRemap=1\n"
           "; HUD weapon icon uses `<weapon>icon` from Orc Guns texture / replacement dictionary when present (local player).\n"
           "WeaponHudIconFromGunsTxd=1\n"
+          "; CustomWeaponSounds=1: mono PCM16 WAV next to replacement DFF (see wiki); OpenAL32.dll next to OrcOutFit.asi.\n"
+          "CustomWeaponSounds=0\n"
+          "CustomWeaponSoundGain=1.0\n"
+          "CustomWeaponSoundDistantThreshold=50.0\n"
+          "CustomWeaponSoundMaxAlternatives=10\n"
+          "CustomWeaponSoundDistantGain=0.0\n"
           "SkinMode=0\n"
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
@@ -1757,6 +1788,11 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "WeaponTextureRandomMode=%d\n", g_weaponTextureRandomMode ? 1 : 0);
     AppendFormat(out, "WeaponTextureStandardRemap=%d\n", g_weaponTextureStandardRemap ? 1 : 0);
     AppendFormat(out, "WeaponHudIconFromGunsTxd=%d\n", g_weaponHudIconFromGunsTxd ? 1 : 0);
+    AppendFormat(out, "CustomWeaponSounds=%d\n", g_weaponCustomSounds ? 1 : 0);
+    AppendFormat(out, "CustomWeaponSoundGain=%.2f\n", g_weaponCustomSoundGain);
+    AppendFormat(out, "CustomWeaponSoundDistantThreshold=%.1f\n", g_weaponCustomSoundDistantThreshold);
+    AppendFormat(out, "CustomWeaponSoundMaxAlternatives=%d\n", g_weaponCustomSoundMaxAlternatives);
+    AppendFormat(out, "CustomWeaponSoundDistantGain=%.2f\n", g_weaponCustomSoundDistantGain);
     AppendFormat(out, "SkinMode=%d\n", g_skinModeEnabled ? 1 : 0);
     AppendFormat(out, "SkinHideBasePed=%d\n", g_skinHideBasePed ? 1 : 0);
     AppendFormat(out, "SkinNickMode=%d\n", g_skinNickMode ? 1 : 0);
@@ -2277,6 +2313,7 @@ static void OnGameProcessBegin() {
     OrcFlushDeferredHeldWeaponSlotRestore();
     OrcHeldPoseBeginSimFrame();
     OrcHeldWeaponTraceGameProcessTick();
+    OrcWeaponAudioOnGameProcess();
 }
 
 static void OnShutdownRw() {
@@ -2292,6 +2329,7 @@ static void OnShutdownRw() {
     OrcSkinsShutdown();
     OrcObjectsShutdown();
     OrcTextureRemapClearRuntimeState();
+    OrcWeaponAudioShutdown();
     // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.
     DWORD oldProt;
     BYTE* p = reinterpret_cast<BYTE*>(0x5D95B0);
@@ -2340,6 +2378,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         OrcWeaponEnsureFireFxHooksInstalled();
         OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
         OrcTextureRemapInstallHooks();
+        OrcWeaponAudioSetPluginModule(module);
+        OrcWeaponAudioEnsureHooksInstalled();
     }
     return TRUE;
 }
