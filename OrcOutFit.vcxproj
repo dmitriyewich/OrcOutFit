@@ -48,28 +48,36 @@
     <IntDir>$(ProjectDir)build\obj\$(Configuration)\OrcOutFit\</IntDir>
     <TargetName>OrcOutFit</TargetName>
     <TargetExt>.asi</TargetExt>
+    <OrcOpenAlInclude>$(ProjectDir)source\external\openal-soft\include;$(ProjectDir)build\openal-soft</OrcOpenAlInclude>
+    <OrcOpenAlLibDir>$(ProjectDir)build\openal-soft\$(Configuration)</OrcOpenAlLibDir>
+    <OrcOpenAlPreBuild>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir).github\scripts\build-openal-soft.ps1" -Configuration $(Configuration) -ProjectDir "$(ProjectDir)"</OrcOpenAlPreBuild>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(OrcOpenAlInclude);$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(OrcOpenAlLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>OpenAL32.lib;winmm.lib;avrt.lib;ole32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PreBuildEvent Condition="'$(OrcOpenAlSkipPreBuild)' != 'true'">
+      <Command>$(OrcOpenAlPreBuild)</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>false</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;NDEBUG;GTASA;PLUGIN_SGV_10US;RW;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;NDEBUG;GTASA;PLUGIN_SGV_10US;RW;NOMINMAX;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>false</ConformanceMode>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
@@ -86,7 +94,7 @@
       <OmitFramePointers>true</OmitFramePointers>
       <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
       <AdditionalOptions>/utf-8 /Gw /GS- %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(PluginSdkDir)\plugin_sa;$(PluginSdkDir)\plugin_sa\game_sa;$(PluginSdkDir)\plugin_sa\game_sa\rw;$(PluginSdkDir)\shared;$(PluginSdkDir)\shared\game;$(PluginSdkDir)\shared\dxsdk;$(PluginSdkDir)\injector;$(PluginSdkDir)\hooking;$(PluginSdkDir)\safetyhook;$(ProjectDir)source\external\imgui;$(ProjectDir)source\external\imgui\backends;$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(OrcOpenAlInclude);$(PluginSdkDir)\plugin_sa;$(PluginSdkDir)\plugin_sa\game_sa;$(PluginSdkDir)\plugin_sa\game_sa\rw;$(PluginSdkDir)\shared;$(PluginSdkDir)\shared\game;$(PluginSdkDir)\shared\dxsdk;$(PluginSdkDir)\injector;$(PluginSdkDir)\hooking;$(PluginSdkDir)\safetyhook;$(ProjectDir)source\external\imgui;$(ProjectDir)source\external\imgui\backends;$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -94,12 +102,12 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
-      <AdditionalLibraryDirectories>$(PluginSdkDir)\output\lib;$(PluginSdkDir)\shared\dxsdk;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>$(PluginSdkLibraryName);d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(OrcOpenAlLibDir);$(PluginSdkDir)\output\lib;$(PluginSdkDir)\shared\dxsdk;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>OpenAL32.lib;winmm.lib;avrt.lib;ole32.lib;uuid.lib;$(PluginSdkLibraryName);d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>if exist "$(ProjectDir)reference\EarShotOpenAL-main\EarShotMod\OpenAL32.dll" copy /Y "$(ProjectDir)reference\EarShotOpenAL-main\EarShotMod\OpenAL32.dll" "$(OutDir)"</Command>
-    </PostBuildEvent>
+    <PreBuildEvent Condition="'$(OrcOpenAlSkipPreBuild)' != 'true'">
+      <Command>$(OrcOpenAlPreBuild)</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />

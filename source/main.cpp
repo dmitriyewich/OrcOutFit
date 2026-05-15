@@ -997,7 +997,7 @@ static void SaveDefaultConfig() {
           "WeaponTextureStandardRemap=1\n"
           "; HUD weapon icon uses `<weapon>icon` from Orc Guns texture / replacement dictionary when present (local player).\n"
           "WeaponHudIconFromGunsTxd=1\n"
-          "; CustomWeaponSounds=1: mono PCM16 WAV next to replacement DFF (see wiki); OpenAL32.dll next to OrcOutFit.asi.\n"
+          "; CustomWeaponSounds=1: mono PCM16 WAV next to replacement DFF (see wiki); OpenAL Soft static in OrcOutFit.asi.\n"
           "CustomWeaponSounds=0\n"
           "CustomWeaponSoundGain=1.0\n"
           "CustomWeaponSoundDistantThreshold=50.0\n"

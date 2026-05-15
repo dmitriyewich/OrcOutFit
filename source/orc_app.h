@@ -45,7 +45,7 @@ extern bool g_weaponTextureRandomMode;
 extern bool g_weaponTextureStandardRemap;
 /// HUD `DrawWeaponIcon`: if Guns/replacement dictionary has `<weapon>icon`, use as current TXD for the call (local player).
 extern bool g_weaponHudIconFromGunsTxd;
-/// Кастомные WAV выстрел/перезарядка рядом с DFF замены (`<stem>_shoot.wav`, `<stem>_reload.wav`), OpenAL32.dll рядом с ASI.
+/// Кастомные WAV выстрел/перезарядка рядом с DFF замены (`<stem>_shoot.wav`, `<stem>_reload.wav`), OpenAL Soft static в ASI.
 extern bool g_weaponCustomSounds;
 /// Множитель громкости OpenAL (INI `[Features] CustomWeaponSoundGain`).
 extern float g_weaponCustomSoundGain;

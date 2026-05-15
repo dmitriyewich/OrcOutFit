@@ -28,12 +28,10 @@ struct OrcWeaponAudioStemContext {
     WeaponReplacementAsset* asset = nullptr;
 };
 
-struct OrcAlApi;
 struct OrcWeaponAudioSourceSlot {
     ALuint source = 0;
 };
 
-extern OrcAlApi g_al;
 extern HMODULE g_pluginModule;
 extern bool g_hooksInstalled;
 extern bool g_hitHookInstalled;

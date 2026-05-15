@@ -30,7 +30,7 @@
     X(CustomWeaponSoundDistantThreshold, "Порог distant (м)", "Distant threshold (m)") \
     X(CustomWeaponSoundMaxAlternatives, "Макс. альтернатив (_shootN)", "Max alternatives (_shootN)") \
     X(CustomWeaponSoundDistantGain, "Громкость distant", "Distant volume") \
-    X(WeaponSoundHint, "Моно PCM16 WAV рядом с DFF замены: <stem>_shoot.wav и др. (см. wiki). Только локальный игрок; нужна включённая замена оружия. OpenAL32.dll — рядом с OrcOutFit.asi.", "Mono PCM16 WAV next to the replacement DFF: <stem>_shoot.wav etc. (see wiki). Local player only; weapon replacement must be enabled. OpenAL32.dll next to OrcOutFit.asi.") \
+    X(WeaponSoundHint, "Моно PCM16 WAV рядом с DFF замены: <stem>_shoot.wav и др. (см. wiki). Только локальный игрок; нужна включённая замена оружия. OpenAL Soft встроен в ASI.", "Mono PCM16 WAV next to the replacement DFF: <stem>_shoot.wav etc. (see wiki). Local player only; weapon replacement must be enabled. OpenAL Soft is built into the ASI.") \
     X(WeaponSoundDistantGainHint, "0 — та же громкость, что «Громкость (близко / loop)».", "0 — same volume as «Volume (close / loop)».") \
     X(WeaponSoundEarShotHint, "Не используйте EarShot.asi вместе с кастомными звуками OrcOutFit — возможен двойной OpenAL и Miles.", "Do not run EarShot.asi alongside OrcOutFit custom weapon audio — double OpenAL / Miles is possible.") \
     X(WeaponSoundNeedsReplacementHint, "Замена оружия выключена — кастомные WAV не подставятся, пока не включите «Замена оружия».", "Weapon replacement is off — custom WAVs will not apply until you enable «Weapon replacement».") \
