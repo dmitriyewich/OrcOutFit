@@ -45,7 +45,7 @@ extern bool g_weaponTextureRandomMode;
 extern bool g_weaponTextureStandardRemap;
 /// HUD `DrawWeaponIcon`: if Guns/replacement dictionary has `<weapon>icon`, use as current TXD for the call (local player).
 extern bool g_weaponHudIconFromGunsTxd;
-/// Кастомные WAV выстрел/перезарядка рядом с DFF замены (`<stem>_shoot.wav`, `<stem>_reload.wav`), OpenAL Soft static в ASI.
+/// Кастомные звуки выстрел/перезарядка рядом с DFF замены (`<stem>_shoot.*`, …), форматы WAV/MP3/FLAC/OGG.
 extern bool g_weaponCustomSounds;
 /// Множитель громкости OpenAL (INI `[Features] CustomWeaponSoundGain`).
 extern float g_weaponCustomSoundGain;
@@ -55,6 +55,10 @@ extern float g_weaponCustomSoundDistantThreshold;
 extern int g_weaponCustomSoundMaxAlternatives;
 /// Громкость distant; ≤0 — как `CustomWeaponSoundGain`.
 extern float g_weaponCustomSoundDistantGain;
+/// Reverb через OpenAL EFX для world-источников (distant, loop).
+extern bool g_weaponAudioEfxReverb;
+/// Ограничить EFX интерьерами (currArea>0).
+extern bool g_weaponAudioEfxInteriorOnly;
 /// Подробный лог «В руке»: `held chain:` / `held pose:` (в т.ч. phase=preRwDraw у RpClumpRender / AtomicDefaultRender), throttle короче.
 /// `[Features] HeldPoseDebug=1` и `DebugLogLevel=2` в `OrcOutFit.ini`.
 extern bool g_heldPoseDebug;

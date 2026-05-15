@@ -1,6 +1,7 @@
 #pragma once
 
 #include "orc_weapon_assets.h"
+#include "orc_weapon_audio_types.h"
 
 #include <cstdint>
 #include <mutex>
@@ -14,11 +15,6 @@ class CPed;
 struct CVector;
 
 using ALuint = unsigned int;
-
-enum class OrcWeaponSpatial : uint8_t {
-    ListenerRelative,
-    WorldAtPed,
-};
 
 struct OrcWeaponAudioStemContext {
     std::string stem;
@@ -44,9 +40,10 @@ extern std::mutex g_loopMutex;
 extern std::unordered_map<std::string, ALuint> g_bufferByPath;
 extern std::mutex g_bufferMutex;
 
-ALuint OrcGetOrCreateBufferForWav(const char* path);
+ALuint OrcGetOrCreateBufferForPath(const char* pathUtf8);
+
 void OrcWeaponAudioStopAllLoopSources();
-bool OrcWeaponAudioStartLoopSource(ALuint buffer, float gain, CPed* ped, ALuint& inOutSource);
+bool OrcWeaponAudioStartLoopSource(ALuint buffer, const OrcWeaponAudioPlayParams& params, CPed* ped, ALuint& inOutSource);
 void OrcWeaponAudioStopLoopSource(ALuint& inOutSource);
 void OrcWeaponAudioUpdateLoopSources();
 void OrcWeaponAudioSyncLoopSourceWorldPos(ALuint source, CPed* ped, float gain);
@@ -57,18 +54,18 @@ bool OrcWeaponAudioHasActiveContext();
 bool OrcWeaponAudioEnsureAlContextCurrent();
 void OrcWeaponAudioPruneEphemeralSources();
 void OrcWeaponAudioStopEphemeralSources();
-bool OrcWeaponAudioPlayBuffer(ALuint buffer, float gain, OrcWeaponSpatial spatial, CPed* ped);
+bool OrcWeaponAudioPlayBuffer(ALuint buffer, const OrcWeaponAudioPlayParams& params, CPed* ped);
 
 bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudioStemContext& out);
-std::string OrcWeaponAudioResolvePath(const OrcWeaponAudioStemContext& ctx, const char* suffix);
+/// Первый существующий файл `stem+suffix` с расширением .wav / .mp3 / .flac / .ogg.
+bool OrcWeaponAudioResolveFirstExistingAudioPath(const OrcWeaponAudioStemContext& ctx, const char* suffix, std::string& outPath);
 bool OrcWeaponAudioPathExistsCached(const std::string& path);
-bool OrcWeaponAudioTryPlaySuffix(const OrcWeaponAudioStemContext& ctx, const char* suffix, float gainScale,
-    OrcWeaponSpatial spatial);
-bool OrcWeaponAudioTryPlayPath(const char* path, float gainScale, OrcWeaponSpatial spatial, CPed* ped);
+bool OrcWeaponAudioTryPlaySuffix(const OrcWeaponAudioStemContext& ctx, const char* suffix, float gainScale, OrcWeaponSpatial spatial);
+bool OrcWeaponAudioTryPlayPath(const char* pathUtf8, const OrcWeaponAudioPlayParams& params, CPed* ped);
 void OrcWeaponAudioMarkSuppressVanilla();
-bool OrcWeaponAudioHasFireRelatedCustomWav(const OrcWeaponAudioStemContext& ctx);
+bool OrcWeaponAudioHasFireRelatedCustomAudio(const OrcWeaponAudioStemContext& ctx);
 bool OrcWeaponAudioShouldSuppressVanillaGun(class CAEWeaponAudioEntity* self);
-bool OrcWeaponAudioHasLoopCustomWav(const OrcWeaponAudioStemContext& ctx);
+bool OrcWeaponAudioHasLoopCustomAudio(const OrcWeaponAudioStemContext& ctx);
 bool OrcWeaponAudioShouldSkipWeaponFireOneShot(int weaponType, const OrcWeaponAudioStemContext& ctx);
 
 void OrcWeaponAudioLoopsEnsureInstalled();

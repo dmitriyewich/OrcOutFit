@@ -613,6 +613,8 @@ void OrcWeaponsUiDrawWeaponsTab() {
                 OrcWeaponSoundUiClampGlobals();
             OrcUiDragFloat("weapon_sound_dist_gain", WT(OrcTextId::CustomWeaponSoundDistantGain),
                 &g_weaponCustomSoundDistantGain, 0.01f, 0.0f, 3.0f, "%.2f");
+            OrcUiCheckbox("weapon_audio_efx", WT(OrcTextId::WeaponAudioEfxReverb), &g_weaponAudioEfxReverb);
+            OrcUiCheckbox("weapon_audio_efx_int", WT(OrcTextId::WeaponAudioEfxInteriorOnly), &g_weaponAudioEfxInteriorOnly);
             ImGui::EndDisabled();
             ImGui::TextWrapped("%s", WT(OrcTextId::WeaponSoundHint));
             ImGui::TextWrapped("%s", WT(OrcTextId::WeaponSoundDistantGainHint));

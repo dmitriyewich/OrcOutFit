@@ -19,6 +19,7 @@
 
 #include "orc_app.h"
 #include "orc_log.h"
+#include "orc_weapon_audio_config.h"
 #include "orc_weapon_audio_internal.h"
 
 using namespace plugin;
@@ -100,16 +101,17 @@ static float OrcLoopGain() {
 }
 
 static bool OrcTryStartLoopSuffix(const OrcWeaponAudioStemContext& ctx, const char* suffix, OrcLoopSlot slot) {
-    const std::string path = OrcWeaponAudioResolvePath(ctx, suffix);
-    if (path.empty() || !OrcWeaponAudioPathExistsCached(path))
+    std::string path;
+    if (!OrcWeaponAudioResolveFirstExistingAudioPath(ctx, suffix, path))
         return false;
     if (!OrcWeaponAudioOpenAlInit())
         return false;
-    const ALuint buf = OrcGetOrCreateBufferForWav(path.c_str());
+    const ALuint buf = OrcGetOrCreateBufferForPath(path.c_str());
     if (!buf)
         return false;
+    OrcWeaponAudioPlayParams lp = OrcWeaponAudioBuildPlayParams(&ctx, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed, OrcWeaponSoundClass::Loop);
     ALuint& src = OrcLoopRef(ctx.ped, slot);
-    if (OrcWeaponAudioStartLoopSource(buf, OrcLoopGain(), ctx.ped, src)) {
+    if (OrcWeaponAudioStartLoopSource(buf, lp, ctx.ped, src)) {
         OrcWeaponAudioMarkSuppressVanilla();
         return true;
     }
@@ -307,16 +309,24 @@ void OrcWeaponAudioLoopsOnPlayGunSounds(CAEWeaponAudioEntity* self) {
 
 bool OrcWeaponAudioShouldSkipWeaponFireOneShot(int weaponType, const OrcWeaponAudioStemContext& ctx) {
     switch (weaponType) {
-    case WEAPONTYPE_MINIGUN:
-        return OrcWeaponAudioPathExistsCached(OrcWeaponAudioResolvePath(ctx, "_minigun_fireloop"));
-    case WEAPONTYPE_FTHROWER:
-        return OrcWeaponAudioPathExistsCached(OrcWeaponAudioResolvePath(ctx, "_flamethrower_fire"));
+    case WEAPONTYPE_MINIGUN: {
+        std::string tmp;
+        return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_minigun_fireloop", tmp);
+    }
+    case WEAPONTYPE_FTHROWER: {
+        std::string tmp;
+        return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_flamethrower_fire", tmp);
+    }
     case WEAPONTYPE_CHAINSAW:
-        return OrcWeaponAudioHasLoopCustomWav(ctx);
-    case WEAPONTYPE_SPRAYCAN:
-        return OrcWeaponAudioPathExistsCached(OrcWeaponAudioResolvePath(ctx, "_spraycan_sprayloop"));
-    case WEAPONTYPE_EXTINGUISHER:
-        return OrcWeaponAudioPathExistsCached(OrcWeaponAudioResolvePath(ctx, "_extinguisher_loop"));
+        return OrcWeaponAudioHasLoopCustomAudio(ctx);
+    case WEAPONTYPE_SPRAYCAN: {
+        std::string tmp;
+        return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_spraycan_sprayloop", tmp);
+    }
+    case WEAPONTYPE_EXTINGUISHER: {
+        std::string tmp;
+        return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_extinguisher_loop", tmp);
+    }
     default:
         return false;
     }

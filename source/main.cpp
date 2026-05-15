@@ -54,6 +54,7 @@
 #include "orc_weapons_ui.h"
 #include "orc_texture_remap.h"
 #include "orc_weapon_audio.h"
+#include "orc_weapon_audio_config.h"
 #include "orc_render.h"
 #include "orc_weapons.h"
 #include "orc_path.h"
@@ -129,6 +130,8 @@ float g_weaponCustomSoundGain = 1.0f;
 float g_weaponCustomSoundDistantThreshold = 50.0f;
 int g_weaponCustomSoundMaxAlternatives = 10;
 float g_weaponCustomSoundDistantGain = 0.0f;
+bool g_weaponAudioEfxReverb = true;
+bool g_weaponAudioEfxInteriorOnly = true;
 bool g_heldPoseDebug = false;
 int  g_heldWeaponTrace = 0;
 int  g_heldWeaponStatusIntervalMs = 10000;
@@ -826,6 +829,7 @@ void LoadConfig() {
 
     // Снапшот: одно присвоение глобалов на главном потоке (рендер не видит половину INI).
     g_mainIniDoc = std::move(nextDoc);
+    OrcWeaponAudioConfigApplyFromMainIni(g_mainIniDoc);
     g_cfg = std::move(nextCfg);
     g_cfg2 = std::move(nextCfg2);
     g_enabled = v_enabled;
@@ -941,6 +945,7 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniFloat(values, "Features", "CustomWeaponSoundDistantThreshold", g_weaponCustomSoundDistantThreshold, "%.1f");
     AddIniInt(values, "Features", "CustomWeaponSoundMaxAlternatives", g_weaponCustomSoundMaxAlternatives);
     AddIniFloat(values, "Features", "CustomWeaponSoundDistantGain", g_weaponCustomSoundDistantGain, "%.2f");
+    OrcWeaponAudioConfigAppendMainIniValues(values);
     OrcAppendSkinFeatureIniValues(values);
     AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
     AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
@@ -997,7 +1002,7 @@ static void SaveDefaultConfig() {
           "WeaponTextureStandardRemap=1\n"
           "; HUD weapon icon uses `<weapon>icon` from Orc Guns texture / replacement dictionary when present (local player).\n"
           "WeaponHudIconFromGunsTxd=1\n"
-          "; CustomWeaponSounds=1: mono PCM16 WAV next to replacement DFF (see wiki); OpenAL Soft static in OrcOutFit.asi.\n"
+          "; CustomWeaponSounds=1: звуки рядом с DFF замены: .wav/.mp3/.flac/.ogg (см. wiki); OpenAL в ASI.\n"
           "CustomWeaponSounds=0\n"
           "CustomWeaponSoundGain=1.0\n"
           "CustomWeaponSoundDistantThreshold=50.0\n"
@@ -1019,7 +1024,12 @@ static void SaveDefaultConfig() {
           "; HeldWeaponTrace: 0=off, 1=held status по интервалу + лог хуков RWPFPC/RWCB, 2=чаще строки по хукам.\n"
           "HeldWeaponTrace=0\n"
           "; Интервал строки held status (мс), по умолчанию 10000; 0=выкл только блок status (хуки при trace>=1 остаются).\n"
-          "HeldWeaponStatusIntervalMs=10000\n\n"
+          "HeldWeaponStatusIntervalMs=10000\n"
+          "; [WeaponAudio]: OpenAL 3D attenuation / EFX (см. README).\n"
+          "[WeaponAudio]\n"
+          "EfxReverb=1\n"
+          "EfxReverbInteriorOnly=1\n"
+          "\n"
           "[SkinMode]\n"
           "Selected=\n"
           "SelectedSource=custom\n"
@@ -1039,8 +1049,10 @@ static void SaveMainIniWriteNow() {
         OrcLogError("SaveMainIni: cannot write %s", g_iniPath);
         return;
     }
-    if (g_mainIniDoc.LoadFromFile(g_iniPath))
+    if (g_mainIniDoc.LoadFromFile(g_iniPath)) {
+        OrcWeaponAudioConfigApplyFromMainIni(g_mainIniDoc);
         OrcLogReloadFromIniDocument(g_iniPath, g_mainIniDoc);
+    }
 }
 
 void SaveMainIni() {

@@ -1,4 +1,4 @@
-// OpenAL Soft (static): device, buffers, play, listener.
+// OpenAL Soft (static): device, buffers, decode, EFX reverb, 3D attenuation.
 
 #include "plugin.h"
 
@@ -8,17 +8,25 @@
 #include "CVector.h"
 #include "CPed.h"
 
+/* alext.h включает efx.h внутри #ifndef ALC_EXT_EFX — прототипы EFX видны только если
+ * AL_ALEXT_PROTOTYPES задан ДО <AL/alext.h> (иначе AL_EFX_H уже закрыт повторным include). */
+#define AL_ALEXT_PROTOTYPES
+#include <AL/al.h>
+#include <AL/alc.h>
+#include <AL/alext.h>
+#include <AL/efx.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
-
-#include <AL/al.h>
-#include <AL/alc.h>
 
 #include "orc_app.h"
 #include "orc_log.h"
+#include "orc_weapon_audio_config.h"
+#include "orc_weapon_audio_decode.h"
 #include "orc_weapon_audio_internal.h"
 
 HMODULE g_pluginModule = nullptr;
@@ -33,107 +41,121 @@ std::mutex g_loopMutex;
 std::unordered_map<std::string, ALuint> g_bufferByPath;
 std::mutex g_bufferMutex;
 
-static bool OrcReadMonoPcm16Wav(const char* path, std::vector<uint8_t>& outPcm, unsigned& sampleRate) {
-    outPcm.clear();
-    sampleRate = 0;
-    FILE* f = nullptr;
-    if (fopen_s(&f, path, "rb") != 0 || !f)
-        return false;
+static bool g_efxSupported = false;
+static bool g_efxReady = false;
+static ALuint g_efxEffectSlot = 0;
+static ALuint g_reverbEffect = 0;
 
-    char riff[12]{};
-    if (fread(riff, 1, 12, f) != 12 || std::memcmp(riff, "RIFF", 4) != 0 || std::memcmp(riff + 8, "WAVE", 4) != 0) {
-        fclose(f);
-        return false;
+static void OrcWeaponAudioEfxShutdown() {
+    if (!g_alcContext || !alcMakeContextCurrent(g_alcContext))
+        return;
+    if (g_reverbEffect) {
+        alDeleteEffects(1, &g_reverbEffect);
+        g_reverbEffect = 0;
     }
-
-    uint16_t audioFormat = 0;
-    uint16_t numChannels = 0;
-    uint32_t sr = 0;
-    uint16_t bitsPerSample = 0;
-    uint32_t dataSize = 0;
-    long dataOffset = 0;
-
-    for (;;) {
-        char cid[4]{};
-        uint32_t chunkSize = 0;
-        if (fread(cid, 1, 4, f) != 4)
-            break;
-        if (fread(&chunkSize, 4, 1, f) != 1)
-            break;
-
-        if (std::memcmp(cid, "fmt ", 4) == 0) {
-            if (chunkSize < 16) {
-                fclose(f);
-                return false;
-            }
-            if (fread(&audioFormat, 2, 1, f) != 1 || fread(&numChannels, 2, 1, f) != 1 || fread(&sr, 4, 1, f) != 1) {
-                fclose(f);
-                return false;
-            }
-            if (fseek(f, 6, SEEK_CUR) != 0) {
-                fclose(f);
-                return false;
-            }
-            if (fread(&bitsPerSample, 2, 1, f) != 1) {
-                fclose(f);
-                return false;
-            }
-            const long skip = (long)chunkSize - 16;
-            if (skip > 0 && fseek(f, skip, SEEK_CUR) != 0) {
-                fclose(f);
-                return false;
-            }
-        } else if (std::memcmp(cid, "data", 4) == 0) {
-            dataSize = chunkSize;
-            dataOffset = ftell(f);
-            if (dataOffset < 0 || fseek(f, (long)chunkSize, SEEK_CUR) != 0) {
-                fclose(f);
-                return false;
-            }
-        } else {
-            if (fseek(f, (long)chunkSize, SEEK_CUR) != 0) {
-                fclose(f);
-                return false;
-            }
-        }
-
-        if ((chunkSize & 1u) != 0)
-            fseek(f, 1, SEEK_CUR);
-
-        if (dataSize != 0 && audioFormat != 0)
-            break;
+    if (g_efxEffectSlot) {
+        alDeleteAuxiliaryEffectSlots(1, &g_efxEffectSlot);
+        g_efxEffectSlot = 0;
     }
-
-    if (audioFormat != 1 || numChannels != 1 || bitsPerSample != 16 || sr == 0 || dataSize == 0 || dataOffset == 0) {
-        fclose(f);
-        return false;
-    }
-
-    if (fseek(f, dataOffset, SEEK_SET) != 0) {
-        fclose(f);
-        return false;
-    }
-    outPcm.resize(dataSize);
-    if (fread(outPcm.data(), 1, dataSize, f) != dataSize) {
-        fclose(f);
-        return false;
-    }
-    fclose(f);
-    sampleRate = sr;
-    return true;
+    g_efxReady = false;
 }
 
-ALuint OrcGetOrCreateBufferForWav(const char* path) {
+static void OrcWeaponAudioEfxTryInit() {
+    g_efxSupported = false;
+    g_efxReady = false;
+    if (!g_alcDevice || !g_alcContext)
+        return;
+    if (!alcMakeContextCurrent(g_alcContext))
+        return;
+
+    if (!alcIsExtensionPresent(g_alcDevice, ALC_EXT_EFX_NAME)) {
+        if (g_orcLogLevel >= OrcLogLevel::Info)
+            OrcLogInfo("weapon audio: ALC_EXT_EFX not available");
+        return;
+    }
+    g_efxSupported = true;
+
+    alGenAuxiliaryEffectSlots(1, &g_efxEffectSlot);
+    alGenEffects(1, &g_reverbEffect);
+    if (alGetError() != AL_NO_ERROR) {
+        OrcWeaponAudioEfxShutdown();
+        return;
+    }
+
+    alEffecti(g_reverbEffect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+    alEffectf(g_reverbEffect, AL_REVERB_DENSITY, 0.2f);
+    alEffectf(g_reverbEffect, AL_REVERB_DECAY_TIME, 0.6f);
+    alEffectf(g_reverbEffect, AL_REVERB_GAIN, 0.3f);
+    alEffectf(g_reverbEffect, AL_REVERB_GAINHF, 0.3f);
+    alEffectf(g_reverbEffect, AL_REVERB_DECAY_HFRATIO, 0.3f);
+    alEffectf(g_reverbEffect, AL_REVERB_REFLECTIONS_GAIN, 0.4f);
+    alEffectf(g_reverbEffect, AL_REVERB_LATE_REVERB_GAIN, 0.3f);
+    alEffectf(g_reverbEffect, AL_REVERB_LATE_REVERB_DELAY, 0.005f);
+    alEffectf(g_reverbEffect, AL_REVERB_ROOM_ROLLOFF_FACTOR, 0.3f);
+    alAuxiliaryEffectSloti(g_efxEffectSlot, AL_EFFECTSLOT_EFFECT, g_reverbEffect);
+
+    if (alGetError() != AL_NO_ERROR) {
+        OrcLogError("weapon audio: EFX reverb setup failed");
+        OrcWeaponAudioEfxShutdown();
+        return;
+    }
+
+    g_efxReady = true;
+    if (g_orcLogLevel >= OrcLogLevel::Info)
+        OrcLogInfo("weapon audio: EFX reverb initialized");
+}
+
+static void OrcApplyPlayParamsToSource(ALuint src, const OrcWeaponAudioPlayParams& p, CPed* ped) {
+    const bool world = p.spatial == OrcWeaponSpatial::WorldAtPed;
+    OrcWeaponAudioAttenuation att = p.att;
+    if (!world) {
+        att.refDist = 0.5f;
+        att.maxDist = 1.0e6f;
+        att.rolloffFactor = 0.01f;
+        att.airAbsorption = 0.0f;
+    }
+
+    alSourcef(src, AL_REFERENCE_DISTANCE, att.refDist);
+    alSourcef(src, AL_MAX_DISTANCE, att.maxDist);
+    alSourcef(src, AL_ROLLOFF_FACTOR, att.rolloffFactor);
+    alSourcef(src, AL_AIR_ABSORPTION_FACTOR, att.airAbsorption);
+    alSourcef(src, AL_GAIN, p.gain);
+    alSourcef(src, AL_PITCH, p.pitch);
+
+    if (world) {
+        alSourcei(src, AL_SOURCE_RELATIVE, AL_FALSE);
+        if (ped) {
+            const CVector pos = ped->GetPosition();
+            alSource3f(src, AL_POSITION, pos.x, pos.y, pos.z);
+        } else {
+            alSource3f(src, AL_POSITION, 0.0f, 0.0f, 0.0f);
+        }
+        if (g_efxReady && p.useEfxReverb)
+            alSource3i(src, AL_AUXILIARY_SEND_FILTER, g_efxEffectSlot, 0, AL_FILTER_NULL);
+        else
+            alSource3i(src, AL_AUXILIARY_SEND_FILTER, 0, 0, AL_FILTER_NULL);
+    } else {
+        alSourcei(src, AL_SOURCE_RELATIVE, AL_TRUE);
+        alSource3f(src, AL_POSITION, 0.0f, 0.0f, 0.0f);
+        alSource3i(src, AL_AUXILIARY_SEND_FILTER, 0, 0, AL_FILTER_NULL);
+    }
+    alSource3f(src, AL_VELOCITY, 0.0f, 0.0f, 0.0f);
+}
+
+ALuint OrcGetOrCreateBufferForPath(const char* path) {
     std::lock_guard<std::mutex> lock(g_bufferMutex);
     const std::string key(path);
     auto it = g_bufferByPath.find(key);
     if (it != g_bufferByPath.end() && alIsBuffer(it->second))
         return it->second;
 
-    std::vector<uint8_t> pcm;
-    unsigned sr = 0;
-    if (!OrcReadMonoPcm16Wav(path, pcm, sr))
+    OrcAudioPcm pcm;
+    std::string decErr;
+    if (!OrcAudioDecodeFile(path, pcm, &decErr) || pcm.samples.empty() || pcm.sampleRate == 0) {
+        if (g_orcLogLevel >= OrcLogLevel::Error)
+            OrcLogError("weapon audio: decode failed %s (%s)", path, decErr.c_str());
         return 0;
+    }
 
     ALuint buf = 0;
     alGenBuffers(1, &buf);
@@ -142,7 +164,9 @@ ALuint OrcGetOrCreateBufferForWav(const char* path) {
             alDeleteBuffers(1, &buf);
         return 0;
     }
-    alBufferData(buf, AL_FORMAT_MONO16, pcm.data(), (ALsizei)pcm.size(), (ALsizei)sr);
+
+    const ALsizei bytes = static_cast<ALsizei>(pcm.samples.size() * sizeof(float));
+    alBufferData(buf, AL_FORMAT_MONO_FLOAT32, pcm.samples.data(), bytes, static_cast<ALsizei>(pcm.sampleRate));
     if (alGetError() != AL_NO_ERROR) {
         alDeleteBuffers(1, &buf);
         return 0;
@@ -208,6 +232,7 @@ bool OrcWeaponAudioOpenAlInit() {
     }
 
     alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED);
+    OrcWeaponAudioEfxTryInit();
     if (g_orcLogLevel >= OrcLogLevel::Info)
         OrcLogInfo("weapon audio: OpenAL Soft initialized (static)");
     return true;
@@ -227,7 +252,7 @@ void OrcWeaponAudioStopAllLoopSources() {
     g_loopSources.clear();
 }
 
-bool OrcWeaponAudioStartLoopSource(ALuint buffer, float gain, CPed* ped, ALuint& inOutSource) {
+bool OrcWeaponAudioStartLoopSource(ALuint buffer, const OrcWeaponAudioPlayParams& params, CPed* ped, ALuint& inOutSource) {
     if (!buffer || !ped)
         return false;
     if (!OrcWeaponAudioEnsureAlContextCurrent())
@@ -239,9 +264,7 @@ bool OrcWeaponAudioStartLoopSource(ALuint buffer, float gain, CPed* ped, ALuint&
         if (st == AL_PLAYING) {
             const CVector p = ped->GetPosition();
             alSource3f(inOutSource, AL_POSITION, p.x, p.y, p.z);
-            const float pitch = std::max(0.01f, std::min(4.0f, CTimer::ms_fTimeScale));
-            alSourcef(inOutSource, AL_PITCH, pitch);
-            alSourcef(inOutSource, AL_GAIN, gain);
+            OrcApplyPlayParamsToSource(inOutSource, params, ped);
             OrcWeaponAudioMarkSuppressVanilla();
             return true;
         }
@@ -257,15 +280,7 @@ bool OrcWeaponAudioStartLoopSource(ALuint buffer, float gain, CPed* ped, ALuint&
 
     alSourcei(src, AL_BUFFER, (ALint)buffer);
     alSourcei(src, AL_LOOPING, AL_TRUE);
-    alSourcei(src, AL_SOURCE_RELATIVE, AL_FALSE);
-    alSourcef(src, AL_GAIN, gain);
-    const float pitch = std::max(0.01f, std::min(4.0f, CTimer::ms_fTimeScale));
-    alSourcef(src, AL_PITCH, pitch);
-    alSourcef(src, AL_REFERENCE_DISTANCE, 1.0f);
-    alSourcef(src, AL_MAX_DISTANCE, 80.0f);
-    const CVector p = ped->GetPosition();
-    alSource3f(src, AL_POSITION, p.x, p.y, p.z);
-    alSource3f(src, AL_VELOCITY, 0.0f, 0.0f, 0.0f);
+    OrcApplyPlayParamsToSource(src, params, ped);
     alSourcePlay(src);
     if (alGetError() != AL_NO_ERROR) {
         alDeleteSources(1, &src);
@@ -334,6 +349,7 @@ void OrcWeaponAudioOpenAlShutdown() {
     OrcWeaponAudioStopAllLoopSources();
     if (g_alcContext) {
         alcMakeContextCurrent(g_alcContext);
+        OrcWeaponAudioEfxShutdown();
         std::lock_guard<std::mutex> lock(g_ephemeralMutex);
         for (auto& s : g_ephemeralSources) {
             if (s.source && alIsSource(s.source)) {
@@ -394,7 +410,7 @@ void OrcWeaponAudioPruneEphemeralSources() {
     }
 }
 
-bool OrcWeaponAudioPlayBuffer(ALuint buffer, float gain, OrcWeaponSpatial spatial, CPed* ped) {
+bool OrcWeaponAudioPlayBuffer(ALuint buffer, const OrcWeaponAudioPlayParams& params, CPed* ped) {
     if (!buffer || !OrcWeaponAudioEnsureAlContextCurrent())
         return false;
 
@@ -404,23 +420,8 @@ bool OrcWeaponAudioPlayBuffer(ALuint buffer, float gain, OrcWeaponSpatial spatia
         return false;
 
     alSourcei(src, AL_BUFFER, (ALint)buffer);
-    const bool relative = spatial == OrcWeaponSpatial::ListenerRelative;
-    alSourcei(src, AL_SOURCE_RELATIVE, relative ? AL_TRUE : AL_FALSE);
-    alSourcef(src, AL_GAIN, gain);
-    const float pitch = std::max(0.01f, std::min(4.0f, CTimer::ms_fTimeScale));
-    alSourcef(src, AL_PITCH, pitch);
-    alSourcef(src, AL_REFERENCE_DISTANCE, 1.0f);
-    alSourcef(src, AL_MAX_DISTANCE, 80.0f);
-
-    if (relative) {
-        alSource3f(src, AL_POSITION, 0.0f, 0.0f, 0.0f);
-    } else if (ped) {
-        const CVector p = ped->GetPosition();
-        alSource3f(src, AL_POSITION, p.x, p.y, p.z);
-    } else {
-        alSource3f(src, AL_POSITION, 0.0f, 0.0f, 0.0f);
-    }
-    alSource3f(src, AL_VELOCITY, 0.0f, 0.0f, 0.0f);
+    alSourcei(src, AL_LOOPING, AL_FALSE);
+    OrcApplyPlayParamsToSource(src, params, ped);
     alSourcePlay(src);
     const ALenum err = alGetError();
     if (err != AL_NO_ERROR) {
@@ -434,7 +435,7 @@ bool OrcWeaponAudioPlayBuffer(ALuint buffer, float gain, OrcWeaponSpatial spatia
     return true;
 }
 
-bool OrcWeaponAudioTryPlayPath(const char* path, float gainScale, OrcWeaponSpatial spatial, CPed* ped) {
+bool OrcWeaponAudioTryPlayPath(const char* path, const OrcWeaponAudioPlayParams& params, CPed* ped) {
     if (!g_weaponCustomSounds || !path || !path[0])
         return false;
     if (!OrcWeaponAudioOpenAlInit())
@@ -442,13 +443,14 @@ bool OrcWeaponAudioTryPlayPath(const char* path, float gainScale, OrcWeaponSpati
     if (!OrcWeaponAudioPathExistsCached(path))
         return false;
 
-    const ALuint buf = OrcGetOrCreateBufferForWav(path);
+    const ALuint buf = OrcGetOrCreateBufferForPath(path);
     if (!buf) {
         if (g_orcLogLevel >= OrcLogLevel::Error)
-            OrcLogError("weapon audio: failed to decode WAV %s", path);
+            OrcLogError("weapon audio: failed to decode %s", path);
         return false;
     }
 
-    const float g = std::max(0.0f, gainScale);
-    return OrcWeaponAudioPlayBuffer(buf, g, spatial, ped);
+    OrcWeaponAudioPlayParams p2 = params;
+    p2.gain = std::max(0.0f, params.gain);
+    return OrcWeaponAudioPlayBuffer(buf, p2, ped);
 }

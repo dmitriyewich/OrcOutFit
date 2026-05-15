@@ -30,11 +30,13 @@
     X(CustomWeaponSoundDistantThreshold, "Порог distant (м)", "Distant threshold (m)") \
     X(CustomWeaponSoundMaxAlternatives, "Макс. альтернатив (_shootN)", "Max alternatives (_shootN)") \
     X(CustomWeaponSoundDistantGain, "Громкость distant", "Distant volume") \
-    X(WeaponSoundHint, "Моно PCM16 WAV рядом с DFF замены: <stem>_shoot.wav и др. (см. wiki). Только локальный игрок; нужна включённая замена оружия. OpenAL Soft встроен в ASI.", "Mono PCM16 WAV next to the replacement DFF: <stem>_shoot.wav etc. (see wiki). Local player only; weapon replacement must be enabled. OpenAL Soft is built into the ASI.") \
+    X(WeaponSoundHint, "Файлы рядом с DFF замены: <stem>_shoot с расширением .wav / .mp3 / .flac / .ogg (приоритет по порядку). Тонкая настройка 3D: секция [WeaponAudio] в OrcOutFit.ini и опционально <stem>.audio рядом с DFF. Только локальный игрок; нужна включённая замена оружия.", "Files next to the replacement DFF: <stem>_shoot with extension .wav / .mp3 / .flac / .ogg (first match wins). 3D tuning: [WeaponAudio] in OrcOutFit.ini and optional <stem>.audio beside the DFF. Local player only; weapon replacement must be enabled.") \
     X(WeaponSoundDistantGainHint, "0 — та же громкость, что «Громкость (близко / loop)».", "0 — same volume as «Volume (close / loop)».") \
+    X(WeaponAudioEfxReverb, "Reverb (OpenAL EFX) для world-источников", "Reverb (OpenAL EFX) for world sources") \
+    X(WeaponAudioEfxInteriorOnly, "Reverb только в интерьерах (currArea)", "Reverb in interiors only (currArea)") \
     X(WeaponSoundEarShotHint, "Не используйте EarShot.asi вместе с кастомными звуками OrcOutFit — возможен двойной OpenAL и Miles.", "Do not run EarShot.asi alongside OrcOutFit custom weapon audio — double OpenAL / Miles is possible.") \
     X(WeaponSoundNeedsReplacementHint, "Замена оружия выключена — кастомные WAV не подставятся, пока не включите «Замена оружия».", "Weapon replacement is off — custom WAVs will not apply until you enable «Weapon replacement».") \
-    X(RescanWeaponSoundCache, "Сбросить кеш WAV", "Clear WAV cache") \
+    X(RescanWeaponSoundCache, "Сбросить кеш звуков", "Clear audio cache") \
     X(TabObjects, "Объекты", "Objects") \
     X(TabSkins, "Скины", "Skins") \
     X(TabSettings, "Настройки", "Settings") \

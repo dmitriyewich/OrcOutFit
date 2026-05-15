@@ -61,7 +61,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(OrcOpenAlInclude);$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(OrcOpenAlInclude);$(ProjectDir)source;$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -117,6 +117,8 @@
     <ClCompile Include="source\orc_path.cpp" />
     <ClCompile Include="source\orc_weapon_assets.cpp" />
     <ClCompile Include="source\orc_weapon_audio_openal.cpp" />
+    <ClCompile Include="source\orc_weapon_audio_decode.cpp" />
+    <ClCompile Include="source\orc_weapon_audio_config.cpp" />
     <ClCompile Include="source\orc_weapon_audio_paths.cpp" />
     <ClCompile Include="source\orc_weapon_audio_hooks.cpp" />
     <ClCompile Include="source\orc_weapon_audio_loops.cpp" />

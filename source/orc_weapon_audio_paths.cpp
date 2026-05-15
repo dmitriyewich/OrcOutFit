@@ -6,7 +6,6 @@
 #include "CGame.h"
 #include "CPed.h"
 #include "CPlayerPed.h"
-#include "CPlayerPed.h"
 #include "CVector.h"
 #include "CWeaponInfo.h"
 #include "eEntityType.h"
@@ -23,12 +22,15 @@
 #include "orc_app.h"
 #include "orc_path.h"
 #include "orc_weapon_assets.h"
+#include "orc_weapon_audio_config.h"
 #include "orc_weapon_audio_internal.h"
 
 enum OrcPathCacheState : uint8_t { kUnknown = 0, kMissing = 1, kPresent = 2 };
 
 static std::unordered_map<std::string, OrcPathCacheState> g_pathCache;
 static std::mutex g_pathCacheMutex;
+
+static const char* kAudioExts[] = {".wav", ".mp3", ".flac", ".ogg"};
 
 static std::string OrcDirNameA(const std::string& p) {
     size_t slash = p.find_last_of("\\/");
@@ -38,6 +40,7 @@ static std::string OrcDirNameA(const std::string& p) {
 }
 
 void OrcWeaponAudioInvalidateCaches() {
+    OrcWeaponAudioConfigClearStemOverrides();
     std::lock_guard<std::mutex> lock(g_pathCacheMutex);
     g_pathCache.clear();
     OrcWeaponAudioLoopsStopAll();
@@ -77,18 +80,30 @@ bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudio
     return true;
 }
 
-std::string OrcWeaponAudioResolvePath(const OrcWeaponAudioStemContext& ctx, const char* suffix) {
+bool OrcWeaponAudioResolveFirstExistingAudioPath(const OrcWeaponAudioStemContext& ctx, const char* suffix, std::string& outPath) {
+    outPath.clear();
     if (!suffix || !suffix[0] || ctx.stem.empty())
-        return {};
-    return OrcJoinPath(ctx.dir, ctx.stem + suffix + ".wav");
+        return false;
+    for (const char* ext : kAudioExts) {
+        const std::string p = OrcJoinPath(ctx.dir, ctx.stem + std::string(suffix) + ext);
+        if (OrcWeaponAudioPathExistsCached(p)) {
+            outPath = p;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool OrcWeaponAudioTryPlaySuffix(const OrcWeaponAudioStemContext& ctx, const char* suffix, float gainScale,
     OrcWeaponSpatial spatial) {
-    const std::string path = OrcWeaponAudioResolvePath(ctx, suffix);
-    if (path.empty())
+    std::string path;
+    if (!OrcWeaponAudioResolveFirstExistingAudioPath(ctx, suffix, path) || path.empty())
         return false;
-    if (!OrcWeaponAudioTryPlayPath(path.c_str(), gainScale, spatial, ctx.ped))
+
+    const OrcWeaponSoundClass cls = OrcWeaponInferSoundClassFromSuffix(suffix);
+    OrcWeaponAudioPlayParams params = OrcWeaponAudioBuildPlayParams(&ctx, gainScale, spatial, cls);
+
+    if (!OrcWeaponAudioTryPlayPath(path.c_str(), params, ctx.ped))
         return false;
     OrcWeaponAudioMarkSuppressVanilla();
     return true;
@@ -128,10 +143,11 @@ static int OrcWeaponAudioActiveWeaponType(CPed* ped) {
 }
 
 static bool OrcWeaponAudioPathExistsForSuffix(const OrcWeaponAudioStemContext& ctx, const char* suffix) {
-    return OrcWeaponAudioPathExistsCached(OrcWeaponAudioResolvePath(ctx, suffix));
+    std::string tmp;
+    return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, suffix, tmp);
 }
 
-bool OrcWeaponAudioHasLoopCustomWav(const OrcWeaponAudioStemContext& ctx) {
+bool OrcWeaponAudioHasLoopCustomAudio(const OrcWeaponAudioStemContext& ctx) {
     static const char* kSuffixes[] = {
         "_flamethrower_fire",
         "_flamethrower_idlegasloop",
@@ -150,7 +166,7 @@ bool OrcWeaponAudioHasLoopCustomWav(const OrcWeaponAudioStemContext& ctx) {
     return false;
 }
 
-bool OrcWeaponAudioHasFireRelatedCustomWav(const OrcWeaponAudioStemContext& ctx) {
+bool OrcWeaponAudioHasFireRelatedCustomAudio(const OrcWeaponAudioStemContext& ctx) {
     static const char* kBase[] = {"_shoot", "_distant", "_low_ammo", "_dryfire"};
     for (const char* s : kBase) {
         if (OrcWeaponAudioPathExistsForSuffix(ctx, s))
@@ -185,5 +201,5 @@ bool OrcWeaponAudioShouldSuppressVanillaGun(CAEWeaponAudioEntity* self) {
     OrcWeaponAudioStemContext ctx;
     if (!OrcWeaponAudioTryBuildStemContext(ped, wt, ctx))
         return false;
-    return OrcWeaponAudioHasFireRelatedCustomWav(ctx) || OrcWeaponAudioHasLoopCustomWav(ctx);
+    return OrcWeaponAudioHasFireRelatedCustomAudio(ctx) || OrcWeaponAudioHasLoopCustomAudio(ctx);
 }
