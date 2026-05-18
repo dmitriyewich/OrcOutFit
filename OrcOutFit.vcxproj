@@ -50,7 +50,7 @@
     <TargetExt>.asi</TargetExt>
     <OrcOpenAlInclude>$(ProjectDir)source\external\openal-soft\include;$(ProjectDir)build\openal-soft</OrcOpenAlInclude>
     <OrcOpenAlLibDir>$(ProjectDir)build\openal-soft\$(Configuration)</OrcOpenAlLibDir>
-    <OrcOpenAlPreBuild>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir).github\scripts\build-openal-soft.ps1" -Configuration $(Configuration) -ProjectDir "$(ProjectDir)"</OrcOpenAlPreBuild>
+    <OrcOpenAlPreBuild>powershell -NoProfile -ExecutionPolicy Bypass -File "$(MSBuildProjectDirectory)\.github\scripts\build-openal-soft.ps1" -Configuration $(Configuration) -ProjectDir "$(MSBuildProjectDirectory)"</OrcOpenAlPreBuild>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>

@@ -6,12 +6,20 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProjectDir = $ProjectDir.Trim('"', ' ').TrimEnd('\', '/')
+
+function Get-ProgramFilesRoot {
+    # MSBuild PreBuild may run under 32-bit host: ProgramFiles -> (x86); VS/CMake live under 64-bit tree.
+    if ($env:ProgramW6432) { return $env:ProgramW6432 }
+    return $env:ProgramFiles
+}
 
 function Find-CMake {
+    $pf = Get-ProgramFilesRoot
     $candidates = @(
-        "${env:ProgramFiles}\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
-        "${env:ProgramFiles}\CMake\bin\cmake.exe"
+        "$pf\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
+        "$pf\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
+        "$pf\CMake\bin\cmake.exe"
     )
     foreach ($p in $candidates) {
         if (Test-Path -LiteralPath $p) { return $p }

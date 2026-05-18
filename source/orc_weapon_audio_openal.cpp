@@ -292,6 +292,16 @@ bool OrcWeaponAudioStartLoopSource(ALuint buffer, const OrcWeaponAudioPlayParams
     return true;
 }
 
+bool OrcWeaponAudioIsLoopSourcePlaying(ALuint source) {
+    if (!source || !g_alcContext || !OrcWeaponAudioEnsureAlContextCurrent())
+        return false;
+    if (!alIsSource(source))
+        return false;
+    ALint st = AL_STOPPED;
+    alGetSourcei(source, AL_SOURCE_STATE, &st);
+    return st == AL_PLAYING;
+}
+
 void OrcWeaponAudioStopLoopSource(ALuint& inOutSource) {
     if (!inOutSource || !g_alcContext)
         return;

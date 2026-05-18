@@ -19,17 +19,22 @@
 
 static const char* kWeaponAudioSection = "WeaponAudio";
 
-static const char* kClassKey[kOrcWeaponSoundClassCount] = {"Shoot", "After", "Reload", "ReloadOne", "ReloadTwo", "Distant",
-    "LowAmmo", "Dryfire", "Melee", "Loop"};
+static const char* kClassKey[kOrcWeaponSoundClassCount] = {
+    "Shoot", "After", "Reload", "ReloadOne", "ReloadTwo", "Distant", "LowAmmo", "Dryfire", "Melee", "Loop", "MinigunSpin",
+    "MinigunSpinEnd", "ChainsawStop"};
 
 static OrcWeaponAudioAttenuation g_builtin[kOrcWeaponSoundClassCount];
 static OrcWeaponAudioAttenuation g_iniOverride[kOrcWeaponSoundClassCount];
 static bool g_iniOverrideValid[kOrcWeaponSoundClassCount];
+static float g_iniPitch[kOrcWeaponSoundClassCount];
+static bool g_iniPitchValid[kOrcWeaponSoundClassCount];
 static bool g_builtinInited = false;
 
 struct OrcStemAttPack {
     OrcWeaponAudioAttenuation per[kOrcWeaponSoundClassCount]{};
     bool valid[kOrcWeaponSoundClassCount]{};
+    float pitch[kOrcWeaponSoundClassCount]{};
+    bool pitchValid[kOrcWeaponSoundClassCount]{};
 };
 
 static std::unordered_map<std::string, OrcStemAttPack> g_stemAtt;
@@ -55,6 +60,9 @@ static void OrcEnsureBuiltinDefaults() {
     set((int)O::Dryfire, 1.5f, 10000.0f, 1.0f, 2.0f);
     set((int)O::Melee, 2.0f, 3000.0f, 3.0f, 1.0f);
     set((int)O::Loop, 2.0f, 200.0f, 1.0f, 1.0f);
+    set((int)O::MinigunSpin, 3.0f, 10000.0f, 1.5f, 0.8f);
+    set((int)O::MinigunSpinEnd, 3.0f, 10000.0f, 1.5f, 0.8f);
+    set((int)O::ChainsawStop, 2.0f, 10000.0f, 1.5f, 1.0f);
 }
 
 static bool OrcMergeClassAttFromIni(const OrcIniDocument& doc, OrcWeaponAudioAttenuation& io, const char* classKey) {
@@ -83,6 +91,15 @@ static bool OrcMergeClassAttFromIni(const OrcIniDocument& doc, OrcWeaponAudioAtt
     return any;
 }
 
+static bool OrcMergeClassPitchFromIni(const OrcIniDocument& doc, float& io, const char* classKey) {
+    char buf[64];
+    _snprintf_s(buf, _TRUNCATE, "%s.Pitch", classKey);
+    if (!doc.KeyExists(kWeaponAudioSection, buf))
+        return false;
+    io = static_cast<float>(atof(doc.GetString(kWeaponAudioSection, buf, "1").c_str()));
+    return true;
+}
+
 void OrcWeaponAudioConfigApplyFromMainIni(const OrcIniDocument& ini) {
     OrcEnsureBuiltinDefaults();
     for (int i = 0; i < kOrcWeaponSoundClassCount; ++i) {
@@ -91,6 +108,11 @@ void OrcWeaponAudioConfigApplyFromMainIni(const OrcIniDocument& ini) {
         g_iniOverrideValid[i] = any;
         if (any)
             g_iniOverride[i] = a;
+
+        float p = 1.0f;
+        g_iniPitchValid[i] = OrcMergeClassPitchFromIni(ini, p, kClassKey[i]);
+        if (g_iniPitchValid[i])
+            g_iniPitch[i] = p;
     }
 
     g_weaponAudioEfxReverb = ini.GetInt(kWeaponAudioSection, "EfxReverb", 1) != 0;
@@ -126,6 +148,10 @@ void OrcWeaponAudioConfigAppendMainIniValues(std::vector<OrcIniValue>& values) {
         OrcPushIniFloat(values, kbuf, a.rolloffFactor, "%.2f");
         _snprintf_s(kbuf, _TRUNCATE, "%s.AirAbsorption", kClassKey[i]);
         OrcPushIniFloat(values, kbuf, a.airAbsorption, "%.2f");
+        if (g_iniPitchValid[i]) {
+            _snprintf_s(kbuf, _TRUNCATE, "%s.Pitch", kClassKey[i]);
+            OrcPushIniFloat(values, kbuf, g_iniPitch[i], "%.2f");
+        }
     }
     {
         OrcIniValue iv;
@@ -164,6 +190,11 @@ static void OrcLoadStemSidecar(const OrcWeaponAudioStemContext& ctx, OrcStemAttP
             pack.per[i] = a;
             pack.valid[i] = true;
         }
+        float p = 1.0f;
+        if (OrcMergeClassPitchFromIni(doc, p, kClassKey[i])) {
+            pack.pitch[i] = p;
+            pack.pitchValid[i] = true;
+        }
     }
 }
 
@@ -177,6 +208,19 @@ static const OrcStemAttPack& OrcGetStemPack(const OrcWeaponAudioStemContext& ctx
     OrcLoadStemSidecar(ctx, pack);
     auto ins = g_stemAtt.emplace(key, std::move(pack));
     return ins.first->second;
+}
+
+static float OrcResolveClassPitch(const OrcWeaponAudioStemContext* ctx, OrcWeaponSoundClass cls) {
+    const int ci = static_cast<int>(cls);
+    float p = 1.0f;
+    if (g_iniPitchValid[ci])
+        p = g_iniPitch[ci];
+    if (ctx) {
+        const OrcStemAttPack& sp = OrcGetStemPack(*ctx);
+        if (sp.pitchValid[ci])
+            p = sp.pitch[ci];
+    }
+    return std::max(0.01f, std::min(4.0f, p));
 }
 
 OrcWeaponAudioAttenuation OrcWeaponAudioConfigResolveAttenuation(const OrcWeaponAudioStemContext* ctx, OrcWeaponSoundClass cls) {
@@ -218,7 +262,9 @@ OrcWeaponSoundClass OrcWeaponInferSoundClassFromSuffix(const char* sfxSuffix) {
         return OrcWeaponSoundClass::LowAmmo;
     if (strncmp(s, "dryfire", 7) == 0)
         return OrcWeaponSoundClass::Dryfire;
-    if (strncmp(s, "hit", 3) == 0)
+    if (strncmp(s, "martial_punch", 13) == 0 || strncmp(s, "martial_kick", 12) == 0 || strncmp(s, "stomp", 5) == 0 ||
+        strncmp(s, "swing", 5) == 0 || strncmp(s, "hitmetal", 8) == 0 || strncmp(s, "hitwood", 7) == 0 ||
+        strncmp(s, "hit", 3) == 0)
         return OrcWeaponSoundClass::Melee;
     if (strncmp(s, "after", 5) == 0)
         return OrcWeaponSoundClass::After;
@@ -227,6 +273,14 @@ OrcWeaponSoundClass OrcWeaponInferSoundClassFromSuffix(const char* sfxSuffix) {
 
     if (strncmp(s, "flamethrower_start", 18) == 0)
         return OrcWeaponSoundClass::Shoot;
+
+    if (strncmp(s, "minigun_barrelspinend", 21) == 0)
+        return OrcWeaponSoundClass::MinigunSpinEnd;
+    if (strncmp(s, "minigun_barrelspinloop", 22) == 0)
+        return OrcWeaponSoundClass::MinigunSpin;
+
+    if (strncmp(s, "chainsaw_stop", 13) == 0)
+        return OrcWeaponSoundClass::ChainsawStop;
 
     if (strncmp(s, "flamethrower_", 13) == 0 || strncmp(s, "minigun_", 8) == 0 || strncmp(s, "chainsaw_", 9) == 0 ||
         strncmp(s, "spraycan_", 9) == 0 || strncmp(s, "extinguisher_", 13) == 0)
@@ -241,7 +295,9 @@ OrcWeaponAudioPlayParams OrcWeaponAudioBuildPlayParams(const OrcWeaponAudioStemC
     p.gain = gainScale >= 0.0f ? gainScale : 0.0f;
     p.spatial = spatial;
     p.soundClass = cls;
-    p.pitch = std::max(0.01f, std::min(4.0f, CTimer::ms_fTimeScale));
+    const float classPitch = OrcResolveClassPitch(ctx, cls);
+    const float timeScale = std::max(0.01f, std::min(4.0f, CTimer::ms_fTimeScale));
+    p.pitch = classPitch * timeScale;
     p.att = OrcWeaponAudioConfigResolveAttenuation(ctx, cls);
     const bool interior = CGame::currArea > 0;
     p.useEfxReverb =

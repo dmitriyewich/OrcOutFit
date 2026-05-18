@@ -12,6 +12,9 @@
 #include <windows.h>
 
 class CPed;
+class CPhysical;
+class CAEWeaponAudioEntity;
+class CAESound;
 struct CVector;
 
 using ALuint = unsigned int;
@@ -45,6 +48,7 @@ ALuint OrcGetOrCreateBufferForPath(const char* pathUtf8);
 void OrcWeaponAudioStopAllLoopSources();
 bool OrcWeaponAudioStartLoopSource(ALuint buffer, const OrcWeaponAudioPlayParams& params, CPed* ped, ALuint& inOutSource);
 void OrcWeaponAudioStopLoopSource(ALuint& inOutSource);
+bool OrcWeaponAudioIsLoopSourcePlaying(ALuint source);
 void OrcWeaponAudioUpdateLoopSources();
 void OrcWeaponAudioSyncLoopSourceWorldPos(ALuint source, CPed* ped, float gain);
 
@@ -56,7 +60,11 @@ void OrcWeaponAudioPruneEphemeralSources();
 void OrcWeaponAudioStopEphemeralSources();
 bool OrcWeaponAudioPlayBuffer(ALuint buffer, const OrcWeaponAudioPlayParams& params, CPed* ped);
 
+CPed* OrcWeaponAudioPedFromPhysical(CPhysical* physical);
+CPed* OrcWeaponAudioPedFromWeaponAudio(CAEWeaponAudioEntity* self);
 bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudioStemContext& out);
+bool OrcWeaponAudioPedHasReplacementAudio(CPed* ped, int weaponType);
+bool OrcWeaponAudioHandleVanillaSfx(CAESound* snd);
 /// Первый существующий файл `stem+suffix` с расширением .wav / .mp3 / .flac / .ogg.
 bool OrcWeaponAudioResolveFirstExistingAudioPath(const OrcWeaponAudioStemContext& ctx, const char* suffix, std::string& outPath);
 bool OrcWeaponAudioPathExistsCached(const std::string& path);
@@ -73,7 +81,12 @@ void OrcWeaponAudioLoopsShutdown();
 void OrcWeaponAudioLoopsOnGameProcess();
 void OrcWeaponAudioLoopsStopForPed(CPed* ped);
 void OrcWeaponAudioLoopsStopAll();
-void OrcWeaponAudioLoopsOnPlayGunSounds(class CAEWeaponAudioEntity* self);
+bool OrcWeaponAudioLoopsTryPlayMinigunFireForPed(CPed* ped, class CAEWeaponAudioEntity* audioEntity = nullptr);
+void OrcWeaponAudioLoopsStopMinigunForPed(CPed* ped);
+bool OrcWeaponAudioPedHasCustomMinigunFireloop(CPed* ped);
+bool OrcWeaponAudioPedIsMinigunFiring(CPed* ped);
+bool OrcWeaponAudioPedWantsMinigunFireLoop(CPed* ped);
+void OrcWeaponAudioHooksClearShootThrottleState();
 
 float OrcWeaponAudioCamPedDistance(CPed* ped);
 bool OrcWeaponAudioIsInterior();

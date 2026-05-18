@@ -18,9 +18,12 @@ enum class OrcWeaponSoundClass : uint8_t {
     Dryfire,
     Melee,
     Loop,
+    MinigunSpin,
+    MinigunSpinEnd,
+    ChainsawStop,
 };
 
-inline constexpr int kOrcWeaponSoundClassCount = 10;
+inline constexpr int kOrcWeaponSoundClassCount = 13;
 
 struct OrcWeaponAudioAttenuation {
     float maxDist = 80.0f;
