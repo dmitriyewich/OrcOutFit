@@ -29,8 +29,16 @@ using namespace plugin;
 /// GTA SA 1.0 US — точки спавна FX выстрела (`muzzlePosn`); `origin` пули не трогаем.
 static constexpr uintptr_t kAddr_CWeapon_Fire = 0x742300;
 static constexpr uintptr_t kAddr_CWeapon_FireInstantHit = 0x73FB10;
+static constexpr uintptr_t kAddr_CPed_DoGunFlash = 0x5DF340;
+static constexpr uintptr_t kAddr_CPed_SetGunFlashAlpha = 0x5DF400;
 
 static bool g_weaponFireFxHooksInstalled = false;
+static bool g_pedGunflashHooksInstalled = false;
+
+using CPed_DoGunFlash_orig_t = bool(__thiscall*)(CPed* self, int duration, bool isLeftHand);
+static CPed_DoGunFlash_orig_t g_CPedDoGunFlash_Orig = nullptr;
+using CPed_SetGunFlashAlpha_orig_t = void(__thiscall*)(CPed* self, bool rightHand);
+static CPed_SetGunFlashAlpha_orig_t g_CPedSetGunFlashAlpha_Orig = nullptr;
 
 static constexpr int kOrcMuzzleDeltaCacheMs = 160;
 static constexpr int kOrcMaxRwFrameAncestorsFx = 64;
@@ -414,6 +422,77 @@ static bool __fastcall CWeapon_FireInstantHit_Detour(CWeapon* self, void* /*edx*
         self, firingEntity, origin, muzzlePosn, targetEntity, target, originForDriveBy, arg6, muzzle);
 }
 
+static bool __fastcall CPed_DoGunFlash_Detour(CPed* self, void* /*edx*/, int duration, bool isLeftHand) {
+    if (g_enabled && self) {
+        const int wt = OrcResolveWeaponHeldVisualWeaponType(self);
+        if (wt > 0 && OrcPedWantsDualWieldHeld(self, wt)) {
+            RwFrame* const prevGf = self->m_pGunflashObject;
+            RwFrame* const gf = OrcPedResolveGunflashFrameForDualHand(self, wt, isLeftHand);
+            if (gf)
+                self->m_pGunflashObject = gf;
+            const bool ok = g_CPedDoGunFlash_Orig ? g_CPedDoGunFlash_Orig(self, duration, isLeftHand) : false;
+            if (gf)
+                self->m_pGunflashObject = prevGf;
+            return ok;
+        }
+    }
+    if (!g_CPedDoGunFlash_Orig)
+        return false;
+    return g_CPedDoGunFlash_Orig(self, duration, isLeftHand);
+}
+
+static void __fastcall CPed_SetGunFlashAlpha_Detour(CPed* self, void* /*edx*/, bool rightHand) {
+    if (g_enabled && self) {
+        const int wt = OrcResolveWeaponHeldVisualWeaponType(self);
+        if (wt > 0 && OrcPedWantsDualWieldHeld(self, wt)) {
+            RwFrame* const prevGf = self->m_pGunflashObject;
+            RwFrame* const gf = OrcPedResolveGunflashFrameForDualHand(self, wt, rightHand);
+            if (gf)
+                self->m_pGunflashObject = gf;
+            if (g_CPedSetGunFlashAlpha_Orig)
+                g_CPedSetGunFlashAlpha_Orig(self, rightHand);
+            if (gf)
+                self->m_pGunflashObject = prevGf;
+            return;
+        }
+    }
+    if (g_CPedSetGunFlashAlpha_Orig)
+        g_CPedSetGunFlashAlpha_Orig(self, rightHand);
+}
+
+void OrcWeaponEnsureGunflashHooksInstalled() {
+    if (g_pedGunflashHooksInstalled)
+        return;
+    MH_STATUS st = MH_Initialize();
+    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
+        OrcLogError("CPed gunflash hooks: MH_Initialize -> %s", MH_StatusToString(st));
+        return;
+    }
+    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CPed_DoGunFlash),
+            reinterpret_cast<void*>(&CPed_DoGunFlash_Detour),
+            reinterpret_cast<void**>(&g_CPedDoGunFlash_Orig)) != MH_OK) {
+        OrcLogError("CPed::DoGunFlash hook: MH_CreateHook failed (0x%08X)", (unsigned)kAddr_CPed_DoGunFlash);
+        return;
+    }
+    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CPed_SetGunFlashAlpha),
+            reinterpret_cast<void*>(&CPed_SetGunFlashAlpha_Detour),
+            reinterpret_cast<void**>(&g_CPedSetGunFlashAlpha_Orig)) != MH_OK) {
+        OrcLogError("CPed::SetGunFlashAlpha hook: MH_CreateHook failed (0x%08X)", (unsigned)kAddr_CPed_SetGunFlashAlpha);
+        return;
+    }
+    g_pedGunflashHooksInstalled = true;
+    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CPed_DoGunFlash));
+    if (st != MH_OK)
+        OrcLogError("CPed::DoGunFlash hook: MH_EnableHook -> %s", MH_StatusToString(st));
+    else
+        OrcLogInfo("CPed::DoGunFlash hook (0x%08X)", (unsigned)kAddr_CPed_DoGunFlash);
+    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CPed_SetGunFlashAlpha));
+    if (st != MH_OK)
+        OrcLogError("CPed::SetGunFlashAlpha hook: MH_EnableHook -> %s", MH_StatusToString(st));
+    else
+        OrcLogInfo("CPed::SetGunFlashAlpha hook (0x%08X)", (unsigned)kAddr_CPed_SetGunFlashAlpha);
+}
+
 void OrcWeaponEnsureFireFxHooksInstalled() {
     if (g_weaponFireFxHooksInstalled)
         return;
@@ -445,4 +524,5 @@ void OrcWeaponEnsureFireFxHooksInstalled() {
         OrcLogError("CWeapon::FireInstantHit hook: MH_EnableHook -> %s", MH_StatusToString(st));
     else
         OrcLogInfo("CWeapon::FireInstantHit muzzle FX hook (0x%08X)", (unsigned)kAddr_CWeapon_FireInstantHit);
+    OrcWeaponEnsureGunflashHooksInstalled();
 }

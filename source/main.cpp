@@ -2152,6 +2152,7 @@ static void SyncAndRender() {
     std::vector<char> suppress;
     suppress.assign(g_cfg.size(), 0);
     OrcObjectsApplyWeaponSuppression(player, &suppress);
+    OrcWeaponSuppressBodyForHeldVisualWeapon(player, &suppress);
     OrcSyncPedWeapons(player, g_rendered, &suppress);
     std::vector<char> suppressPed;
     suppressPed.assign(g_cfg.size(), 0);
@@ -2211,6 +2212,7 @@ static void SyncAndRender() {
                 auto& cache = g_otherPedsRendered[h];
                 std::fill(suppressPed.begin(), suppressPed.end(), 0);
                 OrcObjectsApplyWeaponSuppression(ped, &suppressPed);
+                OrcWeaponSuppressBodyForHeldVisualWeapon(ped, &suppressPed);
                 OrcSyncPedWeapons(ped, cache.data(), &suppressPed);
                 OrcRenderPedWeapons(ped, cache.data());
             }

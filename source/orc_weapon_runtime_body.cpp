@@ -245,6 +245,9 @@ void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* 
     unsigned char curSlot = ped->m_nSelectedWepSlot;
     int curType = 0;
     if (curSlot < 13) curType = (int)ped->m_aWeapons[curSlot].m_eWeaponType;
+    const int heldVisWt = (g_weaponReplacementEnabled && g_weaponReplacementInHands)
+        ? OrcResolveWeaponHeldVisualWeaponType(ped)
+        : 0;
     if (g_cfg.empty()) return;
     const int maxWt = (int)g_cfg.size();
     std::vector<char> want(maxWt, 0);
@@ -255,6 +258,7 @@ void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* 
         if (wt <= 0 || wt >= maxWt) continue;
         if (suppress && wt < (int)suppress->size() && (*suppress)[wt]) continue;
         if (wt == curType) continue;
+        if (heldVisWt > 0 && wt == heldVisWt) continue;
         const WeaponCfg& wc = GetWeaponCfgForPed(ped, wt);
         if (!wc.enabled || wc.boneId == 0) continue;
         CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);

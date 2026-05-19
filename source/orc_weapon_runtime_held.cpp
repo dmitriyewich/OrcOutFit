@@ -185,6 +185,27 @@ static void CopyRwClumpMatchingAtomicFrameMatricesFromStock(RwObject* stock, RwO
     }
 }
 
+static void CopyStockAtomicLtmToCloneRoot(RpAtomic* stockAtomic, RwObject* clone) {
+    if (!stockAtomic || !clone)
+        return;
+    RwFrame* sf = RpAtomicGetFrame(stockAtomic);
+    RwFrame* df = GetRwObjectRootFrame(clone);
+    if (!sf || !df)
+        return;
+    __try {
+        const RwMatrix* sm = RwFrameGetLTM(sf);
+        if (!sm)
+            sm = RwFrameGetMatrix(sf);
+        if (!sm)
+            return;
+        std::memcpy(RwFrameGetMatrix(df), sm, sizeof(RwMatrix));
+        RwMatrixUpdate(RwFrameGetMatrix(df));
+        RwFrameUpdateObjects(df);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("CopyStockAtomicLtmToCloneRoot: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
 static void CopyStockHeldWeaponRwMatricesToClone(RwObject* stock, RwObject* clone, bool copyDeepPose) {
     CopyRwObjectRootMatrix(stock, clone);
     if (!copyDeepPose) {
@@ -206,6 +227,12 @@ struct HeldWeaponReplacementState {
     int weaponType = 0;
     std::string replacementKey;
     RwObject* rwObject = nullptr;
+    /// PRO dual-wield: отдельный клон для левой руки (как `RenderedWeapon.secondary` на теле).
+    RwObject* rwObjectSecondary = nullptr;
+    /// Последний stock-атом primary draw-swap (исключить из поиска L-hand stock).
+    RpAtomic* lastPrimaryStockAtomic = nullptr;
+    /// Кэш L-hand stock-атома на `originalObject` (twin pistols: оба атома в одном clump).
+    RpAtomic* lastSecondaryStockAtomic = nullptr;
     RwObject* originalObject = nullptr;
     bool poseSynced = false;
     bool captureActive = false;
@@ -248,7 +275,7 @@ static bool HeldWeaponRwObjectIsReplacementClone(CPed* ped, RwObject* obj) {
     auto it = g_heldWeaponReplacements.find(pedRef);
     if (it == g_heldWeaponReplacements.end())
         return false;
-    return it->second.rwObject == obj;
+    return it->second.rwObject == obj || it->second.rwObjectSecondary == obj;
 }
 
 static bool OrcHeldReplacementStateMatchesResolvedChoice(CPed* ped, int wt, const HeldWeaponReplacementState& st) {
@@ -292,7 +319,8 @@ static bool OrcHeldIsAnyReplacementCloneObject(RwObject* obj) {
     if (!obj)
         return false;
     for (const auto& kv : g_heldWeaponReplacements) {
-        if (kv.second.rwObject && kv.second.rwObject == obj)
+        if ((kv.second.rwObject && kv.second.rwObject == obj) ||
+            (kv.second.rwObjectSecondary && kv.second.rwObjectSecondary == obj))
             return true;
     }
     return false;
@@ -600,6 +628,41 @@ bool OrcGetHeldReplacementKeyForPed(CPed* ped, int wt, std::string& outKeyLower)
     return !outKeyLower.empty();
 }
 
+bool OrcPedWantsDualWieldHeld(CPed* ped, int wt) {
+    if (!ped || wt <= 0 || !g_considerWeaponSkills)
+        return false;
+    if (OrcResolveWeaponHeldVisualWeaponType(ped) != wt)
+        return false;
+    CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+    CWeaponInfo* twinInfo = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 2);
+    if (!twinInfo)
+        twinInfo = wi;
+    if (!twinInfo || !twinInfo->m_nFlags.bTwinPistol)
+        return false;
+    return ped->GetWeaponSkill(static_cast<eWeaponType>(wt)) == WEAPSKILL_PRO;
+}
+
+RwFrame* OrcPedResolveGunflashFrameForDualHand(CPed* ped, int wtHint, bool isLeftHand) {
+    if (!ped)
+        return nullptr;
+    const int wt = wtHint > 0 ? wtHint : OrcResolveWeaponHeldVisualWeaponType(ped);
+    if (wt <= 0 || !OrcPedWantsDualWieldHeld(ped, wt))
+        return nullptr;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return nullptr;
+    auto it = g_heldWeaponReplacements.find(pedRef);
+    if (it == g_heldWeaponReplacements.end())
+        return nullptr;
+    const HeldWeaponReplacementState& st = it->second;
+    RwObject* mesh = isLeftHand ? st.rwObjectSecondary : st.rwObject;
+    if (!mesh)
+        mesh = st.rwObject;
+    if (!mesh || mesh->type != rpCLUMP)
+        return nullptr;
+    return CClumpModelInfo::GetFrameFromName(reinterpret_cast<RpClump*>(mesh), "gunflash");
+}
+
 static bool ShouldReplaceHeldWeaponForPed(CPed* ped) {
     if (!g_enabled || !g_weaponReplacementEnabled || !g_weaponReplacementInHands || !ped)
         return false;
@@ -848,7 +911,11 @@ static RpAtomic* OrcHeldPoseApplyEachAtomicCb(RpAtomic* atomic, void* data) {
 
 /// Единая точка математики «В руке»: `phase` в логе различает **repl:sync** (после копии IK→клон) и **vanillaPC**.
 /// `wtOverride >= 0` — тип оружия для пресета Held (иначе `OrcResolveWeaponHeldVisualWeaponType`).
-static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char* phase, int wtOverride = -1) {
+static bool OrcApplyHeldPoseToWeaponObject(CPed* ped,
+    RwObject* obj,
+    const char* phase,
+    int wtOverride = -1,
+    bool secondaryHand = false) {
     if (!g_enabled || !ped || !obj || !phase)
         return false;
     const int pedRefEarly = CPools::GetPedRef(ped);
@@ -860,14 +927,15 @@ static bool OrcApplyHeldPoseToWeaponObject(CPed* ped, RwObject* obj, const char*
             (int)ped->m_nSelectedWepSlot, (int)ped->m_nSavedWeapon, pedRefEarly);
         return false;
     }
-    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
+    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, secondaryHand);
     const bool isReplClone = HeldWeaponRwObjectIsReplacementClone(ped, obj);
     if (g_heldPoseDebug || g_heldWeaponTrace >= 2) {
         const bool fromRepl = (ped->m_pWeaponObject != obj);
         OrcLogInfoThrottled(
             465 + wt % 7, 1600u,
-            "held chain: cfg phase=%s pedRef=%d wt=%d heldEn=%d obj=%p objT=%d meshRepl=%d resolve=%s", phase,
-            pedRefEarly, wt, h.enabled ? 1 : 0, obj, (int)obj->type, isReplClone ? 1 : 0, fromRepl ? "replBuf" : "slot");
+            "held chain: cfg phase=%s pedRef=%d wt=%d secondary=%d heldEn=%d obj=%p objT=%d meshRepl=%d resolve=%s",
+            phase, pedRefEarly, wt, secondaryHand ? 1 : 0, h.enabled ? 1 : 0, obj, (int)obj->type,
+            isReplClone ? 1 : 0, fromRepl ? "replBuf" : "slot");
     }
     if (!h.enabled) {
         OrcLogHeldPoseCfgDisabled(ped, wt);
@@ -1016,7 +1084,71 @@ static AtomicDefaultRender_fn g_AtomicDefaultRender_Orig = nullptr;
 static RenderWeaponPedsForPC_fn g_RenderWeaponPedsForPC_Orig = nullptr;
 static RenderWeaponCB_fn g_RenderWeaponCB_Orig = nullptr;
 static bool s_renderingHeldReplacementClone = false;
-static std::unordered_map<uintptr_t, uint64_t> s_heldReplacementDrawPassByContext;
+struct HeldReplDrawFrameState {
+    unsigned ms = 0;
+    RpAtomic* drewPrimaryAtomic = nullptr;
+    RpAtomic* drewSecondaryAtomic = nullptr;
+};
+static std::unordered_map<int, HeldReplDrawFrameState> s_heldReplDrawFrameByPedRef;
+/// PRO twin: один вызов orig RWCB за кадр (обновляет LTM левого), затем оба клона.
+static std::unordered_map<int, unsigned> s_heldDualRwcbOrigDoneFrameMsByPedRef;
+/// Клон левой руки рисуем один раз за батч `RenderWeaponPedsForPC`, не по frameMs (иначе ложный dedup).
+static std::unordered_map<int, uint64_t> s_heldSecCloneDrawnBatchByPedRef;
+/// Twin pistols: счётчик `RpClumpRender` stock-clump за кадр (1-й проход — правый RWCB, 2-й — левый LTM).
+static std::unordered_map<int, uint8_t> s_heldDualStockClumpPassByPedRef;
+/// Dedup левого клона, когда `RenderWeaponPedsForPC` не в цепочке (`s_heldRwpfcBatchCounter==0`).
+static std::unordered_map<int, unsigned> s_heldDualSecDrawnFrameMsByPedRef;
+
+static void OrcHeldDestroySecondaryClone(HeldWeaponReplacementState& state);
+static void OrcHeldEnsureSecondaryClone(CPed* ped, HeldWeaponReplacementState& state, WeaponReplacementAsset& asset);
+static void OrcHeldRenderDualSecondaryClone(CPed* ped, HeldWeaponReplacementState& state, const char* phase);
+static RpAtomic* OrcHeldFindOtherWeaponAtomicOnStock(RwObject* stockWo, RpAtomic* exclude, CPed* ped, int wt);
+static void OrcHeldSyncStockWeaponClumpMatrices(CPed* ped, RwObject* stockWo);
+static void OrcHeldLockDualStockAtomicsByHands(CPed* ped, HeldWeaponReplacementState& st, RwObject* stockWo);
+static void OrcHeldSanitizeDualStockRoles(HeldWeaponReplacementState& st, RwObject* stockWo, CPed* ped);
+static void OrcHeldTryDrawPendingDualSecondaryClonesAfterWeaponBatch();
+static bool OrcHeldTryDrawLockedSecondaryClone(CPed* ped, HeldWeaponReplacementState& st, const char* phase);
+static RwObject* OrcHeldResolveDualStockClumpForPed(CPed* ped, HeldWeaponReplacementState& st);
+static bool OrcHeldIsDualWieldStockClumpForPed(CPed* ped, HeldWeaponReplacementState& st, RpClump* clump);
+static void OrcHeldResetDualStockClumpPassForPed(int pedRef);
+static uint8_t OrcHeldBumpDualStockClumpPass(CPed* ped, HeldWeaponReplacementState& st, RpClump* clump);
+static void OrcHeldTryDrawDualSecondaryAfterStockClumpPass(CPed* ped, HeldWeaponReplacementState& st, uint8_t passNum);
+static bool OrcHeldSecondaryAlreadyDrawnThisPass(int pedRef);
+static void OrcHeldMarkSecondaryDrawnThisPass(int pedRef);
+static bool OrcHeldDualSecondaryDrawSucceededForPed(int pedRef);
+static bool OrcHeldClassifyDualStockAtomicDraw(CPed* ped,
+    int wt,
+    HeldWeaponReplacementState& st,
+    RpAtomic* stockAtomic,
+    RwObject* stock,
+    bool matchesSlotStock,
+    bool* outSecondaryHand);
+
+static void OrcHeldReplacementInvalidateDrawStateForPed(int pedRef) {
+    if (pedRef <= 0)
+        return;
+    s_heldReplDrawFrameByPedRef.erase(pedRef);
+    s_heldSecCloneDrawnBatchByPedRef.erase(pedRef);
+    s_heldDualSecDrawnFrameMsByPedRef.erase(pedRef);
+    OrcHeldResetDualStockClumpPassForPed(pedRef);
+}
+
+static void OrcHeldReplacementInvalidateAllDrawState() {
+    s_heldReplDrawFrameByPedRef.clear();
+}
+
+static bool OrcAtomicUsesRenderWeaponCb(RpAtomic* atomic) {
+    if (!atomic || !atomic->renderCallBack)
+        return false;
+    const void* cb = reinterpret_cast<const void*>(atomic->renderCallBack);
+    if (cb == reinterpret_cast<const void*>(kAddr_RenderWeaponCB))
+        return true;
+    if (g_RenderWeaponCB_Orig && cb == reinterpret_cast<const void*>(g_RenderWeaponCB_Orig))
+        return true;
+    if (cb == reinterpret_cast<const void*>(&RenderWeaponCB_Detour))
+        return true;
+    return false;
+}
 
 static bool OrcCallRenderWeaponCbOrigSafe(RpAtomic* atomic, const char* phaseTag) {
     if (!g_RenderWeaponCB_Orig || !atomic) {
@@ -1289,6 +1421,10 @@ static void OrcClearHeldWeaponReplacementStateForPed(int pedRef, int wt, const c
     }
     g_deferredHeldWeaponStockRestore.erase(pedRef);
     OrcDestroyRwObjectInstance(st.rwObject);
+    OrcHeldDestroySecondaryClone(st);
+    st.lastPrimaryStockAtomic = nullptr;
+    st.lastSecondaryStockAtomic = nullptr;
+    OrcHeldReplacementInvalidateDrawStateForPed(pedRef);
     g_heldWeaponReplacements.erase(it);
 }
 
@@ -1311,6 +1447,207 @@ static bool OrcHeldAtomicMatchesWeaponModelTemplate(RpAtomic* atomic, int wt) {
         }
     }
     return false;
+}
+
+static bool OrcHeldAtomicMatchesWeaponModelIdTemplate(RpAtomic* atomic, int modelId) {
+    if (!atomic || modelId <= 0 || !atomic->geometry)
+        return false;
+    CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
+    if (!mi || !mi->m_pRwObject)
+        return false;
+    return OrcAtomicSharesGeometryWithWeaponObject(atomic, mi->m_pRwObject);
+}
+
+static bool OrcTryGetAtomicWorldPos(RpAtomic* atomic, CVector& out) {
+    if (!atomic)
+        return false;
+    RwFrame* f = RpAtomicGetFrame(atomic);
+    if (!f)
+        return false;
+    const RwMatrix* m = RwFrameGetLTM(f);
+    if (!m)
+        m = RwFrameGetMatrix(f);
+    if (!m)
+        return false;
+    out.x = m->pos.x;
+    out.y = m->pos.y;
+    out.z = m->pos.z;
+    return true;
+}
+
+static bool OrcAtomicWorldPosUsable(const CVector& p) {
+    return (std::fabs(p.x) + std::fabs(p.y) + std::fabs(p.z)) > 0.05f;
+}
+
+static void OrcCopyPedHandLtmToCloneRoot(CPed* ped, bool leftHand, RwObject* clone) {
+    if (!ped || !clone)
+        return;
+    RwMatrix* hand = OrcGetBoneMatrix(ped, leftHand ? BONE_L_HAND : BONE_R_HAND);
+    RwFrame* df = GetRwObjectRootFrame(clone);
+    if (!hand || !df)
+        return;
+    __try {
+        std::memcpy(RwFrameGetMatrix(df), hand, sizeof(RwMatrix));
+        RwMatrixUpdate(RwFrameGetMatrix(df));
+        RwFrameUpdateObjects(df);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OrcCopyPedHandLtmToCloneRoot: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+static float OrcHeldDistSqToBonePos(const CVector& p, const RwMatrix& bone) {
+    const float dx = p.x - bone.pos.x;
+    const float dy = p.y - bone.pos.y;
+    const float dz = p.z - bone.pos.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+static void OrcHeldRotateCloneRoot(RwObject* clone, const RwV3d& axis, float radians) {
+    if (!clone)
+        return;
+    RwFrame* df = GetRwObjectRootFrame(clone);
+    RwMatrix* dm = df ? RwFrameGetMatrix(df) : nullptr;
+    if (!dm)
+        return;
+    RwV3d ax = axis;
+    const float len2 = ax.x * ax.x + ax.y * ax.y + ax.z * ax.z;
+    if (len2 < 1e-8f)
+        return;
+    const float invLen = 1.0f / std::sqrt(len2);
+    ax.x *= invLen;
+    ax.y *= invLen;
+    ax.z *= invLen;
+    __try {
+        RwMatrixRotate(dm, &ax, radians, rwCOMBINEPRECONCAT);
+        RwMatrixUpdate(dm);
+        RwFrameUpdateObjects(df);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OrcHeldRotateCloneRoot: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+/// PRO twin: кастом-clone2 = тот же DFF, что справа → rot с pri + зеркало в ладони; ваниль — LTM sec stock.
+static void OrcHeldCopyDualSecondaryLtmToCloneRoot(CPed* ped,
+    RpAtomic* priStock,
+    RpAtomic* secStock,
+    RwObject* clone) {
+    if (!ped || !secStock || !clone)
+        return;
+
+    const char* mode = "?";
+    CVector secAp{};
+    const bool hasSecAp = OrcTryGetAtomicWorldPos(secStock, secAp);
+    RwMatrix* lHand = OrcGetBoneMatrix(ped, BONE_L_HAND);
+    RwMatrix* rHand = OrcGetBoneMatrix(ped, BONE_R_HAND);
+
+    if (priStock && HeldWeaponRwObjectIsReplacementClone(ped, clone)) {
+        CopyStockAtomicLtmToCloneRoot(priStock, clone);
+        mode = "priStock";
+        if (lHand) {
+            OrcHeldRotateCloneRoot(clone, RwV3d{ lHand->up.x, lHand->up.y, lHand->up.z }, kOrcPi);
+            RwFrame* df = GetRwObjectRootFrame(clone);
+            RwMatrix* dm = df ? RwFrameGetMatrix(df) : nullptr;
+            if (dm) {
+                dm->pos.x = lHand->pos.x;
+                dm->pos.y = lHand->pos.y;
+                dm->pos.z = lHand->pos.z;
+                RwMatrixUpdate(dm);
+                RwFrameUpdateObjects(df);
+                mode = "priLHandYawMirror";
+            }
+        }
+    } else {
+        CopyStockAtomicLtmToCloneRoot(secStock, clone);
+        mode = "stock";
+        if (hasSecAp && lHand && rHand) {
+            const float dl = OrcHeldDistSqToBonePos(secAp, *lHand);
+            const float dr = OrcHeldDistSqToBonePos(secAp, *rHand);
+            if (dr <= dl + 0.04f) {
+                RwFrame* df = GetRwObjectRootFrame(clone);
+                RwMatrix* dm = df ? RwFrameGetMatrix(df) : nullptr;
+                if (dm) {
+                    dm->pos.x = lHand->pos.x;
+                    dm->pos.y = lHand->pos.y;
+                    dm->pos.z = lHand->pos.z;
+                    RwMatrixUpdate(dm);
+                    RwFrameUpdateObjects(df);
+                    mode = "stockPosLHand";
+                }
+            }
+        }
+    }
+
+    if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+        OrcLogInfoThrottled(54, 3000u,
+            "held wr: dual sec LTM mode=%s pedRef=%d secStock=%p priStock=%p clone2=%p ap=(%.2f,%.2f,%.2f)",
+            mode,
+            CPools::GetPedRef(ped),
+            secStock,
+            priStock,
+            clone,
+            secAp.x,
+            secAp.y,
+            secAp.z);
+    }
+}
+
+static void OrcHeldCopyStockOrHandLtmToCloneRoot(CPed* ped,
+    int wt,
+    RpAtomic* priStock,
+    RpAtomic* stockAtomic,
+    RwObject* clone,
+    bool secondaryHand) {
+    if (!stockAtomic || !clone)
+        return;
+    if (secondaryHand && ped && wt > 0 && OrcPedWantsDualWieldHeld(ped, wt)) {
+        OrcHeldCopyDualSecondaryLtmToCloneRoot(ped, priStock, stockAtomic, clone);
+        return;
+    }
+    CopyStockAtomicLtmToCloneRoot(stockAtomic, clone);
+}
+
+static void OrcHeldPumpSecondaryStockAtomicMatrix(RpAtomic* secStock) {
+    if (!secStock)
+        return;
+    __try {
+        RwFrame* sf = RpAtomicGetFrame(secStock);
+        if (sf)
+            RwFrameUpdateObjects(sf);
+        if (g_AtomicDefaultRender_Orig && !OrcAtomicUsesRenderWeaponCb(secStock))
+            g_AtomicDefaultRender_Orig(secStock);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OrcHeldPumpSecondaryStockAtomicMatrix: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+static bool OrcHeldInferSecondaryHandFromAtomic(CPed* ped, RpAtomic* atomic, int wt) {
+    if (!ped || !atomic || wt <= 0)
+        return false;
+    CWeaponInfo* wi1 = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+    CWeaponInfo* wi2 = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 2);
+    const int mid1 = wi1 ? wi1->m_nModelId : 0;
+    int mid2 = wi2 ? wi2->m_nModelId2 : 0;
+    if (mid2 <= 0 && wi1)
+        mid2 = wi1->m_nModelId2;
+    const bool match1 = mid1 > 0 && OrcHeldAtomicMatchesWeaponModelIdTemplate(atomic, mid1);
+    const bool match2 = mid2 > 0 && mid2 != mid1 && OrcHeldAtomicMatchesWeaponModelIdTemplate(atomic, mid2);
+    if (match2 && !match1)
+        return true;
+    if (match1 && !match2)
+        return false;
+
+    CVector apos{};
+    if (!OrcTryGetAtomicWorldPos(atomic, apos))
+        return false;
+    RwMatrix* lHand = OrcGetBoneMatrix(ped, BONE_L_HAND);
+    RwMatrix* rHand = OrcGetBoneMatrix(ped, BONE_R_HAND);
+    if (!lHand || !rHand)
+        return false;
+    const float dl = (apos.x - lHand->pos.x) * (apos.x - lHand->pos.x) + (apos.y - lHand->pos.y) * (apos.y - lHand->pos.y) +
+                     (apos.z - lHand->pos.z) * (apos.z - lHand->pos.z);
+    const float dr = (apos.x - rHand->pos.x) * (apos.x - rHand->pos.x) + (apos.y - rHand->pos.y) * (apos.y - rHand->pos.y) +
+                     (apos.z - rHand->pos.z) * (apos.z - rHand->pos.z);
+    return dl < dr;
 }
 
 /// RWCB рисует атомы **того инстанса**, что сейчас в visibility-пайплайне.
@@ -1340,6 +1677,8 @@ static bool OrcHeldRwcbShouldApplyAtomicImpl(CPed* ped, RpAtomic* atomic, int wt
 
     if (!OrcHeldAtomicMatchesWeaponModelTemplate(atomic, wtSel))
         return false;
+    if (OrcPedWantsDualWieldHeld(ped, wtSel) && OrcHeldInferSecondaryHandFromAtomic(ped, atomic, wtSel))
+        return true;
     return OrcAtomicAttachedUnderPedRwClump(atomic, ped);
 }
 
@@ -1350,12 +1689,15 @@ static bool OrcApplyHeldPoseToRwcbAtomic(CPed* ped, RpAtomic* atomic, int wtSel,
     if (!af)
         return false;
     const int pedRef = CPools::GetPedRef(ped);
-    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wtSel, false);
+    const bool secondaryHand =
+        OrcPedWantsDualWieldHeld(ped, wtSel) && OrcHeldInferSecondaryHandFromAtomic(ped, atomic, wtSel);
+    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wtSel, secondaryHand);
     if (g_heldPoseDebug || g_heldWeaponTrace >= 2) {
         OrcLogInfoThrottled(
             492 + wtSel % 5, 15000u,
-            "held chain: cfg phase=renderWeaponCbAtomic pedRef=%d wt=%d heldEn=%d atomic=%p frame=%p", pedRef, wtSel,
-            h.enabled ? 1 : 0, static_cast<void*>(atomic), static_cast<void*>(af));
+            "held chain: cfg phase=renderWeaponCbAtomic pedRef=%d wt=%d secondary=%d heldEn=%d atomic=%p frame=%p",
+            pedRef, wtSel, secondaryHand ? 1 : 0, h.enabled ? 1 : 0, static_cast<void*>(atomic),
+            static_cast<void*>(af));
     }
     if (!h.enabled) {
         OrcLogHeldPoseCfgDisabled(ped, wtSel);
@@ -1573,9 +1915,12 @@ static void OrcHeldTraceLogRenderWeaponCb(RpAtomic* atomic, bool appliedHeldPose
     if (slot < 13)
         slotWt = static_cast<int>(pl->m_aWeapons[slot].m_eWeaponType);
     bool heldCfgEn = false;
+    bool traceSecondary = false;
     float hx = 0.0f, hy = 0.0f, hz = 0.0f, hrx = 0.0f, hry = 0.0f, hrz = 0.0f, hsc = 1.0f;
     if (wt > 0) {
-        const HeldWeaponPoseCfg& h = GetHeldPoseForPed(pl, wt, false);
+        traceSecondary =
+            OrcPedWantsDualWieldHeld(pl, wt) && OrcHeldInferSecondaryHandFromAtomic(pl, atomic, wt);
+        const HeldWeaponPoseCfg& h = GetHeldPoseForPed(pl, wt, traceSecondary);
         heldCfgEn = h.enabled;
         hx = h.x;
         hy = h.y;
@@ -1590,12 +1935,12 @@ static void OrcHeldTraceLogRenderWeaponCb(RpAtomic* atomic, bool appliedHeldPose
     const float r2d = 180.0f / kOrcPi;
     OrcLogInfoThrottled(506, iv,
         "held hook RWCB(0x733670): atomic=%p frame=%p rdcb=%p pedRef=%d skinIni=\"%s\" skinRaw=\"%s\" matchWo=%d "
-        "wo=%p woT=%d repl=%d slot=%u slotWt=%d visWt=%d heldCfgEn=%d off=(%.3f,%.3f,%.3f) rotDeg=(%.1f,%.1f,%.1f) "
+        "wo=%p woT=%d repl=%d slot=%u slotWt=%d visWt=%d secondary=%d heldCfgEn=%d off=(%.3f,%.3f,%.3f) rotDeg=(%.1f,%.1f,%.1f) "
         "sc=%.3f appliedPose=%d",
         static_cast<void*>(atomic), static_cast<void*>(fr), rdcb, pr, skinIni.c_str(), skinRaw.c_str(),
         rwcbMatchLocalPl ? 1 : 0,
-        woP, woT, repl ? 1 : 0, slot, slotWt, wt, heldCfgEn ? 1 : 0, hx, hy, hz, hrx * r2d, hry * r2d, hrz * r2d, hsc,
-        appliedHeldPose ? 1 : 0);
+        woP, woT, repl ? 1 : 0, slot, slotWt, wt, traceSecondary ? 1 : 0, heldCfgEn ? 1 : 0, hx, hy, hz, hrx * r2d,
+        hry * r2d, hrz * r2d, hsc, appliedHeldPose ? 1 : 0);
 }
 
 static void OrcTryApplyHeldPoseBeforeRwDrawForPed(CPed* ped) {
@@ -1720,8 +2065,12 @@ struct HeldReplacementDrawContext {
     int pedRef = 0;
     HeldWeaponReplacementState* state = nullptr;
     RwObject* stock = nullptr;
+    RpAtomic* stockAtomic = nullptr;
     int weaponType = 0;
+    bool secondaryHand = false;
 };
+
+static bool OrcTryDrawDualHeldReplacementViaRwcb(RpAtomic* atomic, HeldReplacementDrawContext& ctx);
 
 static bool OrcTryGetHeldReplacementDrawContextForPed(CPed* ped, RpAtomic* stockAtomic, HeldReplacementDrawContext& out) {
     if (!ped || !stockAtomic || s_renderingHeldReplacementClone)
@@ -1748,18 +2097,40 @@ static bool OrcTryGetHeldReplacementDrawContextForPed(CPed* ped, RpAtomic* stock
         !OrcHeldIsAnyReplacementCloneObject(ped->m_pWeaponObject)) {
         stock = ped->m_pWeaponObject;
     }
-    if (!stock || stock == st.rwObject || OrcHeldIsAnyReplacementCloneObject(stock))
-        return false;
-    if (!OrcHeldAtomicMatchesPedWeaponObject(stockAtomic, stock) &&
-        !OrcAtomicSharesGeometryWithWeaponObject(stockAtomic, stock)) {
+
+    bool matchesSlotStock = false;
+    if (stock && stock != st.rwObject && !OrcHeldIsAnyReplacementCloneObject(stock)) {
+        matchesSlotStock = OrcHeldAtomicMatchesPedWeaponObject(stockAtomic, stock) ||
+                           OrcAtomicSharesGeometryWithWeaponObject(stockAtomic, stock);
+    }
+
+    if (!matchesSlotStock) {
+        if (OrcPedWantsDualWieldHeld(ped, wtCur) && g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(41, 5000u,
+                "held wr: dual ctx reject pedRef=%d wt=%d stockAtomic=%p slotStock=%d rwcb=%d",
+                pedRef,
+                wtCur,
+                stockAtomic,
+                matchesSlotStock ? 1 : 0,
+                OrcAtomicUsesRenderWeaponCb(stockAtomic) ? 1 : 0);
+        }
         return false;
     }
+
+    if (OrcPedWantsDualWieldHeld(ped, wtCur) && stock && stock->type == rpCLUMP)
+        OrcHeldLockDualStockAtomicsByHands(ped, st, stock);
+
+    bool secondaryHand = false;
+    if (!OrcHeldClassifyDualStockAtomicDraw(ped, wtCur, st, stockAtomic, stock, true, &secondaryHand))
+        secondaryHand = false;
 
     out.ped = ped;
     out.pedRef = pedRef;
     out.state = &st;
     out.stock = stock;
+    out.stockAtomic = stockAtomic;
     out.weaponType = wtCur;
+    out.secondaryHand = secondaryHand;
     return true;
 }
 
@@ -1789,33 +2160,75 @@ static bool OrcTryGetHeldReplacementDrawContext(RpAtomic* stockAtomic, HeldRepla
     return false;
 }
 
-static uint64_t OrcHeldReplacementDrawPassKey() {
-    const uint64_t batch = s_heldRwpfcBatchCounter;
-    const uint64_t t = static_cast<uint64_t>(static_cast<unsigned>(CTimer::m_snTimeInMilliseconds));
-    return (batch << 32) ^ t;
-}
-
-static uintptr_t OrcHeldReplacementDrawContextKey(int pedRef, RwObject* stock) {
-    return (reinterpret_cast<uintptr_t>(stock) >> 4) ^ (static_cast<uintptr_t>(pedRef) * 2654435761u);
-}
-
 static bool OrcRenderHeldReplacementCloneAtStockDraw(const HeldReplacementDrawContext& ctx, const char* phase) {
-    if (!ctx.ped || ctx.pedRef <= 0 || !ctx.state || !ctx.state->rwObject || !ctx.stock || ctx.weaponType <= 0)
+    if (!ctx.ped || ctx.pedRef <= 0 || !ctx.state || !ctx.state->rwObject || !ctx.stockAtomic || ctx.weaponType <= 0)
         return false;
 
-    const uintptr_t ctxKey = OrcHeldReplacementDrawContextKey(ctx.pedRef, ctx.stock);
-    const uint64_t passKey = OrcHeldReplacementDrawPassKey();
-    auto rendered = s_heldReplacementDrawPassByContext.find(ctxKey);
-    if (rendered != s_heldReplacementDrawPassByContext.end() && rendered->second == passKey)
-        return true;
+    if (ctx.secondaryHand) {
+        if (WeaponReplacementAsset* asset =
+                OrcResolveUsableWeaponReplacementAssetForPed(ctx.ped, ctx.weaponType, true))
+            OrcHeldEnsureSecondaryClone(ctx.ped, *ctx.state, *asset);
+    }
 
-    CopyStockHeldWeaponRwMatricesToClone(ctx.stock, ctx.state->rwObject, false);
-    OrcHeldPoseInvalidateBaselineForRwObject(ctx.state->rwObject);
-    OrcApplyHeldPoseToWeaponObject(ctx.ped, ctx.state->rwObject, phase ? phase : "repl:drawSwap");
-    ctx.state->poseSynced = true;
+    RwObject* drawClone = ctx.secondaryHand ? ctx.state->rwObjectSecondary : ctx.state->rwObject;
+    if (!drawClone)
+        return false;
+
+    const unsigned frameMs = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
+    HeldReplDrawFrameState& drawFrame = s_heldReplDrawFrameByPedRef[ctx.pedRef];
+    if (drawFrame.ms != frameMs) {
+        drawFrame.ms = frameMs;
+        drawFrame.drewPrimaryAtomic = nullptr;
+        drawFrame.drewSecondaryAtomic = nullptr;
+    }
+    if (!ctx.secondaryHand) {
+        if (drawFrame.drewPrimaryAtomic == ctx.stockAtomic) {
+            if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+                OrcLogInfoThrottled(39, 2500u,
+                    "held wr: draw-swap dedup suppress orig phase=%s pedRef=%d wt=%d stockAtomic=%p secondary=0 frameMs=%u",
+                    phase ? phase : "?",
+                    ctx.pedRef,
+                    ctx.weaponType,
+                    ctx.stockAtomic,
+                    frameMs);
+            }
+            return true;
+        }
+    } else if (drawFrame.drewSecondaryAtomic == ctx.stockAtomic) {
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(40, 2500u,
+                "held wr: draw-swap dedup suppress orig phase=%s pedRef=%d wt=%d stockAtomic=%p secondary=1 frameMs=%u",
+                phase ? phase : "?",
+                ctx.pedRef,
+                ctx.weaponType,
+                ctx.stockAtomic,
+                frameMs);
+        }
+        return true;
+    }
+
+    if (ctx.stock)
+        OrcHeldSyncStockWeaponClumpMatrices(ctx.ped, ctx.stock);
+    if (ctx.stockAtomic)
+        OrcHeldCopyStockOrHandLtmToCloneRoot(ctx.ped,
+            ctx.weaponType,
+            ctx.state ? ctx.state->lastPrimaryStockAtomic : nullptr,
+            ctx.stockAtomic,
+            drawClone,
+            ctx.secondaryHand);
+    else if (ctx.stock)
+        CopyStockHeldWeaponRwMatricesToClone(ctx.stock, drawClone, false);
+    OrcHeldPoseInvalidateBaselineForRwObject(drawClone);
+    OrcApplyHeldPoseToWeaponObject(ctx.ped,
+        drawClone,
+        phase ? phase : "repl:drawSwap",
+        ctx.weaponType,
+        ctx.secondaryHand);
+    if (!ctx.secondaryHand)
+        ctx.state->poseSynced = true;
 
     CVector lightPos{};
-    if (!OrcTryGetRwObjectRootWorldPos(ctx.state->rwObject, lightPos)) {
+    if (!OrcTryGetRwObjectRootWorldPos(drawClone, lightPos)) {
         CVector bc{};
         ctx.ped->GetBoundCentre(bc);
         lightPos = bc;
@@ -1826,20 +2239,20 @@ static bool OrcRenderHeldReplacementCloneAtStockDraw(const HeldReplacementDrawCo
             ctx.weaponType,
             true,
             ctx.state->replacementKey.empty() ? nullptr : &ctx.state->replacementKey);
-        OrcApplyWeaponTexturesCombined(ctx.ped, ctx.weaponType, ctx.state->rwObject, tex, true);
+        OrcApplyWeaponTexturesCombined(ctx.ped, ctx.weaponType, drawClone, tex, true);
     }
     OrcApplyAttachmentLightingForPed(ctx.ped, lightPos, 0.5f);
 
     bool drew = false;
     s_renderingHeldReplacementClone = true;
     __try {
-        if (ctx.state->rwObject->type == rpCLUMP) {
-            RpClump* clump = reinterpret_cast<RpClump*>(ctx.state->rwObject);
+        if (drawClone->type == rpCLUMP) {
+            RpClump* clump = reinterpret_cast<RpClump*>(drawClone);
             RpClumpForAllAtomics(clump, OrcPrepAtomicCB, nullptr);
             OrcTryRpClumpRender(clump);
             drew = true;
-        } else if (ctx.state->rwObject->type == rpATOMIC) {
-            RpAtomic* atomic = reinterpret_cast<RpAtomic*>(ctx.state->rwObject);
+        } else if (drawClone->type == rpATOMIC) {
+            RpAtomic* atomic = reinterpret_cast<RpAtomic*>(drawClone);
             OrcPrepAtomicCB(atomic, nullptr);
             if (atomic->renderCallBack) {
                 atomic->renderCallBack(atomic);
@@ -1856,19 +2269,39 @@ static bool OrcRenderHeldReplacementCloneAtStockDraw(const HeldReplacementDrawCo
     s_renderingHeldReplacementClone = false;
     OrcRestoreWeaponTextureOverrides();
 
-    if (!drew)
+    if (!drew) {
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(49, 3000u,
+                "held wr: draw-swap drew=0 phase=%s pedRef=%d wt=%d stockAtomic=%p secondary=%d clone=%p",
+                phase ? phase : "?",
+                ctx.pedRef,
+                ctx.weaponType,
+                ctx.stockAtomic,
+                ctx.secondaryHand ? 1 : 0,
+                drawClone);
+        }
         return false;
+    }
 
-    s_heldReplacementDrawPassByContext[ctxKey] = passKey;
+    if (ctx.secondaryHand) {
+        drawFrame.drewSecondaryAtomic = ctx.stockAtomic;
+        OrcHeldMarkSecondaryDrawnThisPass(ctx.pedRef);
+    } else {
+        drawFrame.drewPrimaryAtomic = ctx.stockAtomic;
+    }
+    drawFrame.ms = frameMs;
     if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
-        OrcLogInfoThrottled(37, 2500u,
-            "held wr: draw-swap phase=%s pedRef=%d wt=%d stock=%p clone=%p pass=%llu",
+        const unsigned logId = ctx.secondaryHand ? 538u : 37u;
+        OrcLogInfoThrottled(logId, 2500u,
+            "held wr: draw-swap phase=%s pedRef=%d wt=%d stock=%p stockAtomic=%p secondary=%d clone=%p drew=1 frameMs=%u",
             phase ? phase : "?",
             ctx.pedRef,
             ctx.weaponType,
             ctx.stock,
-            ctx.state->rwObject,
-            static_cast<unsigned long long>(passKey));
+            ctx.stockAtomic,
+            ctx.secondaryHand ? 1 : 0,
+            drawClone,
+            frameMs);
     }
     return true;
 }
@@ -1880,8 +2313,255 @@ static bool OrcTryDrawHeldReplacementInsteadOfStockAtomic(RpAtomic* atomic, cons
     return OrcRenderHeldReplacementCloneAtStockDraw(ctx, phase);
 }
 
+static bool OrcHeldDualRwcbOrigDoneThisFrame(int pedRef) {
+    if (pedRef <= 0)
+        return false;
+    const unsigned frameMs = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
+    const auto it = s_heldDualRwcbOrigDoneFrameMsByPedRef.find(pedRef);
+    return it != s_heldDualRwcbOrigDoneFrameMsByPedRef.end() && it->second == frameMs;
+}
+
+/// Twin PRO: первый RWCB за кадр (на pri или sec атоме) — orig на primary RWCB, затем clone1+clone2.
+static bool OrcTryDrawDualHeldReplacementViaRwcb(RpAtomic* atomic, HeldReplacementDrawContext& ctx) {
+    if (!atomic || !ctx.ped || !ctx.state || !ctx.stock || !ctx.state->rwObjectSecondary)
+        return false;
+    if (!OrcPedWantsDualWieldHeld(ctx.ped, ctx.weaponType))
+        return false;
+    if (!OrcAtomicUsesRenderWeaponCb(atomic))
+        return false;
+    if (OrcHeldDualRwcbOrigDoneThisFrame(ctx.pedRef))
+        return true;
+
+    RpAtomic* lockedPri = nullptr;
+    RpAtomic* lockedSec = nullptr;
+    if (ctx.stock->type == rpCLUMP) {
+        OrcHeldLockDualStockAtomicsByHands(ctx.ped, *ctx.state, ctx.stock);
+        lockedPri = ctx.state->lastPrimaryStockAtomic;
+        lockedSec = ctx.state->lastSecondaryStockAtomic;
+    }
+
+    RpAtomic* priAtomic = lockedPri;
+    if (!priAtomic || !OrcAtomicUsesRenderWeaponCb(priAtomic)) {
+        priAtomic = atomic;
+        ctx.state->lastPrimaryStockAtomic = atomic;
+    }
+    if (!lockedSec || lockedSec == priAtomic) {
+        lockedSec = OrcHeldFindOtherWeaponAtomicOnStock(ctx.stock, priAtomic, ctx.ped, ctx.weaponType);
+    }
+    if (lockedSec && lockedSec != priAtomic)
+        ctx.state->lastSecondaryStockAtomic = lockedSec;
+
+    ++s_heldRenderWeaponCbDepth;
+    RpAtomic* prevRwcbAtomic = s_heldRenderWeaponCbAtomic;
+    s_heldRenderWeaponCbAtomic = priAtomic;
+    OrcCallRenderWeaponCbOrigSafe(priAtomic, "rwcb:dualOrig");
+    s_heldRenderWeaponCbAtomic = prevRwcbAtomic;
+    --s_heldRenderWeaponCbDepth;
+
+    s_heldDualRwcbOrigDoneFrameMsByPedRef[ctx.pedRef] = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
+    OrcHeldSyncStockWeaponClumpMatrices(ctx.ped, ctx.stock);
+    ctx.state->lastPrimaryStockAtomic = priAtomic;
+    if (lockedSec && lockedSec != priAtomic)
+        ctx.state->lastSecondaryStockAtomic = lockedSec;
+    else if (!ctx.state->lastSecondaryStockAtomic || ctx.state->lastSecondaryStockAtomic == priAtomic) {
+        ctx.state->lastSecondaryStockAtomic =
+            OrcHeldFindOtherWeaponAtomicOnStock(ctx.stock, priAtomic, ctx.ped, ctx.weaponType);
+    }
+
+    HeldReplDrawFrameState& drawFrame = s_heldReplDrawFrameByPedRef[ctx.pedRef];
+    drawFrame.ms = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
+    drawFrame.drewPrimaryAtomic = nullptr;
+    drawFrame.drewSecondaryAtomic = nullptr;
+
+    HeldReplacementDrawContext priCtx = ctx;
+    priCtx.stockAtomic = ctx.state->lastPrimaryStockAtomic;
+    priCtx.secondaryHand = false;
+      OrcRenderHeldReplacementCloneAtStockDraw(priCtx, "repl:rwcbDualPri");
+
+    RpAtomic* secAtomic = lockedSec;
+    if (!secAtomic || secAtomic == priAtomic)
+        secAtomic = ctx.state->lastSecondaryStockAtomic;
+    if ((!secAtomic || secAtomic == priAtomic) && ctx.stock->type == rpCLUMP) {
+        secAtomic = OrcHeldFindOtherWeaponAtomicOnStock(ctx.stock, priAtomic, ctx.ped, ctx.weaponType);
+        if (secAtomic)
+            ctx.state->lastSecondaryStockAtomic = secAtomic;
+    }
+    if (secAtomic && secAtomic != priAtomic) {
+        OrcHeldPumpSecondaryStockAtomicMatrix(secAtomic);
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(53, 2000u,
+                "held wr: rwcbDualSec begin pedRef=%d wt=%d sec=%p pri=%p clone2=%p",
+                ctx.pedRef,
+                ctx.weaponType,
+                secAtomic,
+                priAtomic,
+                ctx.state->rwObjectSecondary);
+        }
+        HeldReplacementDrawContext secCtx = ctx;
+        secCtx.stockAtomic = secAtomic;
+        secCtx.secondaryHand = true;
+        if (!OrcRenderHeldReplacementCloneAtStockDraw(secCtx, "repl:rwcbDualSec") &&
+            g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(51, 2000u,
+                "held wr: rwcbDualSec draw failed pedRef=%d wt=%d sec=%p pri=%p clone2=%p",
+                ctx.pedRef,
+                ctx.weaponType,
+                secAtomic,
+                ctx.state->lastPrimaryStockAtomic,
+                ctx.state->rwObjectSecondary);
+        }
+    } else if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+        OrcLogInfoThrottled(52, 2000u,
+            "held wr: rwcbDualSec skip pedRef=%d wt=%d sec=%p pri=%p lockedSec=%p",
+            ctx.pedRef,
+            ctx.weaponType,
+            secAtomic,
+            priAtomic,
+            lockedSec);
+    }
+    return true;
+}
+
+static bool OrcHeldTryDrawLockedSecondaryClone(CPed* ped, HeldWeaponReplacementState& st, const char* phase) {
+    if (!ped || !st.rwObjectSecondary || st.weaponType <= 0)
+        return false;
+    RwObject* stockWo = OrcHeldResolveDualStockClumpForPed(ped, st);
+    if (stockWo) {
+        st.lastPrimaryStockAtomic = nullptr;
+        st.lastSecondaryStockAtomic = nullptr;
+        OrcHeldLockDualStockAtomicsByHands(ped, st, stockWo);
+    }
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return false;
+    OrcHeldRenderDualSecondaryClone(ped, st, phase);
+    return OrcHeldDualSecondaryDrawSucceededForPed(pedRef);
+}
+
+static bool OrcHeldDualAtomicIsLeftStockHand(CPed* ped,
+    HeldWeaponReplacementState& st,
+    RpAtomic* atomic,
+    RwObject* stockWo) {
+    if (!ped || !atomic || !stockWo || OrcAtomicUsesRenderWeaponCb(atomic))
+        return false;
+    if (!st.lastPrimaryStockAtomic || !st.lastSecondaryStockAtomic)
+        OrcHeldLockDualStockAtomicsByHands(ped, st, stockWo);
+    if (st.lastSecondaryStockAtomic && atomic == st.lastSecondaryStockAtomic)
+        return true;
+    if (atomic == st.lastPrimaryStockAtomic)
+        return false;
+    if (!OrcHeldAtomicMatchesPedWeaponObject(atomic, stockWo) &&
+        !OrcAtomicSharesGeometryWithWeaponObject(atomic, stockWo))
+        return false;
+    if (st.lastSecondaryStockAtomic && atomic != st.lastSecondaryStockAtomic) {
+        RpAtomic* other = OrcHeldFindOtherWeaponAtomicOnStock(stockWo, st.lastPrimaryStockAtomic, ped, st.weaponType);
+        if (other && other == st.lastSecondaryStockAtomic)
+            return false;
+    }
+    return true;
+}
+
+/// Левый twin-pistol в покое: AtomicDefault (без RWCB) — подавить ваниль и нарисовать clone2 в том же колбэке.
+static bool OrcHeldSuppressAndDrawDualSecondaryViaAtomicDefault(RpAtomic* atomic) {
+    if (!atomic || !g_enabled || !g_weaponReplacementEnabled)
+        return false;
+    for (auto& kv : g_heldWeaponReplacements) {
+        CPed* ped = CPools::GetPed(kv.first);
+        HeldWeaponReplacementState& st = kv.second;
+        if (!ped || !st.rwObjectSecondary || st.weaponType <= 0)
+            continue;
+        if (!OrcPedWantsDualWieldHeld(ped, st.weaponType))
+            continue;
+        RwObject* stockWo = OrcHeldResolveDualStockClumpForPed(ped, st);
+        if (!stockWo || OrcAtomicUsesRenderWeaponCb(atomic))
+            continue;
+        if (!OrcHeldDualAtomicIsLeftStockHand(ped, st, atomic, stockWo))
+            continue;
+        st.lastSecondaryStockAtomic = atomic;
+        OrcHeldRenderDualSecondaryClone(ped, st, "repl:atomicSec");
+        return true;
+    }
+    return false;
+}
+
+static bool OrcHeldIsDualWieldStockClumpForPed(CPed* ped, HeldWeaponReplacementState& st, RpClump* clump) {
+    if (!ped || !clump || st.weaponType <= 0 || !OrcPedWantsDualWieldHeld(ped, st.weaponType))
+        return false;
+    RwObject* stockWo = OrcHeldResolveDualStockClumpForPed(ped, st);
+    if (stockWo && stockWo->type == rpCLUMP && reinterpret_cast<RpClump*>(stockWo) == clump)
+        return true;
+    RwObject* slotWo = ped->m_pWeaponObject;
+    if (slotWo && slotWo->type == rpCLUMP && !OrcHeldIsAnyReplacementCloneObject(slotWo) &&
+        reinterpret_cast<RpClump*>(slotWo) == clump)
+        return true;
+    return false;
+}
+
+static bool OrcHeldSecondaryAlreadyDrawnThisPass(int pedRef) {
+    if (pedRef <= 0)
+        return false;
+    if (s_heldRwpfcBatchCounter != 0)
+        return s_heldSecCloneDrawnBatchByPedRef[pedRef] == s_heldRwpfcBatchCounter;
+    const unsigned frameMs = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
+    const auto it = s_heldDualSecDrawnFrameMsByPedRef.find(pedRef);
+    return it != s_heldDualSecDrawnFrameMsByPedRef.end() && it->second == frameMs;
+}
+
+static void OrcHeldMarkSecondaryDrawnThisPass(int pedRef) {
+    if (pedRef <= 0)
+        return;
+    if (s_heldRwpfcBatchCounter != 0)
+        s_heldSecCloneDrawnBatchByPedRef[pedRef] = s_heldRwpfcBatchCounter;
+    else
+        s_heldDualSecDrawnFrameMsByPedRef[pedRef] = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
+}
+
+static bool OrcHeldDualSecondaryDrawSucceededForPed(int pedRef) {
+    return OrcHeldSecondaryAlreadyDrawnThisPass(pedRef);
+}
+
+static void OrcHeldResetDualStockClumpPassForPed(int pedRef) {
+    if (pedRef > 0)
+        s_heldDualStockClumpPassByPedRef.erase(pedRef);
+}
+
+static uint8_t OrcHeldBumpDualStockClumpPass(CPed* ped, HeldWeaponReplacementState& st, RpClump* clump) {
+    if (!ped || !clump)
+        return 0;
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0 || !OrcHeldIsDualWieldStockClumpForPed(ped, st, clump))
+        return 0;
+    uint8_t& pass = s_heldDualStockClumpPassByPedRef[pedRef];
+    if (pass < 255)
+        ++pass;
+    if (pass >= 2) {
+        s_heldDualSecDrawnFrameMsByPedRef.erase(pedRef);
+        s_heldSecCloneDrawnBatchByPedRef.erase(pedRef);
+    }
+    return pass;
+}
+
+static void OrcHeldTryDrawDualSecondaryAfterStockClumpPass(CPed* ped, HeldWeaponReplacementState& st, uint8_t passNum) {
+    if (!ped || passNum < 2 || !st.rwObjectSecondary)
+        return;
+    RwObject* stockWo = OrcHeldResolveDualStockClumpForPed(ped, st);
+    if (stockWo) {
+        if (!st.lastPrimaryStockAtomic || !st.lastSecondaryStockAtomic)
+            OrcHeldLockDualStockAtomicsByHands(ped, st, stockWo);
+        OrcHeldSanitizeDualStockRoles(st, stockWo, ped);
+        OrcHeldSyncStockWeaponClumpMatrices(ped, stockWo);
+    }
+    OrcHeldRenderDualSecondaryClone(ped, st, "repl:dualSecClumpPass2");
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef > 0)
+        s_heldDualStockClumpPassByPedRef[pedRef] = 0;
+}
+
 static RpClump* __cdecl RpClumpRender_Detour(RpClump* clump) {
-    if (g_enabled && !s_renderingHeldReplacementClone) {
+    CPed* dualPassPed = nullptr;
+    HeldWeaponReplacementState* dualPassState = nullptr;
+    uint8_t dualPassNum = 0;
+    if (g_enabled && !s_renderingHeldReplacementClone && clump) {
         const bool allPeds = g_renderAllPedsWeapons;
         CPlayerPed* pl = FindPlayerPed(0);
         if (allPeds || (pl && pl->m_pWeaponObject)) {
@@ -1891,8 +2571,34 @@ static RpClump* __cdecl RpClumpRender_Detour(RpClump* clump) {
                 OrcLogError("RpClumpRender_Detour: SEH ex=0x%08X", GetExceptionCode());
             }
         }
+        if (g_enabled && g_weaponReplacementEnabled) {
+            for (auto& kv : g_heldWeaponReplacements) {
+                HeldWeaponReplacementState& st = kv.second;
+                if (!st.rwObjectSecondary)
+                    continue;
+                CPed* p = CPools::GetPed(kv.first);
+                if (!p)
+                    continue;
+                dualPassNum = OrcHeldBumpDualStockClumpPass(p, st, clump);
+                if (dualPassNum > 0) {
+                    dualPassPed = p;
+                    dualPassState = &st;
+                    break;
+                }
+            }
+        }
     }
-    return g_RpClumpRender_Orig ? g_RpClumpRender_Orig(clump) : nullptr;
+    RpClump* result = g_RpClumpRender_Orig ? g_RpClumpRender_Orig(clump) : nullptr;
+    if (dualPassPed && dualPassState) {
+        if (dualPassNum >= 2)
+            OrcHeldTryDrawDualSecondaryAfterStockClumpPass(dualPassPed, *dualPassState, dualPassNum);
+        else if (dualPassNum == 1) {
+            const int pr = CPools::GetPedRef(dualPassPed);
+            if (pr > 0 && !OrcHeldSecondaryAlreadyDrawnThisPass(pr))
+                OrcHeldTryDrawLockedSecondaryClone(dualPassPed, *dualPassState, "repl:dualSecClumpPass1");
+        }
+    }
+    return result;
 }
 
 static RpAtomic* __cdecl AtomicDefaultRenderCallBack_Detour(RpAtomic* atomic) {
@@ -1905,8 +2611,11 @@ static RpAtomic* __cdecl AtomicDefaultRenderCallBack_Detour(RpAtomic* atomic) {
         const bool insideRenderWeaponCb = s_heldRenderWeaponCbDepth > 0 && s_heldRenderWeaponCbAtomic == atomic;
         if (!insideRenderWeaponCb && (allPeds || (pl && pl->m_pWeaponObject))) {
             __try {
-                if (OrcTryDrawHeldReplacementInsteadOfStockAtomic(atomic, "repl:atomicSwap"))
+                // Twin pistol: левый атом без RWCB — suppress + clone2 здесь (SA:MP часто без 2-го RpClumpRender).
+                if (OrcHeldSuppressAndDrawDualSecondaryViaAtomicDefault(atomic)) {
+                    OrcHeldRestoreRwcbFrame(restore);
                     return atomic;
+                }
                 OrcTryApplyHeldPoseIfAtomicMatches(atomic, &restore);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 OrcLogError("AtomicDefaultRenderCallBack_Detour: SEH ex=0x%08X", GetExceptionCode());
@@ -1934,6 +2643,13 @@ static void __cdecl RenderWeaponCB_Detour(RpAtomic* atomic) {
             plrw && GetPedSelectedWeaponTypeForReplace(plrw) > 0 && OrcHeldPosePedEligibleForPreRwDraw(plrw);
         if (localHeldGate || needRemote) {
             __try {
+                HeldReplacementDrawContext drawCtx{};
+                const bool hasDrawCtx = OrcTryGetHeldReplacementDrawContext(atomic, drawCtx);
+                if (hasDrawCtx && drawCtx.state && drawCtx.state->rwObjectSecondary &&
+                    OrcPedWantsDualWieldHeld(drawCtx.ped, drawCtx.weaponType)) {
+                    if (OrcTryDrawDualHeldReplacementViaRwcb(atomic, drawCtx))
+                        return;
+                }
                 if (OrcTryDrawHeldReplacementInsteadOfStockAtomic(atomic, "repl:rwcbSwap"))
                     return;
                 const bool needMatchForTrace = g_heldWeaponTrace >= 1 && g_orcLogLevel >= OrcLogLevel::Info;
@@ -2027,7 +2743,9 @@ void OrcHeldPoseBeginSimFrame() {
     s_heldPreRwDrawAppliedPedRefs.clear();
     s_heldPoseEngineBaselineByFrame.clear();
     s_heldPreRwNearbyPeds.clear();
-    s_heldReplacementDrawPassByContext.clear();
+    s_heldDualStockClumpPassByPedRef.clear();
+    s_heldDualSecDrawnFrameMsByPedRef.clear();
+    s_heldDualRwcbOrigDoneFrameMsByPedRef.clear();
     s_heldReSyncDupPedRef = -1;
     s_heldReSyncDupSerial = 0;
 
@@ -2050,6 +2768,18 @@ static void __cdecl RenderWeaponPedsForPC_Detour() {
     // Каждый вызов — батч RenderWeaponCB; сбрасываем кеш базы Held, чтобы каждый колбэк брал свежий IK-снимок
     // (ваниль может пересчитать матрицу между вызовами на один клумп).
     ++s_heldRwpfcBatchCounter;
+    for (auto& kv : g_heldWeaponReplacements) {
+        CPed* p = CPools::GetPed(kv.first);
+        if (!p || kv.second.weaponType <= 0)
+            continue;
+        if (OrcPedWantsDualWieldHeld(p, kv.second.weaponType)) {
+            const int pr = CPools::GetPedRef(p);
+            if (pr > 0) {
+                s_heldSecCloneDrawnBatchByPedRef.erase(pr);
+                OrcHeldResetDualStockClumpPassForPed(pr);
+            }
+        }
+    }
     if (g_heldWeaponTrace >= 1 && g_orcLogLevel >= OrcLogLevel::Info) {
         const unsigned iv = (g_heldWeaponTrace >= 2) ? 5000u : 10000u;
         OrcLogInfoThrottled(502, iv,
@@ -2061,6 +2791,38 @@ static void __cdecl RenderWeaponPedsForPC_Detour() {
     s_gunflashMuzzleNudgeAppliedClumps.clear();
     if (g_RenderWeaponPedsForPC_Orig)
         g_RenderWeaponPedsForPC_Orig();
+    OrcHeldTryDrawPendingDualSecondaryClonesAfterWeaponBatch();
+}
+
+static RwObject* OrcHeldResolveDualStockClumpForPed(CPed* ped, HeldWeaponReplacementState& st) {
+    if (!ped)
+        return nullptr;
+    RwObject* stockWo = st.originalObject;
+    if (stockWo && OrcHeldIsAnyReplacementCloneObject(stockWo))
+        stockWo = nullptr;
+    if (!stockWo && ped->m_pWeaponObject && !OrcHeldIsAnyReplacementCloneObject(ped->m_pWeaponObject))
+        stockWo = ped->m_pWeaponObject;
+    if (stockWo && stockWo->type == rpCLUMP)
+        return stockWo;
+    return nullptr;
+}
+
+static void OrcHeldTryDrawPendingDualSecondaryClonesAfterWeaponBatch() {
+    for (auto& kv : g_heldWeaponReplacements) {
+        HeldWeaponReplacementState& st = kv.second;
+        if (!st.rwObjectSecondary || st.weaponType <= 0)
+            continue;
+        CPed* ped = CPools::GetPed(kv.first);
+        if (!ped || !OrcPedWantsDualWieldHeld(ped, st.weaponType))
+            continue;
+        RwObject* stockWo = OrcHeldResolveDualStockClumpForPed(ped, st);
+        if (stockWo) {
+            st.lastPrimaryStockAtomic = nullptr;
+            st.lastSecondaryStockAtomic = nullptr;
+            OrcHeldLockDualStockAtomicsByHands(ped, st, stockWo);
+        }
+        OrcHeldRenderDualSecondaryClone(ped, st, "repl:dualSecPostBatch");
+    }
 }
 
 bool OrcApplyHeldWeaponPoseAdjust(CPed* ped) {
@@ -2103,9 +2865,11 @@ void OrcDestroyAllHeldWeaponReplacementInstances() {
         st.poseSynced = false;
         st.originalObject = nullptr;
         OrcDestroyRwObjectInstance(st.rwObject);
+        OrcHeldDestroySecondaryClone(st);
     }
     g_heldWeaponReplacements.clear();
     g_deferredHeldWeaponStockRestore.clear();
+    OrcHeldReplacementInvalidateAllDrawState();
 }
 
 void OrcPruneHeldWeaponReplacementInstances() {
@@ -2123,6 +2887,7 @@ void OrcPruneHeldWeaponReplacementInstances() {
         if (alive.find(it->first) == alive.end()) {
             g_deferredHeldWeaponStockRestore.erase(it->first);
             OrcDestroyRwObjectInstance(it->second.rwObject);
+            OrcHeldDestroySecondaryClone(it->second);
             it->second.poseSynced = false;
             it = g_heldWeaponReplacements.erase(it);
         } else {
@@ -2169,6 +2934,523 @@ static bool PositionHeldReplacementLikeBodyWeapon(CPed* ped, int wt, RwObject* r
     }
     RwFrameUpdateObjects(frame);
     return true;
+}
+
+static bool OrcDualStockAtomicMatchesHeldWeapon(CPed* ped, int wt, RwObject* refWo, RpAtomic* atomic) {
+    if (!ped || !atomic || wt <= 0)
+        return false;
+    bool matchesWeapon = OrcHeldAtomicMatchesWeaponModelTemplate(atomic, wt);
+    if (!matchesWeapon) {
+        CWeaponInfo* wi2 = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 2);
+        int mid2 = wi2 ? wi2->m_nModelId2 : 0;
+        if (mid2 <= 0) {
+            CWeaponInfo* wi1 = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
+            if (wi1)
+                mid2 = wi1->m_nModelId2;
+        }
+        if (mid2 > 0)
+            matchesWeapon = OrcHeldAtomicMatchesWeaponModelIdTemplate(atomic, mid2);
+    }
+    if (!matchesWeapon && refWo)
+        matchesWeapon = OrcAtomicSharesGeometryWithWeaponObject(atomic, refWo);
+    return matchesWeapon;
+}
+
+struct OrcCollectDualStockCtx {
+    CPed* ped = nullptr;
+    int wt = 0;
+    RwObject* refWo = nullptr;
+    RpAtomic* atomics[4]{};
+    float handBias[4]{};
+    int n = 0;
+};
+
+static RpAtomic* OrcCollectDualStockAtomicCb(RpAtomic* atomic, void* data) {
+    auto* ctx = reinterpret_cast<OrcCollectDualStockCtx*>(data);
+    if (!ctx || !ctx->ped || !atomic || ctx->n >= 4)
+        return atomic;
+    if (!OrcDualStockAtomicMatchesHeldWeapon(ctx->ped, ctx->wt, ctx->refWo, atomic))
+        return atomic;
+    CVector apos{};
+    if (!OrcTryGetAtomicWorldPos(atomic, apos))
+        return atomic;
+    RwMatrix* lHand = OrcGetBoneMatrix(ctx->ped, BONE_L_HAND);
+    RwMatrix* rHand = OrcGetBoneMatrix(ctx->ped, BONE_R_HAND);
+    if (!lHand || !rHand)
+        return atomic;
+    const float dl = (apos.x - lHand->pos.x) * (apos.x - lHand->pos.x) + (apos.y - lHand->pos.y) * (apos.y - lHand->pos.y) +
+                     (apos.z - lHand->pos.z) * (apos.z - lHand->pos.z);
+    const float dr = (apos.x - rHand->pos.x) * (apos.x - rHand->pos.x) + (apos.y - rHand->pos.y) * (apos.y - rHand->pos.y) +
+                     (apos.z - rHand->pos.z) * (apos.z - rHand->pos.z);
+    ctx->atomics[ctx->n] = atomic;
+    ctx->handBias[ctx->n] = dr - dl;
+    ++ctx->n;
+    return atomic;
+}
+
+static RpAtomic* OrcHeldFindOtherWeaponAtomicOnStock(RwObject* stockWo, RpAtomic* exclude, CPed* ped, int wt) {
+    if (!stockWo || stockWo->type != rpCLUMP || !exclude || !ped || wt <= 0)
+        return nullptr;
+    struct PickCtx {
+        CPed* ped = nullptr;
+        int wt = 0;
+        RwObject* wo = nullptr;
+        RpAtomic* exclude = nullptr;
+        RpAtomic* other = nullptr;
+    } pick{};
+    pick.ped = ped;
+    pick.wt = wt;
+    pick.wo = stockWo;
+    pick.exclude = exclude;
+    auto cb = [](RpAtomic* atomic, void* data) -> RpAtomic* {
+        auto* ctx = reinterpret_cast<PickCtx*>(data);
+        if (!ctx || !atomic || atomic == ctx->exclude)
+            return atomic;
+        if (!OrcDualStockAtomicMatchesHeldWeapon(ctx->ped, ctx->wt, ctx->wo, atomic))
+            return atomic;
+        if (!ctx->other)
+            ctx->other = atomic;
+        return atomic;
+    };
+    RpClumpForAllAtomics(reinterpret_cast<RpClump*>(stockWo), cb, &pick);
+    return pick.other;
+}
+
+static void OrcHeldSyncStockWeaponClumpMatrices(CPed* ped, RwObject* stockWo) {
+    if (!ped || !stockWo || stockWo->type != rpCLUMP)
+        return;
+    __try {
+        if (ped->m_pRwClump) {
+            RwFrame* pf = RpClumpGetFrame(ped->m_pRwClump);
+            if (pf)
+                RwFrameUpdateObjects(pf);
+        }
+        RwFrame* wf = RpClumpGetFrame(reinterpret_cast<RpClump*>(stockWo));
+        if (wf)
+            RwFrameUpdateObjects(wf);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OrcHeldSyncStockWeaponClumpMatrices: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+/// Фиксируем, какой атом стока в какой руке (LTM), до первого draw-swap. У twin colt только один атом идёт в RenderWeaponCB;
+/// второй рисуется через AtomicDefaultRender на том же clump — post-pass сразу после RWCB брал ещё не обновлённую матрицу.
+static void OrcHeldLockDualStockAtomicsByHands(CPed* ped, HeldWeaponReplacementState& st, RwObject* stockWo) {
+    if (!ped || !stockWo || stockWo->type != rpCLUMP)
+        return;
+    OrcCollectDualStockCtx collect{};
+    collect.ped = ped;
+    collect.wt = st.weaponType;
+    collect.refWo = stockWo;
+    RpClumpForAllAtomics(reinterpret_cast<RpClump*>(stockWo), OrcCollectDualStockAtomicCb, &collect);
+    if (collect.n <= 0)
+        return;
+    if (collect.n == 1) {
+        st.lastPrimaryStockAtomic = collect.atomics[0];
+        st.lastSecondaryStockAtomic = nullptr;
+        return;
+    }
+    int iRight = 0;
+    int iLeft = 0;
+    for (int i = 1; i < collect.n; ++i) {
+        if (collect.handBias[i] < collect.handBias[iRight])
+            iRight = i;
+        if (collect.handBias[i] > collect.handBias[iLeft])
+            iLeft = i;
+    }
+    if (iLeft == iRight) {
+        iLeft = (collect.handBias[0] >= collect.handBias[1]) ? 0 : 1;
+        iRight = 1 - iLeft;
+    }
+    const float biasSep = std::fabs(collect.handBias[iLeft] - collect.handBias[iRight]);
+
+    int iRwcb = -1;
+    for (int i = 0; i < collect.n; ++i) {
+        if (OrcAtomicUsesRenderWeaponCb(collect.atomics[i])) {
+            iRwcb = i;
+            break;
+        }
+    }
+
+    if (biasSep > 0.02f) {
+        st.lastPrimaryStockAtomic = collect.atomics[iRight];
+        st.lastSecondaryStockAtomic = collect.atomics[iLeft];
+    } else if (iRwcb >= 0) {
+        st.lastPrimaryStockAtomic = collect.atomics[iRwcb];
+        st.lastSecondaryStockAtomic = nullptr;
+        for (int i = 0; i < collect.n; ++i) {
+            if (i == iRwcb)
+                continue;
+            if (!OrcAtomicUsesRenderWeaponCb(collect.atomics[i])) {
+                st.lastSecondaryStockAtomic = collect.atomics[i];
+                break;
+            }
+        }
+        if (!st.lastSecondaryStockAtomic && collect.n >= 2) {
+            for (int i = 0; i < collect.n; ++i) {
+                if (i != iRwcb) {
+                    st.lastSecondaryStockAtomic = collect.atomics[i];
+                    break;
+                }
+            }
+        }
+    } else {
+        st.lastPrimaryStockAtomic = collect.atomics[iRight];
+        st.lastSecondaryStockAtomic = collect.atomics[iLeft];
+    }
+    if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+        CVector apR{}, apL{};
+        OrcTryGetAtomicWorldPos(st.lastPrimaryStockAtomic, apR);
+        OrcTryGetAtomicWorldPos(st.lastSecondaryStockAtomic, apL);
+        OrcLogInfoThrottled(47, 3000u,
+            "held wr: dual lock by hands pedRef=%d wt=%d n=%d pri=%p sec=%p rwcbPri=%d biasSep=%.3f priW=(%.2f,%.2f,%.2f) secW=(%.2f,%.2f,%.2f)",
+            CPools::GetPedRef(ped),
+            st.weaponType,
+            collect.n,
+            st.lastPrimaryStockAtomic,
+            st.lastSecondaryStockAtomic,
+            iRwcb >= 0 ? 1 : 0,
+            biasSep,
+            apR.x, apR.y, apR.z,
+            apL.x, apL.y, apL.z);
+    }
+}
+
+static RpAtomic* OrcHeldFindNonRwcbWeaponAtomicOnStock(RwObject* stockWo, RpAtomic* exclude, CPed* ped, int wt) {
+    if (!stockWo || stockWo->type != rpCLUMP || !ped || wt <= 0)
+        return nullptr;
+    struct Ctx {
+        CPed* ped = nullptr;
+        int wt = 0;
+        RwObject* wo = nullptr;
+        RpAtomic* exclude = nullptr;
+        RpAtomic* found = nullptr;
+    } ctx{ped, wt, stockWo, exclude, nullptr};
+    auto cb = [](RpAtomic* atomic, void* data) -> RpAtomic* {
+        auto* c = reinterpret_cast<Ctx*>(data);
+        if (!c || !atomic || atomic == c->exclude || OrcAtomicUsesRenderWeaponCb(atomic))
+            return atomic;
+        if (OrcDualStockAtomicMatchesHeldWeapon(c->ped, c->wt, c->wo, atomic))
+            c->found = atomic;
+        return atomic;
+    };
+    RpClumpForAllAtomics(reinterpret_cast<RpClump*>(stockWo), cb, &ctx);
+    return ctx.found;
+}
+
+static void OrcHeldSanitizeDualStockRoles(HeldWeaponReplacementState& st, RwObject* stockWo, CPed* ped) {
+    if (!ped || !stockWo || stockWo->type != rpCLUMP || !st.lastPrimaryStockAtomic)
+        return;
+    if (st.lastSecondaryStockAtomic == st.lastPrimaryStockAtomic)
+        st.lastSecondaryStockAtomic = nullptr;
+
+    if (st.lastSecondaryStockAtomic && OrcAtomicUsesRenderWeaponCb(st.lastSecondaryStockAtomic)) {
+        RpAtomic* nonRwcb =
+            OrcHeldFindNonRwcbWeaponAtomicOnStock(stockWo, st.lastPrimaryStockAtomic, ped, st.weaponType);
+        if (nonRwcb && nonRwcb != st.lastPrimaryStockAtomic)
+            st.lastSecondaryStockAtomic = nonRwcb;
+    }
+    if (!OrcAtomicUsesRenderWeaponCb(st.lastPrimaryStockAtomic)) {
+        struct RwcbPickCtx {
+            RpAtomic* rwcb = nullptr;
+        } pick{};
+        auto cb = [](RpAtomic* atomic, void* data) -> RpAtomic* {
+            if (atomic && OrcAtomicUsesRenderWeaponCb(atomic))
+                reinterpret_cast<RwcbPickCtx*>(data)->rwcb = atomic;
+            return atomic;
+        };
+        RpClumpForAllAtomics(reinterpret_cast<RpClump*>(stockWo), cb, &pick);
+        if (pick.rwcb && pick.rwcb != st.lastPrimaryStockAtomic) {
+            if (!st.lastSecondaryStockAtomic || st.lastSecondaryStockAtomic == pick.rwcb) {
+                if (!OrcAtomicUsesRenderWeaponCb(st.lastPrimaryStockAtomic))
+                    st.lastSecondaryStockAtomic = st.lastPrimaryStockAtomic;
+            }
+            st.lastPrimaryStockAtomic = pick.rwcb;
+        }
+    }
+    if (st.lastSecondaryStockAtomic == st.lastPrimaryStockAtomic)
+        st.lastSecondaryStockAtomic = nullptr;
+}
+
+static bool OrcHeldClassifyDualStockAtomicDraw(CPed* ped,
+    int wt,
+    HeldWeaponReplacementState& st,
+    RpAtomic* stockAtomic,
+    RwObject* stock,
+    bool matchesSlotStock,
+    bool* outSecondaryHand) {
+    if (outSecondaryHand)
+        *outSecondaryHand = false;
+    if (!outSecondaryHand || !ped || !stockAtomic || wt <= 0 || !OrcPedWantsDualWieldHeld(ped, wt))
+        return false;
+
+    if (matchesSlotStock && stock && stock->type == rpCLUMP)
+        OrcHeldLockDualStockAtomicsByHands(ped, st, stock);
+
+    // Twin colt: первый RWCB за проход — primary; второй RWCB-атом — secondary (оба могут иметь callback).
+    if (OrcAtomicUsesRenderWeaponCb(stockAtomic)) {
+        if (!st.lastPrimaryStockAtomic) {
+            st.lastPrimaryStockAtomic = stockAtomic;
+            if (stock && stock->type == rpCLUMP) {
+                RpAtomic* other = OrcHeldFindOtherWeaponAtomicOnStock(stock, stockAtomic, ped, wt);
+                if (other)
+                    st.lastSecondaryStockAtomic = other;
+            }
+            *outSecondaryHand = false;
+            return true;
+        }
+        if (stockAtomic != st.lastPrimaryStockAtomic) {
+            st.lastSecondaryStockAtomic = stockAtomic;
+            *outSecondaryHand = true;
+            return true;
+        }
+        *outSecondaryHand = false;
+        return true;
+    }
+    if (st.lastSecondaryStockAtomic && stockAtomic == st.lastSecondaryStockAtomic) {
+        *outSecondaryHand = true;
+        return true;
+    }
+    *outSecondaryHand = false;
+    return true;
+}
+
+struct OrcFindDualSecStockCtx {
+    CPed* ped = nullptr;
+    int wt = 0;
+    RwObject* slotWo = nullptr;
+    RwObject* stockWo = nullptr;
+    RpAtomic* excludeAtomic = nullptr;
+    RpAtomic* best = nullptr;
+    float bestHandBias = -1e30f;
+};
+
+static RpAtomic* OrcFindDualSecStockAtomicCb(RpAtomic* atomic, void* data) {
+    auto* ctx = reinterpret_cast<OrcFindDualSecStockCtx*>(data);
+    if (!ctx || !ctx->ped || !atomic)
+        return atomic;
+    if (atomic == ctx->excludeAtomic)
+        return atomic;
+
+    RwObject* refWo = ctx->stockWo ? ctx->stockWo : ctx->slotWo;
+    bool matchesWeapon = OrcDualStockAtomicMatchesHeldWeapon(ctx->ped, ctx->wt, refWo, atomic);
+    if (!matchesWeapon)
+        return atomic;
+
+    CVector apos{};
+    if (!OrcTryGetAtomicWorldPos(atomic, apos))
+        return atomic;
+    RwMatrix* lHand = OrcGetBoneMatrix(ctx->ped, BONE_L_HAND);
+    RwMatrix* rHand = OrcGetBoneMatrix(ctx->ped, BONE_R_HAND);
+    if (!lHand || !rHand)
+        return atomic;
+
+    const float dl = (apos.x - lHand->pos.x) * (apos.x - lHand->pos.x) + (apos.y - lHand->pos.y) * (apos.y - lHand->pos.y) +
+                     (apos.z - lHand->pos.z) * (apos.z - lHand->pos.z);
+    const float dr = (apos.x - rHand->pos.x) * (apos.x - rHand->pos.x) + (apos.y - rHand->pos.y) * (apos.y - rHand->pos.y) +
+                     (apos.z - rHand->pos.z) * (apos.z - rHand->pos.z);
+    const float handBias = dr - dl;
+    if (handBias <= 0.0f)
+        return atomic;
+    if (handBias > ctx->bestHandBias) {
+        ctx->bestHandBias = handBias;
+        ctx->best = atomic;
+    }
+    return atomic;
+}
+
+static void OrcScanClumpForDualSecStock(RwObject* root, OrcFindDualSecStockCtx& ctx) {
+    if (!root || root->type != rpCLUMP)
+        return;
+    RpClumpForAllAtomics(reinterpret_cast<RpClump*>(root), OrcFindDualSecStockAtomicCb, &ctx);
+}
+
+static RpAtomic* OrcFindDualHeldSecondaryStockAtomic(CPed* ped,
+    int wt,
+    RwObject* slotWo,
+    RpAtomic* excludeAtomic,
+    RwObject* stockWo) {
+    if (!ped || wt <= 0 || !OrcPedWantsDualWieldHeld(ped, wt))
+        return nullptr;
+    OrcFindDualSecStockCtx ctx{};
+    ctx.ped = ped;
+    ctx.wt = wt;
+    ctx.slotWo = slotWo;
+    ctx.stockWo = stockWo;
+    ctx.excludeAtomic = excludeAtomic;
+    OrcScanClumpForDualSecStock(slotWo, ctx);
+    OrcScanClumpForDualSecStock(stockWo, ctx);
+    if (ped->m_pWeaponObject && ped->m_pWeaponObject != slotWo && ped->m_pWeaponObject != stockWo &&
+        !OrcHeldIsAnyReplacementCloneObject(ped->m_pWeaponObject))
+        OrcScanClumpForDualSecStock(ped->m_pWeaponObject, ctx);
+    if (ped->m_pRwClump)
+        RpClumpForAllAtomics(ped->m_pRwClump, OrcFindDualSecStockAtomicCb, &ctx);
+    if (!ctx.best && excludeAtomic) {
+        RwObject* scanWo = stockWo ? stockWo : slotWo;
+        if (scanWo && scanWo->type == rpCLUMP) {
+            OrcCollectDualStockCtx collect{};
+            collect.ped = ped;
+            collect.wt = wt;
+            collect.refWo = scanWo;
+            RpClumpForAllAtomics(reinterpret_cast<RpClump*>(scanWo), OrcCollectDualStockAtomicCb, &collect);
+            for (int i = 0; i < collect.n; ++i) {
+                if (collect.atomics[i] != excludeAtomic) {
+                    ctx.best = collect.atomics[i];
+                    break;
+                }
+            }
+        }
+    }
+    return ctx.best;
+}
+
+void OrcWeaponSuppressBodyForHeldVisualWeapon(CPed* ped, std::vector<char>* suppress) {
+    if (!ped || !suppress || !g_weaponReplacementEnabled || !g_weaponReplacementInHands)
+        return;
+    const int wt = OrcResolveWeaponHeldVisualWeaponType(ped);
+    if (wt > 0 && wt < static_cast<int>(suppress->size()))
+        (*suppress)[wt] = 1;
+}
+
+static void OrcHeldDestroySecondaryClone(HeldWeaponReplacementState& state) {
+    OrcDestroyRwObjectInstance(state.rwObjectSecondary);
+    state.rwObjectSecondary = nullptr;
+}
+
+static void OrcHeldEnsureSecondaryClone(CPed* ped, HeldWeaponReplacementState& state, WeaponReplacementAsset& asset) {
+    if (!ped || !state.rwObject || state.weaponType <= 0) {
+        OrcHeldDestroySecondaryClone(state);
+        return;
+    }
+    const int wt = state.weaponType;
+    if (!OrcPedWantsDualWieldHeld(ped, wt)) {
+        OrcHeldDestroySecondaryClone(state);
+        return;
+    }
+    if (!state.rwObjectSecondary) {
+        state.rwObjectSecondary = OrcCloneWeaponReplacementObject(asset);
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1 && state.rwObjectSecondary) {
+            OrcLogInfoThrottled(44, 2000u,
+                "held wr: dual secondary clone pedRef=%d wt=%d key=%s clone2=%p",
+                CPools::GetPedRef(ped),
+                wt,
+                state.replacementKey.c_str(),
+                state.rwObjectSecondary);
+        }
+    }
+}
+
+static bool OrcHeldDualSecPhaseForcesRedraw(const char* phase) {
+    if (!phase)
+        return false;
+    return std::strcmp(phase, "repl:atomicSec") == 0 || std::strcmp(phase, "repl:rwcbDualPri") == 0 ||
+           std::strcmp(phase, "repl:rwcbDualSec") == 0 || std::strcmp(phase, "repl:dualSecPostBatch") == 0 ||
+           std::strcmp(phase, "repl:dualSecClumpPass2") == 0 || std::strcmp(phase, "repl:dualSecClumpPass1") == 0;
+}
+
+static void OrcHeldRenderDualSecondaryClone(CPed* ped, HeldWeaponReplacementState& state, const char* phase) {
+    if (!ped || !state.rwObjectSecondary || state.weaponType <= 0)
+        return;
+    if (!OrcPedWantsDualWieldHeld(ped, state.weaponType))
+        return;
+
+    const int pedRef = CPools::GetPedRef(ped);
+    if (pedRef <= 0)
+        return;
+
+    const bool forceRedraw = OrcHeldDualSecPhaseForcesRedraw(phase);
+    if (!forceRedraw && OrcHeldSecondaryAlreadyDrawnThisPass(pedRef))
+        return;
+
+    RwObject* slotWo = ped->m_pWeaponObject;
+    if (slotWo == state.rwObject || slotWo == state.rwObjectSecondary)
+        slotWo = state.originalObject;
+    if (slotWo && OrcHeldIsAnyReplacementCloneObject(slotWo))
+        slotWo = nullptr;
+
+    RwObject* stockWo = state.originalObject;
+    if (stockWo && OrcHeldIsAnyReplacementCloneObject(stockWo))
+        stockWo = nullptr;
+    if (!stockWo)
+        stockWo = slotWo;
+
+    RpAtomic* secStock = state.lastSecondaryStockAtomic;
+    if (!secStock || secStock == state.lastPrimaryStockAtomic) {
+        RwObject* scanWo = stockWo ? stockWo : slotWo;
+        secStock = OrcHeldFindOtherWeaponAtomicOnStock(scanWo, state.lastPrimaryStockAtomic, ped, state.weaponType);
+        if (secStock)
+            state.lastSecondaryStockAtomic = secStock;
+    }
+    if (!secStock) {
+        secStock = OrcFindDualHeldSecondaryStockAtomic(
+            ped, state.weaponType, slotWo, state.lastPrimaryStockAtomic, stockWo);
+        if (secStock)
+            state.lastSecondaryStockAtomic = secStock;
+    }
+    if (state.lastSecondaryStockAtomic && !secStock)
+        secStock = state.lastSecondaryStockAtomic;
+    if (!secStock || secStock == state.lastPrimaryStockAtomic) {
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(45, 4000u,
+                "held wr: dual secondary no stock atomic pedRef=%d wt=%d slotWo=%p stockWo=%p pri=%p sec=%p",
+                pedRef,
+                state.weaponType,
+                slotWo,
+                stockWo,
+                state.lastPrimaryStockAtomic,
+                state.lastSecondaryStockAtomic);
+        }
+        return;
+    }
+
+    RwObject* drawStock = stockWo ? stockWo : slotWo;
+    if (!drawStock) {
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(46, 4000u,
+                "held wr: dual secondary no drawStock phase=%s pedRef=%d wt=%d slotWo=%p stockWo=%p pri=%p sec=%p",
+                phase ? phase : "?",
+                pedRef,
+                state.weaponType,
+                slotWo,
+                stockWo,
+                state.lastPrimaryStockAtomic,
+                state.lastSecondaryStockAtomic);
+        }
+        return;
+    }
+
+    HeldReplacementDrawContext ctx{};
+    ctx.ped = ped;
+    ctx.pedRef = pedRef;
+    ctx.state = &state;
+    ctx.stock = drawStock;
+    ctx.stockAtomic = secStock;
+    ctx.weaponType = state.weaponType;
+    ctx.secondaryHand = true;
+    if (secStock == state.lastPrimaryStockAtomic) {
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(50, 3000u,
+                "held wr: dual secondary sec equals pri phase=%s pedRef=%d sec=%p pri=%p",
+                phase ? phase : "?",
+                pedRef,
+                secStock,
+                state.lastPrimaryStockAtomic);
+        }
+        return;
+    }
+    if (!OrcRenderHeldReplacementCloneAtStockDraw(ctx, phase)) {
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            OrcLogInfoThrottled(48, 3000u,
+                "held wr: dual secondary draw failed phase=%s pedRef=%d wt=%d clone2=%p secStock=%p pri=%p batch=%llu",
+                phase ? phase : "?",
+                pedRef,
+                state.weaponType,
+                state.rwObjectSecondary,
+                secStock,
+                state.lastPrimaryStockAtomic,
+                static_cast<unsigned long long>(s_heldRwpfcBatchCounter));
+        }
+    }
 }
 
 static bool OrcTryGetRwObjectRootWorldPos(RwObject* rwObject, CVector& out) {
@@ -2256,6 +3538,8 @@ static void OrcCaptureHeldReplacementForDrawSwap(
     } else {
         state.poseSynced = false;
         state.originalObject = nullptr;
+        state.lastPrimaryStockAtomic = nullptr;
+        state.lastSecondaryStockAtomic = nullptr;
     }
     state.hideBaseMode = true;
     state.captureActive = true;
@@ -2325,7 +3609,19 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     }
     HeldWeaponReplacementState& state = g_heldWeaponReplacements[pedRef];
     if (!state.rwObject || state.weaponType != wt || state.replacementKey != asset->key) {
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1 && state.rwObject &&
+            state.replacementKey != asset->key) {
+            OrcLogInfoThrottled(43, 800u,
+                "held wr: reclone pedRef=%d wt=%d oldKey=%s newKey=%s clone=%p",
+                pedRef,
+                wt,
+                state.replacementKey.c_str(),
+                asset->key.c_str(),
+                state.rwObject);
+        }
         OrcDestroyRwObjectInstance(state.rwObject);
+        OrcHeldDestroySecondaryClone(state);
+        OrcHeldReplacementInvalidateDrawStateForPed(pedRef);
         state.poseSynced = false;
         const DWORD tClone0 = GetTickCount();
         state.rwObject = OrcCloneWeaponReplacementObject(*asset);
@@ -2346,6 +3642,7 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
     }
     if (!state.rwObject)
         return;
+    OrcHeldEnsureSecondaryClone(ped, state, *asset);
 
     // Replacement clone is never stored in `m_pWeaponObject`: SA:MP can query that slot outside our render window.
     // Keep the stock slot intact and swap the visual only at the vanilla stock weapon draw callback.
@@ -2446,6 +3743,10 @@ void OrcPrepareHeldWeaponReplacementBefore(CPed* ped) {
         return;
     }
     OrcCaptureHeldReplacementForDrawSwap(ped, pedRef, wt, asset->key, state, stockForCopy, "firstSwap");
+}
+
+void OrcHeldDrainDeferredDualSecondaryDraws(CPed* ped) {
+    (void)ped;
 }
 
 void OrcRestoreHeldWeaponReplacementAfter(CPed* ped) {
