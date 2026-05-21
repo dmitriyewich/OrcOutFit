@@ -1495,6 +1495,24 @@ static void OrcCopyPedHandLtmToCloneRoot(CPed* ped, bool leftHand, RwObject* clo
     }
 }
 
+/// Оставляет ориентацию clone root (из stock LTM), подменяет только world-pos кости руки.
+static void OrcHeldGraftBonePosOntoCloneRoot(CPed* ped, int boneId, RwObject* clone) {
+    if (!ped || !clone)
+        return;
+    RwMatrix* bone = OrcGetBoneMatrix(ped, boneId);
+    RwFrame* df = GetRwObjectRootFrame(clone);
+    if (!bone || !df)
+        return;
+    __try {
+        RwMatrix* m = RwFrameGetMatrix(df);
+        m->pos = bone->pos;
+        RwMatrixUpdate(m);
+        RwFrameUpdateObjects(df);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OrcHeldGraftBonePosOntoCloneRoot: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
 static float OrcHeldDistSqToBonePos(const CVector& p, const RwMatrix& bone) {
     const float dx = p.x - bone.pos.x;
     const float dy = p.y - bone.pos.y;
@@ -1526,68 +1544,141 @@ static void OrcHeldRotateCloneRoot(RwObject* clone, const RwV3d& axis, float rad
     }
 }
 
-/// PRO twin: кастом-clone2 = тот же DFF, что справа → rot с pri + зеркало в ладони; ваниль — LTM sec stock.
+/// Repl-clone: выравнивание grip к кости руки (явный flip осей; RwMatrixRotate PRECONCAT не менял dot в логе).
+static void OrcHeldAlignReplCloneGripToHand(CPed* ped, RwObject* clone, bool leftHand) {
+    if (!ped || !clone || !HeldWeaponRwObjectIsReplacementClone(ped, clone))
+        return;
+    RwMatrix* hand = OrcGetBoneMatrix(ped, leftHand ? BONE_L_HAND : BONE_R_HAND);
+    RwFrame* df = GetRwObjectRootFrame(clone);
+    RwMatrix* m = df ? RwFrameGetMatrix(df) : nullptr;
+    if (!hand || !m)
+        return;
+    __try {
+        float dotAt = m->at.x * hand->at.x + m->at.y * hand->at.y + m->at.z * hand->at.z;
+        if (dotAt < 0.0f) {
+            m->at.x = -m->at.x;
+            m->at.y = -m->at.y;
+            m->at.z = -m->at.z;
+            m->right.x = -m->right.x;
+            m->right.y = -m->right.y;
+            m->right.z = -m->right.z;
+            dotAt = -dotAt;
+        }
+        float dotUp = m->up.x * hand->up.x + m->up.y * hand->up.y + m->up.z * hand->up.z;
+        if (dotUp < 0.0f) {
+            m->up.x = -m->up.x;
+            m->up.y = -m->up.y;
+            m->up.z = -m->up.z;
+            m->right.x = -m->right.x;
+            m->right.y = -m->right.y;
+            m->right.z = -m->right.z;
+        }
+        RwMatrixUpdate(m);
+        RwFrameUpdateObjects(df);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("OrcHeldAlignReplCloneGripToHand: SEH ex=0x%08X", GetExceptionCode());
+    }
+}
+
+/// PRO twin: левый clone2 — строго LTM левого stock-атома (RenderWeaponPedsForPC / RWCB), без priClone/δ.
 static void OrcHeldCopyDualSecondaryLtmToCloneRoot(CPed* ped,
     RpAtomic* priStock,
     RpAtomic* secStock,
     RwObject* clone) {
-    if (!ped || !secStock || !clone)
+    if (!ped || !clone)
         return;
 
     const char* mode = "?";
-    CVector secAp{};
-    const bool hasSecAp = OrcTryGetAtomicWorldPos(secStock, secAp);
+    CVector refAp{};
     RwMatrix* lHand = OrcGetBoneMatrix(ped, BONE_L_HAND);
     RwMatrix* rHand = OrcGetBoneMatrix(ped, BONE_R_HAND);
 
-    if (priStock && HeldWeaponRwObjectIsReplacementClone(ped, clone)) {
-        CopyStockAtomicLtmToCloneRoot(priStock, clone);
-        mode = "priStock";
-        if (lHand) {
-            OrcHeldRotateCloneRoot(clone, RwV3d{ lHand->up.x, lHand->up.y, lHand->up.z }, kOrcPi);
+    const bool twinAtomics = secStock && priStock && secStock != priStock;
+
+    if (twinAtomics) {
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1 && priStock && secStock) {
+            RwFrame* sf = RpAtomicGetFrame(secStock);
+            RwFrame* pf = RpAtomicGetFrame(priStock);
+            const RwMatrix* sm = sf ? (RwFrameGetLTM(sf) ? RwFrameGetLTM(sf) : RwFrameGetMatrix(sf)) : nullptr;
+            const RwMatrix* pm = pf ? (RwFrameGetLTM(pf) ? RwFrameGetLTM(pf) : RwFrameGetMatrix(pf)) : nullptr;
+            float dotAtSP = 0.0f;
+            float dotRtSP = 0.0f;
+            if (sm && pm) {
+                dotAtSP = sm->at.x * pm->at.x + sm->at.y * pm->at.y + sm->at.z * pm->at.z;
+                dotRtSP = sm->right.x * pm->right.x + sm->right.y * pm->right.y + sm->right.z * pm->right.z;
+            }
+            OrcLogInfoThrottled(56, 3000u,
+                "held wr: dual sec vs pri stock LTM dotAtSP=%.3f dotRtSP=%.3f sec=%p pri=%p",
+                dotAtSP,
+                dotRtSP,
+                secStock,
+                priStock);
+        }
+
+        OrcTryGetAtomicWorldPos(secStock, refAp);
+        CopyStockAtomicLtmToCloneRoot(secStock, clone);
+        mode = "secStock";
+        if (lHand && OrcAtomicWorldPosUsable(refAp)) {
             RwFrame* df = GetRwObjectRootFrame(clone);
-            RwMatrix* dm = df ? RwFrameGetMatrix(df) : nullptr;
-            if (dm) {
-                dm->pos.x = lHand->pos.x;
-                dm->pos.y = lHand->pos.y;
-                dm->pos.z = lHand->pos.z;
-                RwMatrixUpdate(dm);
+            RwMatrix* m = df ? RwFrameGetMatrix(df) : nullptr;
+            if (m) {
+                m->pos.x += lHand->pos.x - refAp.x;
+                m->pos.y += lHand->pos.y - refAp.y;
+                m->pos.z += lHand->pos.z - refAp.z;
+                RwMatrixUpdate(m);
                 RwFrameUpdateObjects(df);
-                mode = "priLHandYawMirror";
+                mode = "secStockLPos";
             }
         }
     } else {
-        CopyStockAtomicLtmToCloneRoot(secStock, clone);
-        mode = "stock";
-        if (hasSecAp && lHand && rHand) {
-            const float dl = OrcHeldDistSqToBonePos(secAp, *lHand);
-            const float dr = OrcHeldDistSqToBonePos(secAp, *rHand);
-            if (dr <= dl + 0.04f) {
-                RwFrame* df = GetRwObjectRootFrame(clone);
-                RwMatrix* dm = df ? RwFrameGetMatrix(df) : nullptr;
-                if (dm) {
-                    dm->pos.x = lHand->pos.x;
-                    dm->pos.y = lHand->pos.y;
-                    dm->pos.z = lHand->pos.z;
-                    RwMatrixUpdate(dm);
-                    RwFrameUpdateObjects(df);
-                    mode = "stockPosLHand";
-                }
-            }
+        RpAtomic* const src = secStock ? secStock : priStock;
+        if (!src)
+            return;
+        CopyStockAtomicLtmToCloneRoot(src, clone);
+        mode = (secStock && priStock) ? "secEqPri" : (secStock ? "secOnly" : "priFallback");
+        OrcTryGetAtomicWorldPos(src, refAp);
+
+        if (lHand && (!rHand || !OrcAtomicWorldPosUsable(refAp) ||
+                OrcHeldDistSqToBonePos(refAp, *rHand) <= OrcHeldDistSqToBonePos(refAp, *lHand) + 0.04f)) {
+            OrcCopyPedHandLtmToCloneRoot(ped, true, clone);
+            mode = "handLtm";
         }
     }
 
     if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+        float dl = 0.0f;
+        float dr = 0.0f;
+        if (lHand && rHand && OrcAtomicWorldPosUsable(refAp)) {
+            dl = OrcHeldDistSqToBonePos(refAp, *lHand);
+            dr = OrcHeldDistSqToBonePos(refAp, *rHand);
+        }
+        float dotAtHand = 0.0f;
+        float dotUpHand = 0.0f;
+        float dotRtHand = 0.0f;
+        if (lHand) {
+            RwFrame* df = GetRwObjectRootFrame(clone);
+            const RwMatrix* m = df ? RwFrameGetMatrix(df) : nullptr;
+            if (m) {
+                dotAtHand = m->at.x * lHand->at.x + m->at.y * lHand->at.y + m->at.z * lHand->at.z;
+                dotUpHand = m->up.x * lHand->up.x + m->up.y * lHand->up.y + m->up.z * lHand->up.z;
+                dotRtHand = m->right.x * lHand->right.x + m->right.y * lHand->right.y + m->right.z * lHand->right.z;
+            }
+        }
         OrcLogInfoThrottled(54, 3000u,
-            "held wr: dual sec LTM mode=%s pedRef=%d secStock=%p priStock=%p clone2=%p ap=(%.2f,%.2f,%.2f)",
+            "held wr: dual sec LTM mode=%s pedRef=%d secStock=%p priStock=%p clone2=%p ap=(%.2f,%.2f,%.2f) dl=%.3f dr=%.3f dotAtL=%.3f dotUpL=%.3f dotRtL=%.3f",
             mode,
             CPools::GetPedRef(ped),
             secStock,
             priStock,
             clone,
-            secAp.x,
-            secAp.y,
-            secAp.z);
+            refAp.x,
+            refAp.y,
+            refAp.z,
+            dl,
+            dr,
+            dotAtHand,
+            dotUpHand,
+            dotRtHand);
     }
 }
 
@@ -1604,6 +1695,43 @@ static void OrcHeldCopyStockOrHandLtmToCloneRoot(CPed* ped,
         return;
     }
     CopyStockAtomicLtmToCloneRoot(stockAtomic, clone);
+    if (ped && HeldWeaponRwObjectIsReplacementClone(ped, clone)) {
+        OrcHeldAlignReplCloneGripToHand(ped, clone, false);
+        CVector priAp{};
+        float dlR = 0.0f;
+        if (OrcTryGetAtomicWorldPos(stockAtomic, priAp)) {
+            RwMatrix* rHand = OrcGetBoneMatrix(ped, BONE_R_HAND);
+            RwFrame* df = GetRwObjectRootFrame(clone);
+            RwMatrix* m = df ? RwFrameGetMatrix(df) : nullptr;
+            if (rHand && m && OrcAtomicWorldPosUsable(priAp)) {
+                m->pos.x += rHand->pos.x - priAp.x;
+                m->pos.y += rHand->pos.y - priAp.y;
+                m->pos.z += rHand->pos.z - priAp.z;
+                RwMatrixUpdate(m);
+                RwFrameUpdateObjects(df);
+                dlR = OrcHeldDistSqToBonePos(priAp, *rHand);
+            }
+        }
+        if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
+            RwMatrix* rHand = OrcGetBoneMatrix(ped, BONE_R_HAND);
+            RwFrame* df = GetRwObjectRootFrame(clone);
+            const RwMatrix* m = df ? RwFrameGetMatrix(df) : nullptr;
+            float dotAtR = 0.0f;
+            float dotUpR = 0.0f;
+            if (rHand && m) {
+                dotAtR = m->at.x * rHand->at.x + m->at.y * rHand->at.y + m->at.z * rHand->at.z;
+                dotUpR = m->up.x * rHand->up.x + m->up.y * rHand->up.y + m->up.z * rHand->up.z;
+            }
+            OrcLogInfoThrottled(55, 3000u,
+                "held wr: dual pri LTM priPosGrip pedRef=%d priStock=%p clone=%p dlR=%.3f dotAtR=%.3f dotUpR=%.3f",
+                CPools::GetPedRef(ped),
+                stockAtomic,
+                clone,
+                dlR,
+                dotAtR,
+                dotUpR);
+        }
+    }
 }
 
 static void OrcHeldPumpSecondaryStockAtomicMatrix(RpAtomic* secStock) {
@@ -2332,92 +2460,78 @@ static bool OrcTryDrawDualHeldReplacementViaRwcb(RpAtomic* atomic, HeldReplaceme
     if (OrcHeldDualRwcbOrigDoneThisFrame(ctx.pedRef))
         return true;
 
-    RpAtomic* lockedPri = nullptr;
-    RpAtomic* lockedSec = nullptr;
+    RpAtomic* handRight = nullptr;
+    RpAtomic* handLeft = nullptr;
     if (ctx.stock->type == rpCLUMP) {
         OrcHeldLockDualStockAtomicsByHands(ctx.ped, *ctx.state, ctx.stock);
-        lockedPri = ctx.state->lastPrimaryStockAtomic;
-        lockedSec = ctx.state->lastSecondaryStockAtomic;
+        handRight = ctx.state->lastPrimaryStockAtomic;
+        handLeft = ctx.state->lastSecondaryStockAtomic;
     }
 
-    RpAtomic* priAtomic = lockedPri;
-    if (!priAtomic || !OrcAtomicUsesRenderWeaponCb(priAtomic)) {
-        priAtomic = atomic;
-        ctx.state->lastPrimaryStockAtomic = atomic;
+    RpAtomic* rwcbForOrig = handRight;
+    if (!rwcbForOrig || !OrcAtomicUsesRenderWeaponCb(rwcbForOrig)) {
+        if (handLeft && OrcAtomicUsesRenderWeaponCb(handLeft))
+            rwcbForOrig = handLeft;
+        else if (OrcAtomicUsesRenderWeaponCb(atomic))
+            rwcbForOrig = atomic;
     }
-    if (!lockedSec || lockedSec == priAtomic) {
-        lockedSec = OrcHeldFindOtherWeaponAtomicOnStock(ctx.stock, priAtomic, ctx.ped, ctx.weaponType);
-    }
-    if (lockedSec && lockedSec != priAtomic)
-        ctx.state->lastSecondaryStockAtomic = lockedSec;
+    if (!rwcbForOrig)
+        return false;
 
     ++s_heldRenderWeaponCbDepth;
     RpAtomic* prevRwcbAtomic = s_heldRenderWeaponCbAtomic;
-    s_heldRenderWeaponCbAtomic = priAtomic;
-    OrcCallRenderWeaponCbOrigSafe(priAtomic, "rwcb:dualOrig");
+    s_heldRenderWeaponCbAtomic = rwcbForOrig;
+    OrcCallRenderWeaponCbOrigSafe(rwcbForOrig, "rwcb:dualOrig");
     s_heldRenderWeaponCbAtomic = prevRwcbAtomic;
     --s_heldRenderWeaponCbDepth;
 
     s_heldDualRwcbOrigDoneFrameMsByPedRef[ctx.pedRef] = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
     OrcHeldSyncStockWeaponClumpMatrices(ctx.ped, ctx.stock);
-    ctx.state->lastPrimaryStockAtomic = priAtomic;
-    if (lockedSec && lockedSec != priAtomic)
-        ctx.state->lastSecondaryStockAtomic = lockedSec;
-    else if (!ctx.state->lastSecondaryStockAtomic || ctx.state->lastSecondaryStockAtomic == priAtomic) {
-        ctx.state->lastSecondaryStockAtomic =
-            OrcHeldFindOtherWeaponAtomicOnStock(ctx.stock, priAtomic, ctx.ped, ctx.weaponType);
-    }
 
     HeldReplDrawFrameState& drawFrame = s_heldReplDrawFrameByPedRef[ctx.pedRef];
     drawFrame.ms = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
     drawFrame.drewPrimaryAtomic = nullptr;
     drawFrame.drewSecondaryAtomic = nullptr;
 
-    HeldReplacementDrawContext priCtx = ctx;
-    priCtx.stockAtomic = ctx.state->lastPrimaryStockAtomic;
-    priCtx.secondaryHand = false;
-      OrcRenderHeldReplacementCloneAtStockDraw(priCtx, "repl:rwcbDualPri");
-
-    RpAtomic* secAtomic = lockedSec;
-    if (!secAtomic || secAtomic == priAtomic)
-        secAtomic = ctx.state->lastSecondaryStockAtomic;
-    if ((!secAtomic || secAtomic == priAtomic) && ctx.stock->type == rpCLUMP) {
-        secAtomic = OrcHeldFindOtherWeaponAtomicOnStock(ctx.stock, priAtomic, ctx.ped, ctx.weaponType);
-        if (secAtomic)
-            ctx.state->lastSecondaryStockAtomic = secAtomic;
+    if (handRight) {
+        HeldReplacementDrawContext priCtx = ctx;
+        priCtx.stockAtomic = handRight;
+        priCtx.secondaryHand = false;
+        OrcRenderHeldReplacementCloneAtStockDraw(priCtx, "repl:rwcbDualPri");
     }
-    if (secAtomic && secAtomic != priAtomic) {
-        OrcHeldPumpSecondaryStockAtomicMatrix(secAtomic);
+
+    if (handLeft && handLeft != handRight) {
+        OrcHeldPumpSecondaryStockAtomicMatrix(handLeft);
         if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
             OrcLogInfoThrottled(53, 2000u,
-                "held wr: rwcbDualSec begin pedRef=%d wt=%d sec=%p pri=%p clone2=%p",
+                "held wr: rwcbDualSec begin pedRef=%d wt=%d handL=%p handR=%p rwcbOrig=%p clone2=%p",
                 ctx.pedRef,
                 ctx.weaponType,
-                secAtomic,
-                priAtomic,
+                handLeft,
+                handRight,
+                rwcbForOrig,
                 ctx.state->rwObjectSecondary);
         }
         HeldReplacementDrawContext secCtx = ctx;
-        secCtx.stockAtomic = secAtomic;
+        secCtx.stockAtomic = handLeft;
         secCtx.secondaryHand = true;
         if (!OrcRenderHeldReplacementCloneAtStockDraw(secCtx, "repl:rwcbDualSec") &&
             g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
             OrcLogInfoThrottled(51, 2000u,
-                "held wr: rwcbDualSec draw failed pedRef=%d wt=%d sec=%p pri=%p clone2=%p",
+                "held wr: rwcbDualSec draw failed pedRef=%d wt=%d handL=%p handR=%p clone2=%p",
                 ctx.pedRef,
                 ctx.weaponType,
-                secAtomic,
-                ctx.state->lastPrimaryStockAtomic,
+                handLeft,
+                handRight,
                 ctx.state->rwObjectSecondary);
         }
     } else if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 1) {
         OrcLogInfoThrottled(52, 2000u,
-            "held wr: rwcbDualSec skip pedRef=%d wt=%d sec=%p pri=%p lockedSec=%p",
+            "held wr: rwcbDualSec skip pedRef=%d wt=%d handL=%p handR=%p",
             ctx.pedRef,
             ctx.weaponType,
-            secAtomic,
-            priAtomic,
-            lockedSec);
+            handLeft,
+            handRight);
     }
     return true;
 }
@@ -3072,26 +3186,14 @@ static void OrcHeldLockDualStockAtomicsByHands(CPed* ped, HeldWeaponReplacementS
         }
     }
 
-    if (biasSep > 0.02f) {
-        st.lastPrimaryStockAtomic = collect.atomics[iRight];
-        st.lastSecondaryStockAtomic = collect.atomics[iLeft];
-    } else if (iRwcb >= 0) {
+    // Twin colt: правый проход — RenderWeaponCB; левый — второй атом. Не назначать pri по world-bias при biasSep≈0.
+    if (iRwcb >= 0 && collect.n >= 2) {
         st.lastPrimaryStockAtomic = collect.atomics[iRwcb];
         st.lastSecondaryStockAtomic = nullptr;
         for (int i = 0; i < collect.n; ++i) {
-            if (i == iRwcb)
-                continue;
-            if (!OrcAtomicUsesRenderWeaponCb(collect.atomics[i])) {
+            if (i != iRwcb) {
                 st.lastSecondaryStockAtomic = collect.atomics[i];
                 break;
-            }
-        }
-        if (!st.lastSecondaryStockAtomic && collect.n >= 2) {
-            for (int i = 0; i < collect.n; ++i) {
-                if (i != iRwcb) {
-                    st.lastSecondaryStockAtomic = collect.atomics[i];
-                    break;
-                }
             }
         }
     } else {
@@ -3187,21 +3289,13 @@ static bool OrcHeldClassifyDualStockAtomicDraw(CPed* ped,
     if (matchesSlotStock && stock && stock->type == rpCLUMP)
         OrcHeldLockDualStockAtomicsByHands(ped, st, stock);
 
-    // Twin colt: первый RWCB за проход — primary; второй RWCB-атом — secondary (оба могут иметь callback).
     if (OrcAtomicUsesRenderWeaponCb(stockAtomic)) {
-        if (!st.lastPrimaryStockAtomic) {
-            st.lastPrimaryStockAtomic = stockAtomic;
-            if (stock && stock->type == rpCLUMP) {
-                RpAtomic* other = OrcHeldFindOtherWeaponAtomicOnStock(stock, stockAtomic, ped, wt);
-                if (other)
-                    st.lastSecondaryStockAtomic = other;
-            }
-            *outSecondaryHand = false;
+        if (st.lastSecondaryStockAtomic && stockAtomic == st.lastSecondaryStockAtomic) {
+            *outSecondaryHand = true;
             return true;
         }
-        if (stockAtomic != st.lastPrimaryStockAtomic) {
-            st.lastSecondaryStockAtomic = stockAtomic;
-            *outSecondaryHand = true;
+        if (st.lastPrimaryStockAtomic && stockAtomic == st.lastPrimaryStockAtomic) {
+            *outSecondaryHand = false;
             return true;
         }
         *outSecondaryHand = false;
@@ -3531,10 +3625,18 @@ static void OrcCaptureHeldReplacementForDrawSwap(
     if (!ped || pedRef <= 0 || !state.rwObject)
         return;
     if (stockForCopy && stockForCopy != state.rwObject && !OrcHeldIsAnyReplacementCloneObject(stockForCopy)) {
-        CopyStockHeldWeaponRwMatricesToClone(stockForCopy, state.rwObject, false);
-        OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
-        state.poseSynced = true;
         state.originalObject = stockForCopy;
+        if (state.rwObjectSecondary) {
+            // PRO twin: root posecopy на clone1 ломает rwcbDualPri (clump root != stock-atomic LTM).
+            state.poseSynced = false;
+            OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
+            if (state.rwObjectSecondary)
+                OrcHeldPoseInvalidateBaselineForRwObject(state.rwObjectSecondary);
+        } else {
+            CopyStockHeldWeaponRwMatricesToClone(stockForCopy, state.rwObject, false);
+            OrcHeldPoseInvalidateBaselineForRwObject(state.rwObject);
+            state.poseSynced = true;
+        }
     } else {
         state.poseSynced = false;
         state.originalObject = nullptr;
