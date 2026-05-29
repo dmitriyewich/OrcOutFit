@@ -1,13 +1,16 @@
 name: Build OrcOutFit Win32
 # run-name (приоритет):
-# 1) release — сначала название релиза, иначе tag_name;
-# 2) workflow_dispatch — временно «manual · ветка (#run)», затем шаг Rename run
-#    обновляет имя на «manual · ветка · Commit <short_sha> <message> (#run)»;
-# 3) иначе — ветка (#run).
-# Автозапуск по push в main отключён — только workflow_dispatch и release.
-run-name: ${{ github.event_name == 'release' && (github.event.release.name || github.event.release.tag_name) || github.event_name == 'workflow_dispatch' && format('manual · {0} (#{1})', github.ref_name, github.run_number) || format('{0} (#{1})', github.ref_name, github.run_number) }}
+# 1) release — название релиза, иначе tag_name;
+# 2) push — заголовок коммита (head_commit.message);
+# 3) workflow_dispatch — «manual · ветка (#run)», затем шаг Rename run
+#    подставляет заголовок коммита: «manual · ветка · Commit <short_sha> <subject> (#run)»;
+# 4) иначе — ветка (#run).
+run-name: ${{ github.event_name == 'release' && (github.event.release.name || github.event.release.tag_name) || github.event_name == 'push' && github.event.head_commit.message || github.event_name == 'workflow_dispatch' && format('manual · {0} (#{1})', github.ref_name, github.run_number) || format('{0} (#{1})', github.ref_name, github.run_number) }}
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
   release:
     types:
