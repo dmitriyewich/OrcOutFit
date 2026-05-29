@@ -168,9 +168,11 @@ static bool OrcWeaponAudioConsumeMinigunShootOnlyThrottle(const OrcWeaponAudioSt
 }
 
 static bool OrcWeaponAudioTryCustomWeaponFire(CAEWeaponAudioEntity* self, eWeaponType weaponType) {
-    if (!self || !self->m_pPed)
+    if (!self)
         return false;
-    CPed* ped = self->m_pPed;
+    CPed* ped = OrcWeaponAudioPedFromWeaponAudio(self);
+    if (!ped)
+        return false;
     OrcWeaponAudioStemContext ctx;
     if (!OrcWeaponAudioTryBuildStemContext(ped, static_cast<int>(weaponType), ctx))
         return false;
@@ -307,7 +309,7 @@ static void __fastcall PlayGunSounds_Detour(CAEWeaponAudioEntity* self, void* /*
             if (OrcWeaponAudioLoopsTryPlayMinigunFireForPed(ped, self))
                 return;
             OrcLogInfoThrottled(408, 1200, "weapon audio: minigun PlayGunSounds OpenAL miss pedRef=%d — vanilla fallback",
-                CPools::GetPedRef(ped));
+                OrcSafeGetPedRef(ped));
         }
     }
     g_PlayGunSounds_Orig(self, entity, emptySfxId, farSfxId2, highPitchSfxId3, lowPitchSfxId4, echoSfxId5, nAudioEventId,

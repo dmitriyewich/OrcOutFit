@@ -2254,9 +2254,9 @@ static int PickStickyWeaponReplacementChoice(CPed* ped,
     const std::string& stickySuffix,
     const std::string& bagPoolKey,
     const std::vector<int>& sourcePool) {
-    if (sourcePool.empty())
+    if (!ped || sourcePool.empty())
         return -2;
-    const int pedRef = CPools::GetPedRef(ped);
+    const int pedRef = OrcSafeGetPedRef(ped);
     if (pedRef <= 0)
         return PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool);
     const std::string choiceKey = std::to_string(pedRef) + "|" + stickySuffix;

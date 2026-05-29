@@ -958,12 +958,12 @@ static bool ScanTextureRemapsForClump(
 }
 
 static int TextureRemapPedKey(CPed* ped) {
-    if (!ped) return 0;
-    __try {
-        return CPools::GetPedRef(ped);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return (int)(reinterpret_cast<uintptr_t>(ped) & 0x7fffffff);
-    }
+    const int ref = OrcSafeGetPedRef(ped);
+    if (ref > 0)
+        return ref;
+    if (!ped)
+        return 0;
+    return (int)(reinterpret_cast<uintptr_t>(ped) & 0x7fffffff);
 }
 
 static PedTextureRemapState* EnsurePedTextureRemapState(CPed* ped, bool forceRescan = false) {

@@ -13,6 +13,7 @@
 
 class CPed;
 class CPhysical;
+class CAEAudioEntity;
 class CAEWeaponAudioEntity;
 class CAESound;
 struct CVector;
@@ -62,6 +63,8 @@ bool OrcWeaponAudioPlayBuffer(ALuint buffer, const OrcWeaponAudioPlayParams& par
 
 CPed* OrcWeaponAudioPedFromPhysical(CPhysical* physical);
 CPed* OrcWeaponAudioPedFromWeaponAudio(CAEWeaponAudioEntity* self);
+/// Пед из `CAESound::m_pBaseAudio` (сначала `m_pEntity`, затем weapon `m_pPed`).
+CPed* OrcWeaponAudioResolvePedFromSoundBase(CAEAudioEntity* base);
 bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudioStemContext& out);
 bool OrcWeaponAudioPedHasReplacementAudio(CPed* ped, int weaponType);
 bool OrcWeaponAudioHandleVanillaSfx(CAESound* snd);

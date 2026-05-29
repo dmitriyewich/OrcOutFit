@@ -2240,6 +2240,16 @@ static void SyncAndRender() {
     RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(oldFog));
 }
 
+int OrcSafeGetPedRef(CPed* ped) {
+    if (!ped)
+        return 0;
+    __try {
+        return CPools::GetPedRef(ped);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
 static void OnInitRw() {}
 static void OnDrawingEvent();
 static void OnPedRenderBefore(CPed* ped);

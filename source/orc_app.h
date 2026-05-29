@@ -13,6 +13,9 @@
 class CPed;
 class CPlayerPed;
 
+/// `CPools::GetPedRef` с проверкой null и SEH на освобождённый ped (SA:MP / audio).
+int OrcSafeGetPedRef(CPed* ped);
+
 extern char g_iniPath[MAX_PATH];
 extern char g_gameObjDir[MAX_PATH];
 extern char g_gameWeaponsDir[MAX_PATH];

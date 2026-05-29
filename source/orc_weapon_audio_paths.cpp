@@ -18,7 +18,10 @@
 #include <string>
 #include <unordered_map>
 
+#include "CAEAudioEntity.h"
 #include "CAEWeaponAudioEntity.h"
+#include "CEntity.h"
+#include "eEntityType.h"
 
 #include "orc_app.h"
 #include "orc_log.h"
@@ -90,7 +93,7 @@ CPed* OrcWeaponAudioPedFromPhysical(CPhysical* physical) {
     CPed* ped = static_cast<CPed*>(physical);
     if (reinterpret_cast<uintptr_t>(ped) < 0x10000u)
         return nullptr;
-    const int ref = CPools::GetPedRef(ped);
+    const int ref = OrcSafeGetPedRef(ped);
     if (ref < 0 || CPools::GetPed(ref) != ped)
         return nullptr;
     return ped;
@@ -102,12 +105,29 @@ CPed* OrcWeaponAudioPedFromWeaponAudio(CAEWeaponAudioEntity* self) {
     if (self->m_pPed) {
         CPed* ped = self->m_pPed;
         if (reinterpret_cast<uintptr_t>(ped) >= 0x10000u) {
-            const int ref = CPools::GetPedRef(ped);
+            const int ref = OrcSafeGetPedRef(ped);
             if (ref >= 0 && CPools::GetPed(ref) == ped)
                 return ped;
         }
     }
     return OrcWeaponAudioPedFromPhysical(reinterpret_cast<CPhysical*>(self->m_pEntity));
+}
+
+CPed* OrcWeaponAudioResolvePedFromSoundBase(CAEAudioEntity* base) {
+    if (!base)
+        return nullptr;
+    if (base->m_pEntity) {
+        CEntity* ent = base->m_pEntity;
+        if ((static_cast<unsigned>(ent->m_nType) & 7u) == static_cast<unsigned>(ENTITY_TYPE_PED)) {
+            CPed* ped = static_cast<CPed*>(ent);
+            if (reinterpret_cast<uintptr_t>(ped) >= 0x10000u) {
+                const int ref = OrcSafeGetPedRef(ped);
+                if (ref >= 0 && CPools::GetPed(ref) == ped)
+                    return ped;
+            }
+        }
+    }
+    return OrcWeaponAudioPedFromWeaponAudio(reinterpret_cast<CAEWeaponAudioEntity*>(base));
 }
 
 bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudioStemContext& out) {
