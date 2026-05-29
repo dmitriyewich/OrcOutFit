@@ -17,8 +17,12 @@ bool GetPedNickname(const void* gtaPed, char* outName, int outNameLen, bool* isL
 /// Локальный игрок SA:MP, в т.ч. второй `CPed*` при `Fire` (когда `idFind` не находит пулевой id).
 bool IsLocalPlayerGtaPed(const void* gtaPed);
 
-// SA:MP CGame::SetCursorMode — как в MyAsiMod: UI → mode 3+true, иначе 0+false.
+// SA:MP CGame::SetCursorMode — как в MyAsiMod: UI → mode 2 (lock cam+control)+true, иначе 0+false.
 void SyncSampOverlayCursor(bool wantUiCursor);
+
+// SA:MP UI state (только для известных сборок). Для неизвестных сборок / одиночки → false.
+bool IsSampChatOpen();
+bool IsSampDialogActive();
 
 // Disable hooks and release MinHook state (safe to call multiple times).
 void Shutdown();

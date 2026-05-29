@@ -42,17 +42,23 @@ struct SampVersionInfo {
     std::uint32_t idFindOffset;
     std::uint32_t refGameOffset;
     std::uint32_t setCursorModeOffset;
+    std::uint32_t chatInputOffset;  // module-rel global -> CChat input struct (CInput_Opened at +0x14E0)
+    std::uint32_t dialogInfoOffset; // module-rel global -> CDialog (active flag at +0x28)
 };
 
+// chat/dialog offsets перенесены из MyAsiMod (порядок версий совпадает: R1,R2,R3,R3-1,R4,R4-2,R5-1,DL-R1).
+constexpr std::uint32_t kChatInputOpenedOffset = 0x000014E0;
+constexpr std::uint32_t kDialogActiveOffset = 0x00000028;
+
 constexpr std::array<SampVersionInfo, 8> kSampVersions{{
-    {0x31DF13, SampVersion::R1,    "R1",    0x00065C60, 0x00001160, 0x00013CE0, 0x00000004, 0x00010420, 0x0021A10C, 0x0009BD30},
-    {0x3195DD, SampVersion::R2,    "R2",    0x00065D30, 0x00001170, 0x00013DA0, 0x00000000, 0x000104C0, 0x0021A114, 0x0009BDD0},
-    {0x0CC490, SampVersion::R3,    "R3",    0x00069190, 0x00001160, 0x00016F00, 0x00002F1C, 0x00013570, 0x0026E8F4, 0x0009FFE0},
-    {0x0CC4D0, SampVersion::R3_1,  "R3-1",  0x00069190, 0x00001160, 0x00016F00, 0x00002F1C, 0x00013570, 0x0026E8F4, 0x0009FFE0},
-    {0x0CBCB0, SampVersion::R4,    "R4",    0x000698C0, 0x00001170, 0x00017570, 0x0000000C, 0x00013890, 0x0026EA24, 0x000A0720},
-    {0x0CBCD0, SampVersion::R4_2,  "R4-2",  0x00069900, 0x00001170, 0x000175C0, 0x00000004, 0x000138C0, 0x0026EA24, 0x000A0750},
-    {0x0CBC90, SampVersion::R5_1,  "R5-1",  0x00069900, 0x00001170, 0x000175C0, 0x00000004, 0x000138C0, 0x0026EBAC, 0x000A06F0},
-    {0x0FDB60, SampVersion::DL_R1, "DL-R1", 0x00069340, 0x00001170, 0x000170D0, 0x00000000, 0x000137C0, 0x002ACA3C, 0x000A0530},
+    {0x31DF13, SampVersion::R1,    "R1",    0x00065C60, 0x00001160, 0x00013CE0, 0x00000004, 0x00010420, 0x0021A10C, 0x0009BD30, 0x0021A0E8, 0x0021A0B8},
+    {0x3195DD, SampVersion::R2,    "R2",    0x00065D30, 0x00001170, 0x00013DA0, 0x00000000, 0x000104C0, 0x0021A114, 0x0009BDD0, 0x0021A0F0, 0x0021A0C0},
+    {0x0CC490, SampVersion::R3,    "R3",    0x00069190, 0x00001160, 0x00016F00, 0x00002F1C, 0x00013570, 0x0026E8F4, 0x0009FFE0, 0x0026E8CC, 0x0026E898},
+    {0x0CC4D0, SampVersion::R3_1,  "R3-1",  0x00069190, 0x00001160, 0x00016F00, 0x00002F1C, 0x00013570, 0x0026E8F4, 0x0009FFE0, 0x0026E8CC, 0x0026E898},
+    {0x0CBCB0, SampVersion::R4,    "R4",    0x000698C0, 0x00001170, 0x00017570, 0x0000000C, 0x00013890, 0x0026EA24, 0x000A0720, 0x0026E9FC, 0x0026E9C8},
+    {0x0CBCD0, SampVersion::R4_2,  "R4-2",  0x00069900, 0x00001170, 0x000175C0, 0x00000004, 0x000138C0, 0x0026EA24, 0x000A0750, 0x0026E9FC, 0x0026E9C8},
+    {0x0CBC90, SampVersion::R5_1,  "R5-1",  0x00069900, 0x00001170, 0x000175C0, 0x00000004, 0x000138C0, 0x0026EBAC, 0x000A06F0, 0x0026EB84, 0x0026EB50},
+    {0x0FDB60, SampVersion::DL_R1, "DL-R1", 0x00069340, 0x00001170, 0x000170D0, 0x00000000, 0x000137C0, 0x002ACA3C, 0x000A0530, 0x002ACA14, 0x002AC9E0},
 }};
 
 using SampSendCommandFn = void(__thiscall*)(void*, const char*);
@@ -318,7 +324,7 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
     if (!g_state.version || !g_state.base)
         return;
     constexpr int kModeNone = 0;
-    constexpr int kModeLockCam = 3;
+    constexpr int kModeLockCam = 2;
     constexpr std::uint64_t kReassertIntervalMs = 200;
     const int mode = wantUiCursor ? kModeLockCam : kModeNone;
     const bool enabled = wantUiCursor;
@@ -349,6 +355,44 @@ void SyncSampOverlayCursor(bool wantUiCursor) {
             s_cursorExLogged = true;
         }
     }
+}
+
+bool IsSampChatOpen() {
+    if (!g_state.version || !g_state.base)
+        return false;
+    bool opened = false;
+    __try {
+        const auto pInput = reinterpret_cast<const std::uint32_t*>(
+            g_state.base + g_state.version->chatInputOffset);
+        const std::uint32_t input = *pInput;
+        if (input) {
+            const auto pOpened = reinterpret_cast<const std::int32_t*>(input + kChatInputOpenedOffset);
+            opened = (*pOpened == 1);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        opened = false;
+    }
+    return opened;
+}
+
+bool IsSampDialogActive() {
+    if (!g_state.version || !g_state.base)
+        return false;
+    bool active = false;
+    __try {
+        const auto pDialog = reinterpret_cast<const std::uint32_t*>(
+            g_state.base + g_state.version->dialogInfoOffset);
+        const std::uint32_t dialog = *pDialog;
+        if (dialog) {
+            const auto pActive = reinterpret_cast<const std::int32_t*>(dialog + kDialogActiveOffset);
+            active = (*pActive == 1);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        active = false;
+    }
+    return active;
 }
 
 void Shutdown() {

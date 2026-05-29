@@ -171,6 +171,100 @@ bool WantsUiCursorNow() {
     return (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0;
 }
 
+// Решает, держать ли UI-курсор (аналог OverlayCursorController из MyAsiMod): гейтинг по фокусу окна,
+// ПКМ-peek для собственного меню, удержание при открытом SA:MP chat/dialog, ReleaseCapture при сбросе
+// и структурный трейс с детекцией изменений.
+class OverlayCursorController {
+public:
+    struct Inputs {
+        bool menuOpen = false;
+        bool appHasFocus = false;
+        bool rmbHeld = false;
+        bool sampBuildKnown = false;
+        bool chatOpen = false;
+        bool dialogOpen = false;
+        HWND gameWindow = nullptr;
+        HWND foregroundWindow = nullptr;
+    };
+
+    bool Compute(const Inputs& in) {
+        const std::uint64_t now = GetTickCount64();
+        // ПКМ прячет курсор собственного меню (peek-камера); chat/dialog держат курсор независимо от ПКМ.
+        const bool menuWantsCursor = in.menuOpen && !in.rmbHeld;
+        const bool shouldHoldUi = in.appHasFocus && (menuWantsCursor || in.chatOpen || in.dialogOpen);
+        TraceState(in, menuWantsCursor, shouldHoldUi, now);
+        if (lastUiHold_ && !shouldHoldUi)
+            ReleaseHold("overlay: ReleaseCapture (UI-hold завершён)");
+        lastUiHold_ = shouldHoldUi;
+        return shouldHoldUi;
+    }
+
+    void Shutdown() {
+        if (lastUiHold_)
+            ReleaseHold("overlay: ReleaseCapture (shutdown контроллера курсора)");
+        else
+            ReleaseCapture();
+        lastUiHold_ = false;
+        traceValid_ = false;
+    }
+
+private:
+    void ReleaseHold(const char* reason) {
+        ReleaseCapture();
+        lastUiHold_ = false;
+        OrcLogInfo("%s", reason);
+    }
+
+    void TraceState(const Inputs& in, bool menuWantsCursor, bool shouldHoldUi, std::uint64_t now) {
+        const bool changedCore = !traceValid_
+            || in.menuOpen != traceMenu_
+            || in.appHasFocus != traceFocus_
+            || in.chatOpen != traceChat_
+            || in.dialogOpen != traceDialog_
+            || shouldHoldUi != traceHold_;
+        const bool changedRmbOnly = !changedCore && (in.rmbHeld != traceRmb_);
+        const bool allowRmbTrace = changedRmbOnly && (now - lastTraceMs_ >= kRmbTraceIntervalMs);
+        if (!changedCore && !allowRmbTrace)
+            return;
+
+        traceValid_ = true;
+        traceMenu_ = in.menuOpen;
+        traceFocus_ = in.appHasFocus;
+        traceChat_ = in.chatOpen;
+        traceDialog_ = in.dialogOpen;
+        traceRmb_ = in.rmbHeld;
+        traceHold_ = shouldHoldUi;
+        lastTraceMs_ = now;
+
+        OrcLogInfo(
+            "overlay: cursor menu=%d focus=%d rmb=%d chat=%d dialog=%d menuWants=%d hold=%d samp=%d gameHw=%p fgHw=%p",
+            in.menuOpen ? 1 : 0,
+            in.appHasFocus ? 1 : 0,
+            in.rmbHeld ? 1 : 0,
+            in.chatOpen ? 1 : 0,
+            in.dialogOpen ? 1 : 0,
+            menuWantsCursor ? 1 : 0,
+            shouldHoldUi ? 1 : 0,
+            in.sampBuildKnown ? 1 : 0,
+            in.gameWindow,
+            in.foregroundWindow);
+    }
+
+    static constexpr std::uint64_t kRmbTraceIntervalMs = 700;
+
+    bool lastUiHold_ = false;
+    bool traceValid_ = false;
+    bool traceMenu_ = false;
+    bool traceFocus_ = false;
+    bool traceChat_ = false;
+    bool traceDialog_ = false;
+    bool traceRmb_ = false;
+    bool traceHold_ = false;
+    std::uint64_t lastTraceMs_ = 0;
+};
+
+OverlayCursorController g_cursorController;
+
 void WriteBytes(uintptr_t addr, const void* src, size_t n) {
     DWORD oldProt = 0;
     if (!VirtualProtect(reinterpret_cast<void*>(addr), n, PAGE_EXECUTE_READWRITE, &oldProt))
@@ -1080,10 +1174,29 @@ void RenderImGuiFrame(IDirect3DDevice9* device) {
         g_needCreateObj = false;
     }
 
+    HWND fg = GetForegroundWindow();
+    const bool appHasFocus = g_hwnd && fg && IsWindow(g_hwnd) && (fg == g_hwnd || IsChild(g_hwnd, fg) != FALSE);
+    const bool sampBuildKnown = samp_bridge::IsSampBuildKnown();
+
+    OverlayCursorController::Inputs cursorInputs{};
+    cursorInputs.menuOpen = g_menuOpen;
+    cursorInputs.appHasFocus = appHasFocus;
+    cursorInputs.rmbHeld = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    cursorInputs.sampBuildKnown = sampBuildKnown;
+    cursorInputs.gameWindow = g_hwnd;
+    cursorInputs.foregroundWindow = fg;
+    // chat/dialog читаем из samp.dll только когда меню открыто и в фокусе: при закрытом меню SA:MP сам
+    // владеет курсором своих chat/dialog, а ReleaseInputCaptureIfClosed (game-thread) форсит off.
+    if (g_menuOpen && appHasFocus && sampBuildKnown) {
+        cursorInputs.chatOpen = samp_bridge::IsSampChatOpen();
+        cursorInputs.dialogOpen = samp_bridge::IsSampDialogActive();
+    }
+    const bool wantCursor = g_cursorController.Compute(cursorInputs);
+
     if (!g_menuOpen) {
         g_hadNoOverlayUi = true;
         g_stickyMouseCapture = false;
-        ApplyCursorState(device, false);
+        ApplyCursorState(device, wantCursor);
         // Без вызова OrcUiDraw флаги live-preview не обновляются — сбрасываем, чтобы held читался из INI.
         OrcClearWeaponUiLivePreviewWhenMenuClosed();
         return;
@@ -1116,7 +1229,6 @@ void RenderImGuiFrame(IDirect3DDevice9* device) {
 
     ImGui::NewFrame();
 
-    const bool wantCursor = WantsUiCursorNow();
     if (wantCursor)
         ImGui::SetNextFrameWantCaptureMouse(true);
 
@@ -1175,6 +1287,7 @@ void ForceCursorAndControlsOff(IDirect3DDevice9* device) {
         ImGui::GetIO().MouseDrawCursor = false;
     SetPlayerControlsBlocked(false);
     ResetPadMouseState();
+    g_cursorController.Shutdown();
     g_lastWantCursor = false;
     g_stickyMouseCapture = false;
 }
@@ -1298,6 +1411,7 @@ void Shutdown() {
     PatchCursor(false);
     SetPlayerControlsBlocked(false);
     ResetPadMouseState();
+    g_cursorController.Shutdown();
     CleanupImGui();
 
     if (g_endSceneTarget) {
