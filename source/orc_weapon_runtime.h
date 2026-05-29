@@ -43,6 +43,9 @@ void OrcWeaponEnsureFireFxHooksInstalled();
 void OrcWeaponEnsureGunflashHooksInstalled();
 bool OrcPedWantsDualWieldHeld(CPed* ped, int wt);
 RwFrame* OrcPedResolveGunflashFrameForDualHand(CPed* ped, int wtHint, bool isLeftHand);
+/// Dual-wield: строго ванильная вспышка (gunflash) для ЛЕВОГО (secondary) клона — повторяет
+/// `CPed::ClearGunFlash` + `SetGunFlashAlpha(left)` на кадре `"gunflash"` клона перед его отрисовкой.
+void OrcHeldApplyVanillaGunflashForDualSecondary(CPed* ped, int wt);
 /// Мировая дельта точки `m_vecFireOffset` (как в `muzzlePosn`): Held − ванильная кость R_Hand; `false` если Held выкл. или нет данных.
 bool OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(CPed* ped, int wt, RwV3d* outDw);
 /// Клумп, в котором реально ищется dummy `gunflash` при Guns held replacement: если в слоте сток, а меш — клон, возвращается клон (RWCB / DoGunFlash).

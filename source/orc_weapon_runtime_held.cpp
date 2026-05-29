@@ -2509,6 +2509,12 @@ static bool OrcRenderHeldReplacementCloneAtStockDraw(const HeldReplacementDrawCo
     }
     OrcApplyAttachmentLightingForPed(ctx.ped, lightPos, 0.5f);
 
+    // Левый (secondary) twin-pistol клон рисуется здесь, в первом RWCB-проходе — до ванильного
+    // SetGunFlashAlpha(left) второго прохода. Включаем строго ванильную вспышку на кадре gunflash
+    // самого клона прямо сейчас, иначе его атом gunflash остаётся выключенным и не рисуется.
+    if (ctx.secondaryHand && OrcPedWantsDualWieldHeld(ctx.ped, ctx.weaponType))
+        OrcHeldApplyVanillaGunflashForDualSecondary(ctx.ped, ctx.weaponType);
+
     bool drew = false;
     s_renderingHeldReplacementClone = true;
     __try {

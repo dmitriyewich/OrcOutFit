@@ -460,6 +460,35 @@ static void __fastcall CPed_SetGunFlashAlpha_Detour(CPed* self, void* /*edx*/, b
         g_CPedSetGunFlashAlpha_Orig(self, rightHand);
 }
 
+// --- Dual-wield: строго ванильная вспышка (gunflash) для ЛЕВОГО кастомного ствола ---
+// Ваниль (`RenderWeaponPedsForPC` @0x732F30, GTA SA 1.0 US): для twin pistols (PRO) вспышка —
+// это атом `"gunflash"` внутри того же weapon-clump; клумп рисуется дважды. Перед ПРАВЫМ проходом
+// зовётся `CPed::SetGunFlashAlpha(0,0x5DF400)` (правое состояние +0x504), перед ЛЕВЫМ —
+// `SetGunFlashAlpha(1)` (левое +0x508); в конце кадра `CPed::ClearGunFlash` (0x5DF4E0) гасит атом.
+// SetGunFlashAlpha включает рендер-флаг атома (`flags=4`) и ставит alpha, ClearGunFlash — `flags=0`,
+// alpha=0. Плагин же рисует ОБА клона в первом (правом) RWCB-проходе, т.е. ДО ванильного
+// `SetGunFlashAlpha(left)` второго прохода, поэтому у левого клона атом `gunflash` так и остаётся
+// выключенным (flags=0) и не рисуется. Здесь повторяем ванильную пару Clear + SetAlpha(left) на
+// собственном кадре `"gunflash"` левого клона ровно перед его отрисовкой.
+static constexpr uintptr_t kAddr_CPed_ClearGunFlash = 0x5DF4E0;
+using CPed_ClearGunFlash_t = void(__thiscall*)(CPed* self);
+
+void OrcHeldApplyVanillaGunflashForDualSecondary(CPed* ped, int wt) {
+    if (!g_enabled || !ped || wt <= 0)
+        return;
+    RwFrame* gf = OrcPedResolveGunflashFrameForDualHand(ped, wt, /*isLeftHand=*/true);
+    if (!gf)
+        return;
+    RwFrame* const prevGf = ped->m_pGunflashObject;
+    ped->m_pGunflashObject = gf;
+    // Сначала гасим (ванильный pass2 мог оставить атом видимым с прошлого кадра — иначе «залипшая» вспышка)…
+    reinterpret_cast<CPed_ClearGunFlash_t>(kAddr_CPed_ClearGunFlash)(ped);
+    // …затем включаем по текущему состоянию ЛЕВОЙ руки (no-op, если левая сейчас не стреляет).
+    if (g_CPedSetGunFlashAlpha_Orig)
+        g_CPedSetGunFlashAlpha_Orig(ped, /*rightHand=*/true);
+    ped->m_pGunflashObject = prevGf;
+}
+
 void OrcWeaponEnsureGunflashHooksInstalled() {
     if (g_pedGunflashHooksInstalled)
         return;
