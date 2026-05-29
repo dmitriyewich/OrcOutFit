@@ -142,6 +142,22 @@ static void OrcApplyPlayParamsToSource(ALuint src, const OrcWeaponAudioPlayParam
     alSource3f(src, AL_VELOCITY, 0.0f, 0.0f, 0.0f);
 }
 
+// Чистим очередь ошибок AL и генерим ровно один источник. На любой неудаче гарантированно
+// не оставляем утёкший хэндл (иначе пул источников OpenAL исчерпывается и звук глохнет навсегда).
+static bool OrcWeaponAudioGenOneSource(ALuint& outSrc) {
+    outSrc = 0;
+    alGetError();
+    ALuint src = 0;
+    alGenSources(1, &src);
+    if (alGetError() != AL_NO_ERROR || !src) {
+        if (src && alIsSource(src))
+            alDeleteSources(1, &src);
+        return false;
+    }
+    outSrc = src;
+    return true;
+}
+
 ALuint OrcGetOrCreateBufferForPath(const char* path) {
     std::lock_guard<std::mutex> lock(g_bufferMutex);
     const std::string key(path);
@@ -157,10 +173,11 @@ ALuint OrcGetOrCreateBufferForPath(const char* path) {
         return 0;
     }
 
+    alGetError();
     ALuint buf = 0;
     alGenBuffers(1, &buf);
-    if (!buf || alGetError() != AL_NO_ERROR) {
-        if (buf)
+    if (alGetError() != AL_NO_ERROR || !buf) {
+        if (buf && alIsBuffer(buf))
             alDeleteBuffers(1, &buf);
         return 0;
     }
@@ -270,17 +287,23 @@ bool OrcWeaponAudioStartLoopSource(ALuint buffer, const OrcWeaponAudioPlayParams
         }
         alSourceStop(inOutSource);
         alDeleteSources(1, &inOutSource);
+        {
+            std::lock_guard<std::mutex> lock(g_loopMutex);
+            const auto it = std::find(g_loopSources.begin(), g_loopSources.end(), inOutSource);
+            if (it != g_loopSources.end())
+                g_loopSources.erase(it);
+        }
         inOutSource = 0;
     }
 
     ALuint src = 0;
-    alGenSources(1, &src);
-    if (!src || alGetError() != AL_NO_ERROR)
+    if (!OrcWeaponAudioGenOneSource(src))
         return false;
 
     alSourcei(src, AL_BUFFER, (ALint)buffer);
     alSourcei(src, AL_LOOPING, AL_TRUE);
     OrcApplyPlayParamsToSource(src, params, ped);
+    alGetError();
     alSourcePlay(src);
     if (alGetError() != AL_NO_ERROR) {
         alDeleteSources(1, &src);
@@ -425,13 +448,20 @@ bool OrcWeaponAudioPlayBuffer(ALuint buffer, const OrcWeaponAudioPlayParams& par
         return false;
 
     ALuint src = 0;
-    alGenSources(1, &src);
-    if (!src || alGetError() != AL_NO_ERROR)
-        return false;
+    if (!OrcWeaponAudioGenOneSource(src)) {
+        // Пул мог быть забит уже отыгравшими источниками — освобождаем и пробуем ещё раз.
+        OrcWeaponAudioPruneEphemeralSources();
+        if (!OrcWeaponAudioGenOneSource(src)) {
+            if (g_orcLogLevel >= OrcLogLevel::Error)
+                OrcLogError("weapon audio: alGenSources exhausted");
+            return false;
+        }
+    }
 
     alSourcei(src, AL_BUFFER, (ALint)buffer);
     alSourcei(src, AL_LOOPING, AL_FALSE);
     OrcApplyPlayParamsToSource(src, params, ped);
+    alGetError();
     alSourcePlay(src);
     const ALenum err = alGetError();
     if (err != AL_NO_ERROR) {
