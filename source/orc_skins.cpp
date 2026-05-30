@@ -316,27 +316,8 @@ static bool EnsureCustomSkinLoaded(CustomSkinCfg& s) {
     return ok;
 }
 
-static CBaseModelInfo* GetExistingStandardModelInfo(int modelId) {
-    if (modelId < 0 || modelId >= CModelInfo::ms_modelInfoCount) return nullptr;
-    if (!CModelInfo::ms_modelInfoPtrs) return nullptr;
-    CBaseModelInfo* mi = CModelInfo::GetModelInfo(modelId);
-    if (!mi) return nullptr;
-    if (mi->m_pRwObject) return mi;
-    if (!CStreaming::ms_aInfoForModel) return nullptr;
-    __try {
-        const CStreamingInfo& info = CStreaming::ms_aInfoForModel[modelId];
-        if (info.m_nCdSize > 0 || info.m_nLoadState == LOADSTATE_LOADED)
-            return mi;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogError("GetExistingStandardModelInfo: streaming info SEH ex=0x%08X model=%d", GetExceptionCode(), modelId);
-    }
-    return nullptr;
-}
-
-bool OrcIsValidStandardSkinModel(int modelId) {
-    CBaseModelInfo* mi = GetExistingStandardModelInfo(modelId);
-    return mi && mi->GetModelType() == MODEL_INFO_PED;
-}
+// GetExistingStandardModelInfo / OrcIsValidStandardSkinModel вынесены в orc_ped_index.cpp
+// (общий TU для Full и Lite). Объявление — в orc_app.h.
 
 static bool EnsureStandardSkinLoaded(StandardSkinCfg& s) {
     if (s.rwObject && !OrcIsValidStandardSkinModel(s.modelId)) {
@@ -722,17 +703,7 @@ void OrcCollectRandomSkinPools(std::vector<SkinRandomPoolInfo>& out) {
     });
 }
 
-void OrcCollectPedSkins(std::vector<std::pair<std::string, int>>& out) {
-    out.clear();
-    for (int id = 0; id < (int)g_pedModelNameById.size(); id++) {
-        if (g_pedModelNameById[id].empty()) continue;
-        if (!OrcIsValidStandardSkinModel(id)) continue;
-        out.push_back({ g_pedModelNameById[id], id });
-    }
-    std::sort(out.begin(), out.end(), [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) {
-        return a.second < b.second;
-    });
-}
+// OrcCollectPedSkins вынесена в orc_ped_index.cpp (общий TU для Full и Lite).
 
 static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed);
 static void RenderStandardSkinOnPed(CPed* ped, StandardSkinCfg* sel, bool isLocalPed);

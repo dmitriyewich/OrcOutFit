@@ -43,10 +43,22 @@
     <PluginSdkDir>$(ProjectDir)source\external\plugin-sdk</PluginSdkDir>
     <PluginSdkLibraryName>Plugin.lib</PluginSdkLibraryName>
   </PropertyGroup>
+  <!--
+    OrcEdition: Full (по умолчанию) собирает OrcOutFit.asi (полный функционал).
+    Lite (msbuild /p:OrcEdition=Lite) собирает OrcOutFitLite.asi: только рендер оружия
+    на теле + меню (Main + sub-tab «Рендер оружия»). Тяжёлые TU исключаются (см. ItemGroup),
+    макрос ORC_LITE гейтит код, OpenAL не линкуется и не пересобирается в PreBuild.
+  -->
+  <PropertyGroup Label="OrcEdition">
+    <OrcEdition Condition="'$(OrcEdition)'==''">Full</OrcEdition>
+    <OrcLiteDefine Condition="'$(OrcEdition)'=='Lite'">ORC_LITE;</OrcLiteDefine>
+    <OrcOpenAlLibs Condition="'$(OrcEdition)'!='Lite'">OpenAL32.lib;</OrcOpenAlLibs>
+  </PropertyGroup>
   <PropertyGroup>
     <OutDir>$(ProjectDir)build\$(Configuration)\</OutDir>
-    <IntDir>$(ProjectDir)build\obj\$(Configuration)\OrcOutFit\</IntDir>
-    <TargetName>OrcOutFit</TargetName>
+    <IntDir>$(ProjectDir)build\obj\$(Configuration)\$(OrcEdition)\OrcOutFit\</IntDir>
+    <TargetName Condition="'$(OrcEdition)'=='Lite'">OrcOutFitLite</TargetName>
+    <TargetName Condition="'$(OrcEdition)'!='Lite'">OrcOutFit</TargetName>
     <TargetExt>.asi</TargetExt>
     <OrcOpenAlInclude>$(ProjectDir)source\external\openal-soft\include;$(ProjectDir)build\openal-soft</OrcOpenAlInclude>
     <OrcOpenAlLibDir>$(ProjectDir)build\openal-soft\$(Configuration)</OrcOpenAlLibDir>
@@ -56,7 +68,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>$(OrcLiteDefine)WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
@@ -67,9 +79,9 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(OrcOpenAlLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>OpenAL32.lib;winmm.lib;avrt.lib;ole32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(OrcOpenAlLibs)winmm.lib;avrt.lib;ole32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PreBuildEvent Condition="'$(OrcOpenAlSkipPreBuild)' != 'true'">
+    <PreBuildEvent Condition="'$(OrcOpenAlSkipPreBuild)' != 'true' and '$(OrcEdition)' != 'Lite'">
       <Command>$(OrcOpenAlPreBuild)</Command>
     </PreBuildEvent>
   </ItemDefinitionGroup>
@@ -77,7 +89,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>false</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;NDEBUG;GTASA;PLUGIN_SGV_10US;RW;NOMINMAX;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>$(OrcLiteDefine)WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;NDEBUG;GTASA;PLUGIN_SGV_10US;RW;NOMINMAX;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>false</ConformanceMode>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
@@ -103,30 +115,31 @@
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <AdditionalLibraryDirectories>$(OrcOpenAlLibDir);$(PluginSdkDir)\output\lib;$(PluginSdkDir)\shared\dxsdk;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>OpenAL32.lib;winmm.lib;avrt.lib;ole32.lib;uuid.lib;$(PluginSdkLibraryName);d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(OrcOpenAlLibs)winmm.lib;avrt.lib;ole32.lib;uuid.lib;$(PluginSdkLibraryName);d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PreBuildEvent Condition="'$(OrcOpenAlSkipPreBuild)' != 'true'">
+    <PreBuildEvent Condition="'$(OrcOpenAlSkipPreBuild)' != 'true' and '$(OrcEdition)' != 'Lite'">
       <Command>$(OrcOpenAlPreBuild)</Command>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="source\main.cpp" />
     <ClCompile Include="source\orc_objects.cpp" />
-    <ClCompile Include="source\orc_skins.cpp" />
+    <ClCompile Include="source\orc_skins.cpp" Condition="'$(OrcEdition)'!='Lite'" />
     <ClCompile Include="source\orc_attach.cpp" />
     <ClCompile Include="source\orc_path.cpp" />
+    <ClCompile Include="source\orc_ped_index.cpp" />
     <ClCompile Include="source\orc_weapon_assets.cpp" />
-    <ClCompile Include="source\orc_weapon_audio_openal.cpp" />
-    <ClCompile Include="source\orc_weapon_audio_decode.cpp" />
-    <ClCompile Include="source\orc_weapon_audio_config.cpp" />
-    <ClCompile Include="source\orc_weapon_audio_paths.cpp" />
-    <ClCompile Include="source\orc_weapon_audio_hooks.cpp" />
-    <ClCompile Include="source\orc_weapon_audio_loops.cpp" />
+    <ClCompile Include="source\orc_weapon_audio_openal.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_weapon_audio_decode.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_weapon_audio_config.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_weapon_audio_paths.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_weapon_audio_hooks.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_weapon_audio_loops.cpp" Condition="'$(OrcEdition)'!='Lite'" />
     <ClCompile Include="source\orc_weapon_runtime.cpp" />
     <ClCompile Include="source\orc_weapon_runtime_body.cpp" />
-    <ClCompile Include="source\orc_weapon_runtime_held.cpp" />
-    <ClCompile Include="source\orc_weapon_runtime_held_fx.cpp" />
-    <ClCompile Include="source\orc_weapon_runtime_hud.cpp" />
+    <ClCompile Include="source\orc_weapon_runtime_held.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_weapon_runtime_held_fx.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_weapon_runtime_hud.cpp" Condition="'$(OrcEdition)'!='Lite'" />
     <ClCompile Include="source\orc_render.cpp" />
     <ClCompile Include="source\orc_ui_bones.cpp" />
     <ClCompile Include="source\orc_weapons.cpp" />
@@ -138,7 +151,8 @@
     <ClCompile Include="source\orc_weapon_preset_async.cpp" />
     <ClCompile Include="source\orc_locale.cpp" />
     <ClCompile Include="source\orc_log.cpp" />
-    <ClCompile Include="source\orc_texture_remap.cpp" />
+    <ClCompile Include="source\orc_texture_remap.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_lite_stubs.cpp" Condition="'$(OrcEdition)'=='Lite'" />
     <ClCompile Include="source\orc_ui.cpp" />
     <ClCompile Include="source\overlay.cpp" />
     <ClCompile Include="source\samp_bridge.cpp" />

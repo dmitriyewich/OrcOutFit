@@ -376,6 +376,7 @@ void OrcWeaponsUiDrawWeaponsTab() {
             ImGui::EndTabItem();
         }
 
+#ifndef ORC_LITE
         if (ImGui::BeginTabItem(WT(OrcTextId::TabWeaponHeld))) {
             weaponHeldTabActiveThisFrame = true;
             ImGui::TextWrapped("%s", WT(OrcTextId::WeaponHeldTabHint));
@@ -664,6 +665,7 @@ void OrcWeaponsUiDrawWeaponsTab() {
                 DiscoverWeaponTextures();
             ImGui::EndTabItem();
         }
+#endif // ORC_LITE
 
         ImGui::EndTabBar();
     }

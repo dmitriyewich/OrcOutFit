@@ -40,14 +40,23 @@
 
 ---
 
+## Редакции
+
+В релизе две сборки из одного исходника:
+
+- **`OrcOutFit.asi`** (Full) — полный функционал: оружие на теле и в руках, кастомные звуки, скины, объекты, texture remap, всё меню.
+- **`OrcOutFitLite.asi`** (Lite) — рендер оружия на теле и кастомных/стандартных объектов + меню (вкладки **Главная**, **Оружие → Рендер оружия**, **Объекты**, **Настройки** — язык, масштаб/шрифт, клавиша/команда активации). Без звуков, скинов, texture remap и оружия в руках; меньше хуков и размер. Ставьте **либо** Full, **либо** Lite, не оба сразу.
+
 ## Установка
 
-1. Получите `OrcOutFit.asi` (готовый релиз или локальная сборка).
-2. Поместите `OrcOutFit.asi` в каталог игры (или в modloader).
+1. Получите `OrcOutFit.asi` (Full) или `OrcOutFitLite.asi` (Lite) — готовый релиз или локальная сборка.
+2. Поместите выбранный `.asi` в каталог игры (или в modloader).
 3. Запустите игру: рядом с ASI будет использован/создан `OrcOutFit.ini`.
 4. При необходимости задайте уровень лога в `[Features] DebugLogLevel`: `0` — в `OrcOutFit.log` ничего не пишется (включая ошибки), `1` — только ошибки, `2` — полный trace. Файл лога появляется рядом с INI при первой записи.
 
 При сборке из исходников: submodule `source/external/openal-soft` (тег **1.24.3**). Первая инициализация: `git submodule update --init --recursive`, затем [`.github/scripts/build-openal-soft.ps1`](.github/scripts/build-openal-soft.ps1) **или** обычный MSBuild `OrcOutFit.sln` Release|x86 (PreBuild соберёт OpenAL сам). Нужен **CMake** (компонент Visual Studio или отдельная установка). Статическая линковка — **LGPL**, `OpenAL32.dll` в игру класть не нужно; артефакт: `build/Release/OrcOutFit.asi`. Подробности — в правилах сборки репозитория (секция OpenAL Soft).
+
+Сборка Lite: `msbuild OrcOutFit.sln "/p:Configuration=Release;Platform=x86;OrcEdition=Lite"` → `build/Release/OrcOutFitLite.asi` (без OpenAL; OpenAL submodule для Lite не нужен).
 
 ---
 

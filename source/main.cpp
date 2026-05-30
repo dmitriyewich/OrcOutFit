@@ -829,7 +829,9 @@ void LoadConfig() {
 
     // Снапшот: одно присвоение глобалов на главном потоке (рендер не видит половину INI).
     g_mainIniDoc = std::move(nextDoc);
+#ifndef ORC_LITE
     OrcWeaponAudioConfigApplyFromMainIni(g_mainIniDoc);
+#endif
     g_cfg = std::move(nextCfg);
     g_cfg2 = std::move(nextCfg2);
     g_enabled = v_enabled;
@@ -940,12 +942,14 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "WeaponTextureRandomMode", g_weaponTextureRandomMode ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextureStandardRemap", g_weaponTextureStandardRemap ? 1 : 0);
     AddIniInt(values, "Features", "WeaponHudIconFromGunsTxd", g_weaponHudIconFromGunsTxd ? 1 : 0);
+#ifndef ORC_LITE
     AddIniInt(values, "Features", "CustomWeaponSounds", g_weaponCustomSounds ? 1 : 0);
     AddIniFloat(values, "Features", "CustomWeaponSoundGain", g_weaponCustomSoundGain, "%.2f");
     AddIniFloat(values, "Features", "CustomWeaponSoundDistantThreshold", g_weaponCustomSoundDistantThreshold, "%.1f");
     AddIniInt(values, "Features", "CustomWeaponSoundMaxAlternatives", g_weaponCustomSoundMaxAlternatives);
     AddIniFloat(values, "Features", "CustomWeaponSoundDistantGain", g_weaponCustomSoundDistantGain, "%.2f");
     OrcWeaponAudioConfigAppendMainIniValues(values);
+#endif
     OrcAppendSkinFeatureIniValues(values);
     AddIniInt(values, "Features", "DebugLogLevel", static_cast<int>(g_orcLogLevel));
     AddIniInt(values, "Features", "DebugLog", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
@@ -2374,8 +2378,10 @@ public:
         Events::initRwEvent.after += &OnInitRw;
         Events::gameProcessEvent += &OnGameProcessBegin;
         Events::drawingEvent += &OnDrawingEvent;
+#ifndef ORC_LITE
         Events::processScriptsEvent += &OrcTextureRemapOnProcessScripts;
         Events::pedSetModelEvent += &OrcTextureRemapOnPedSetModel;
+#endif
         Events::pedRenderEvent.before += &OnPedRenderBefore;
         Events::pedRenderEvent.after += &OnPedRenderAfter;
         Events::d3dLostEvent += &OnD3dLost;
@@ -2398,12 +2404,17 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon IDE loading.
         OrcWeaponsEnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();
+#ifndef ORC_LITE
+        // Lite не ставит хуки оружия в руках / FX / HUD / texture remap / аудио.
         OrcWeaponEnsurePedModelHooksInstalled();
         OrcWeaponEnsureFireFxHooksInstalled();
         OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
         OrcTextureRemapInstallHooks();
         OrcWeaponAudioSetPluginModule(module);
         OrcWeaponAudioEnsureHooksInstalled();
+#else
+        (void)module;
+#endif
     }
     return TRUE;
 }

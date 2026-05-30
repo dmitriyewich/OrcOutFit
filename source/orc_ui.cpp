@@ -514,6 +514,26 @@ void OrcUiMarkObjectEditorsStale() {
     g_uiStdObjParamsLoaded = false;
 }
 
+// Переключатель языка ru/en. В Full живёт во вкладке «Настройки», в Lite — в Main.
+static void OrcUiLanguageSelector(const char* id) {
+    const OrcUiLanguage languages[] = { OrcUiLanguage::Russian, OrcUiLanguage::English };
+    if (OrcUiBeginControlRow(id, T(OrcTextId::Language))) {
+        if (ImGui::BeginCombo("##value", OrcLanguageDisplayName(g_orcUiLanguage))) {
+            for (OrcUiLanguage language : languages) {
+                const bool selected = language == g_orcUiLanguage;
+                if (ImGui::Selectable(OrcLanguageDisplayName(language), selected)) {
+                    g_orcUiLanguage = language;
+                    SaveMainIni();
+                }
+                if (selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        OrcUiEndControlRow();
+    }
+}
+
 void OrcUiDraw() {
     ImGuiIO& io = ImGui::GetIO();
     const float uiScale = UiLayoutScale();
@@ -595,6 +615,7 @@ void OrcUiDraw() {
             OrcUiCheckbox("consider_weapon_skills", T(OrcTextId::ConsiderWeaponSkills), &g_considerWeaponSkills);
             OrcUiCheckbox("render_custom_objects", T(OrcTextId::RenderCustomObjects), &g_renderCustomObjects);
             OrcUiCheckbox("render_standard_objects", T(OrcTextId::RenderStandardObjects), &g_renderStandardObjects);
+#ifndef ORC_LITE
             OrcUiCheckbox("skin_mode", T(OrcTextId::SkinMode), &g_skinModeEnabled);
             OrcUiCheckbox("skin_hide_base_ped", T(OrcTextId::SkinHideBasePed), &g_skinHideBasePed);
             const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
@@ -605,6 +626,7 @@ void OrcUiDraw() {
             ImGui::EndDisabled();
             OrcUiCheckbox("skin_always_selected", T(OrcTextId::SkinAlwaysSelectedForMe), &g_skinLocalPreferSelected);
             ImGui::TextWrapped("%s", T(OrcTextId::SkinAlwaysSelectedHint));
+#endif
             int logCombo = static_cast<int>(g_orcLogLevel);
             const OrcTextId logLabels[] = { OrcTextId::LogOff, OrcTextId::LogErrorsOnly, OrcTextId::LogInfoFull };
             if (logCombo < 0) logCombo = 0;
@@ -624,6 +646,7 @@ void OrcUiDraw() {
             }
             ImGui::TextDisabled("%s", OrcLogGetPath());
 
+#ifndef ORC_LITE
             if (ImGui::CollapsingHeader(T(OrcTextId::UiFeaturesDiagnosticsHeader), ImGuiTreeNodeFlags_None)) {
                 ImGui::TextWrapped("%s", T(OrcTextId::UiFeaturesDiagnosticsHint));
                 OrcUiComboTrace012("held_weapon_trace", OrcTextId::HeldWeaponTraceUi, &g_heldWeaponTrace);
@@ -643,6 +666,7 @@ void OrcUiDraw() {
                     OrcUiSaveMainIniDebounced();
                 }
             }
+#endif
 
             ImGui::Separator();
             if (OrcUiButtonFullWidth(T(OrcTextId::SaveMainFeatures))) {
@@ -929,6 +953,7 @@ void OrcUiDraw() {
             ImGui::EndTabItem();
         }
 
+#ifndef ORC_LITE
         // ------------------------------------------------------------------
         // Skins
         // ------------------------------------------------------------------
@@ -1268,27 +1293,13 @@ void OrcUiDraw() {
             }
             ImGui::EndTabItem();
         }
+#endif // ORC_LITE
 
         // ------------------------------------------------------------------
         // Settings
         // ------------------------------------------------------------------
         if (ImGui::BeginTabItem(T(OrcTextId::TabSettings))) {
-            const OrcUiLanguage languages[] = { OrcUiLanguage::Russian, OrcUiLanguage::English };
-            if (OrcUiBeginControlRow("language", T(OrcTextId::Language))) {
-                if (ImGui::BeginCombo("##value", OrcLanguageDisplayName(g_orcUiLanguage))) {
-                    for (OrcUiLanguage language : languages) {
-                        const bool selected = language == g_orcUiLanguage;
-                        if (ImGui::Selectable(OrcLanguageDisplayName(language), selected)) {
-                            g_orcUiLanguage = language;
-                            SaveMainIni();
-                        }
-                        if (selected)
-                            ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-                OrcUiEndControlRow();
-            }
+            OrcUiLanguageSelector("language");
 
             ImGui::Separator();
             ImGui::TextUnformatted(T(OrcTextId::Interface));
