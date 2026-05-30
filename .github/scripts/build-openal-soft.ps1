@@ -57,7 +57,13 @@ if (-not (Test-Path -LiteralPath $cache)) {
         '-DALSOFT_UTILS=OFF',
         '-DALSOFT_EXAMPLES=OFF',
         '-DALSOFT_TESTS=OFF',
+        # HRTF/binaural не используется плагином — не встраиваем default HRTF-таблицы.
+        '-DALSOFT_EMBED_HRTF_DATA=OFF',
+        # Сам OpenAL под размер (по умолчанию /O2); EFX/декодеры остаются.
+        '-DCMAKE_C_FLAGS_RELEASE=/O1 /Os /DNDEBUG',
+        '-DCMAKE_CXX_FLAGS_RELEASE=/O1 /Os /DNDEBUG',
         '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW',
+        # /MT: совпадает с плагином и prebuilt Plugin.lib (/MT). Debug -> /MTd.
         '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>',
         "-T$toolset"
     )

@@ -89,23 +89,25 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>false</SDLCheck>
-      <PreprocessorDefinitions>$(OrcLiteDefine)WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;NDEBUG;GTASA;PLUGIN_SGV_10US;RW;NOMINMAX;AL_LIBTYPE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>$(OrcLiteDefine)WIN32;_WINDOWS;_CRT_SECURE_NO_WARNINGS;NDEBUG;GTASA;PLUGIN_SGV_10US;RW;NOMINMAX;AL_LIBTYPE_STATIC;IMGUI_DISABLE_DEBUG_TOOLS;IMGUI_DISABLE_OBSOLETE_KEYIO;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>false</ConformanceMode>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <StringPooling>true</StringPooling>
       <LanguageStandard>stdcpplatest</LanguageStandard>
-      <Optimization>MaxSpeed</Optimization>
+      <!-- Size-first codegen: /O1 (MinSpace) + /Os; plugin is not CPU-bound. -->
+      <Optimization>MinSpace</Optimization>
+      <!-- /MT: Plugin.lib (plugin-sdk, prebuilt) собран под /MT — держим CRT консистентным. -->
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
       <!-- Aggressive profile: no security cookies, no RTTI, C++ exceptions off (SEH still works). -->
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <ExceptionHandling>false</ExceptionHandling>
-      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
       <OmitFramePointers>true</OmitFramePointers>
       <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
-      <AdditionalOptions>/utf-8 /Gw /GS- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /Gw /GS- /Zc:threadSafeStatics- %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(OrcOpenAlInclude);$(PluginSdkDir)\plugin_sa;$(PluginSdkDir)\plugin_sa\game_sa;$(PluginSdkDir)\plugin_sa\game_sa\rw;$(PluginSdkDir)\shared;$(PluginSdkDir)\shared\game;$(PluginSdkDir)\shared\dxsdk;$(PluginSdkDir)\injector;$(PluginSdkDir)\hooking;$(PluginSdkDir)\safetyhook;$(ProjectDir)source\external\imgui;$(ProjectDir)source\external\imgui\backends;$(ProjectDir)source\external\simpleini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
