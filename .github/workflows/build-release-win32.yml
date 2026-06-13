@@ -50,11 +50,11 @@ jobs:
 
       - name: Build Release Win32 (Full)
         shell: pwsh
-        run: msbuild OrcOutFit.sln /t:Build "/p:Configuration=Release;Platform=x86;PlatformToolset=v143" /p:OrcOpenAlSkipPreBuild=true
+        run: msbuild OrcOutFit.sln /t:Build "/p:Configuration=Release;Platform=x86;PlatformToolset=v143;OrcBuildPdb=false" /p:OrcOpenAlSkipPreBuild=true
 
       - name: Build Release Win32 (Lite)
         shell: pwsh
-        run: msbuild OrcOutFit.sln /t:Build "/p:Configuration=Release;Platform=x86;PlatformToolset=v143;OrcEdition=Lite" /p:OrcOpenAlSkipPreBuild=true
+        run: msbuild OrcOutFit.sln /t:Build "/p:Configuration=Release;Platform=x86;PlatformToolset=v143;OrcEdition=Lite;OrcBuildPdb=false" /p:OrcOpenAlSkipPreBuild=true
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

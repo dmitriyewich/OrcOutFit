@@ -1251,9 +1251,7 @@ static unsigned s_heldReSyncDupSerial = 0;
 static constexpr int kOrcMaxRwFrameAncestors = 64;
 
 static RwFrame* OrcRwFrameGetParent(RwFrame* f) {
-    if (!f)
-        return nullptr;
-    return reinterpret_cast<RwFrame*>(plugin::GetObjectParent(reinterpret_cast<RwObject*>(f)));
+    return OrcGetRwFrameParentSafe(f);
 }
 
 static bool OrcHeldRwFrameIsDescendantOf(RwFrame* frame, RwFrame* ancestor) {

@@ -269,7 +269,7 @@ static void __fastcall WeaponFire_Detour(CAEWeaponAudioEntity* self, void* /*edx
     CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
     if (!ped && self)
         ped = OrcWeaponAudioPedFromWeaponAudio(self);
-    if (!ped || ped->m_nType != ENTITY_TYPE_PED) {
+    if (!ped) {
         g_WeaponFire_Orig(self, weaponType, entity, audioEventId);
         return;
     }
@@ -327,6 +327,17 @@ static const char* OrcReloadSuffixForEvent(int audioEventId) {
     }
 }
 
+static CPed* OrcWeaponAudioPedFromPedAudio(CAEPedAudioEntity* self, const char* source) {
+    CPed* ped = nullptr;
+    __try {
+        ped = self ? self->m_pPed : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogInfoThrottled(920, 4000u, "weapon audio: read ped audio entity SEH ex=0x%08X source=%s self=%p", GetExceptionCode(), source, self);
+        return nullptr;
+    }
+    return OrcWeaponAudioValidatePedCandidate(ped, source);
+}
+
 static void __fastcall WeaponReload_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, eWeaponType weaponType, CPhysical* entity,
     int audioEventId) {
     if (!g_WeaponReload_Orig)
@@ -337,8 +348,10 @@ static void __fastcall WeaponReload_Detour(CAEWeaponAudioEntity* self, void* /*e
         return;
     }
 
-    CPed* ped = self ? self->m_pPed : nullptr;
-    if (!ped || ped->m_nType != ENTITY_TYPE_PED) {
+    CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
+    if (!ped && self)
+        ped = OrcWeaponAudioPedFromWeaponAudio(self);
+    if (!ped) {
         g_WeaponReload_Orig(self, weaponType, entity, audioEventId);
         return;
     }
@@ -372,7 +385,7 @@ static void __fastcall HandlePedHit_Detour(CAEPedAudioEntity* self, void* /*edx*
         return;
     }
 
-    CPed* ped = self ? self->m_pPed : nullptr;
+    CPed* ped = OrcWeaponAudioPedFromPedAudio(self, "pedAudio.hit.m_pPed");
     if (!ped || !OrcWeaponAudioIsMeleeHitAudioEvent(audioEvent)) {
         g_HandlePedHit_Orig(self, audioEvent, victim, surface, volume, maxVolume);
         return;
@@ -392,7 +405,7 @@ static char __fastcall HandlePedSwing_Detour(CAEPedAudioEntity* self, void* /*ed
         return g_HandlePedSwing_Orig(self, a2, a3, a4);
     }
 
-    CPed* ped = self ? self->m_pPed : nullptr;
+    CPed* ped = OrcWeaponAudioPedFromPedAudio(self, "pedAudio.swing.m_pPed");
     if (ped && OrcTryMeleeSuffixForPed(ped, "_swing", OrcWeaponAudioCloseGain()))
         return 1;
 

@@ -10,6 +10,11 @@
 
 #include <cmath>
 #include <cstring>
+#include <cstdint>
+
+static bool OrcRwPointerLooksReadable(const void* ptr) {
+    return reinterpret_cast<uintptr_t>(ptr) >= 0x10000u;
+}
 
 RwMatrix* OrcGetBoneMatrix(CPed* ped, int boneNodeId) {
     if (!ped || !ped->m_pRwClump) return nullptr;
@@ -58,6 +63,40 @@ void OrcTryRpClumpRender(RpClump* clump) {
         RpClumpRender(clump);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         OrcLogError("SEH RpClumpRender ex=0x%08X clump=%p", GetExceptionCode(), clump);
+    }
+}
+
+RwFrame* OrcGetRwFrameParentSafe(RwFrame* frame) {
+    if (!OrcRwPointerLooksReadable(frame))
+        return nullptr;
+
+    __try {
+        if (frame->object.type != rwFRAME)
+            return nullptr;
+
+        auto* parent = reinterpret_cast<RwFrame*>(rwObjectGetParent(reinterpret_cast<RwObject*>(frame)));
+        if (!parent)
+            return nullptr;
+
+        if (!OrcRwPointerLooksReadable(parent)) {
+            OrcLogInfoThrottled(913, 4000u, "rw frame parent skipped: frame=%p parent=%p", frame, parent);
+            return nullptr;
+        }
+
+        if (parent->object.type != rwFRAME) {
+            OrcLogInfoThrottled(914,
+                4000u,
+                "rw frame parent skipped: frame=%p parent=%p parentType=%u",
+                frame,
+                parent,
+                static_cast<unsigned>(parent->object.type));
+            return nullptr;
+        }
+
+        return parent;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogInfoThrottled(915, 4000u, "rw frame parent SEH ex=0x%08X frame=%p", GetExceptionCode(), frame);
+        return nullptr;
     }
 }
 

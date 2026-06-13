@@ -678,7 +678,10 @@ static void __fastcall ReportChainsawEvent_Detour(CAEWeaponAudioEntity* self, vo
     if (g_ReportChainsaw_Orig)
         g_ReportChainsaw_Orig(self, ped, aevent);
 
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || !self || !ped)
+    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || !self)
+        return;
+    ped = OrcWeaponAudioValidatePedCandidate(ped, "chainsawEvent.ped");
+    if (!ped)
         return;
 
     OrcUpdateChainsawLoops(self, ped);
@@ -850,7 +853,7 @@ void OrcWeaponAudioLoopsOnGameProcess() {
         return;
     for (auto it = g_pedLoops.begin(); it != g_pedLoops.end();) {
         CPed* ped = it->first;
-        if (!ped || OrcSafeGetPedRef(ped) < 0) {
+        if (!OrcWeaponAudioValidatePedCandidate(ped, "loopTick")) {
             for (ALuint& src : it->second)
                 OrcWeaponAudioStopLoopSource(src);
             it = g_pedLoops.erase(it);

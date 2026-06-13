@@ -63,6 +63,7 @@ bool OrcWeaponAudioPlayBuffer(ALuint buffer, const OrcWeaponAudioPlayParams& par
 
 CPed* OrcWeaponAudioPedFromPhysical(CPhysical* physical);
 CPed* OrcWeaponAudioPedFromWeaponAudio(CAEWeaponAudioEntity* self);
+CPed* OrcWeaponAudioValidatePedCandidate(CPed* ped, const char* source);
 /// Пед из `CAESound::m_pBaseAudio` (сначала `m_pEntity`, затем weapon `m_pPed`).
 CPed* OrcWeaponAudioResolvePedFromSoundBase(CAEAudioEntity* base);
 bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudioStemContext& out);

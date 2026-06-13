@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -21,7 +22,6 @@
 #include "CAEAudioEntity.h"
 #include "CAEWeaponAudioEntity.h"
 #include "CEntity.h"
-#include "eEntityType.h"
 
 #include "orc_app.h"
 #include "orc_log.h"
@@ -37,6 +37,37 @@ static std::unordered_map<std::string, OrcPathCacheState> g_pathCache;
 static std::mutex g_pathCacheMutex;
 
 static const char* kAudioExts[] = {".wav", ".mp3", ".flac", ".ogg"};
+
+static bool OrcAudioPointerLooksReadable(const void* ptr) {
+    return reinterpret_cast<uintptr_t>(ptr) >= 0x10000u;
+}
+
+CPed* OrcWeaponAudioValidatePedCandidate(CPed* ped, const char* source) {
+    if (!OrcAudioPointerLooksReadable(ped)) {
+        if (ped)
+            OrcLogInfoThrottled(916, 4000u, "weapon audio: skip bad ped pointer source=%s ped=%p", source, ped);
+        return nullptr;
+    }
+
+    __try {
+        if ((static_cast<unsigned>(ped->m_nType) & 7u) != static_cast<unsigned>(ENTITY_TYPE_PED))
+            return nullptr;
+
+        const int ref = OrcSafeGetPedRef(ped);
+        if (ref <= 0)
+            return nullptr;
+
+        return CPools::GetPed(ref) == ped ? ped : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogInfoThrottled(917,
+            4000u,
+            "weapon audio: ped candidate SEH ex=0x%08X source=%s ped=%p",
+            GetExceptionCode(),
+            source,
+            ped);
+        return nullptr;
+    }
+}
 
 static std::string OrcDirNameA(const std::string& p) {
     size_t slash = p.find_last_of("\\/");
@@ -86,55 +117,55 @@ bool OrcWeaponAudioPathExistsCached(const std::string& path) {
 }
 
 CPed* OrcWeaponAudioPedFromPhysical(CPhysical* physical) {
-    if (!physical)
+    if (!OrcAudioPointerLooksReadable(physical))
         return nullptr;
-    if ((static_cast<unsigned>(physical->m_nType) & 7u) != static_cast<unsigned>(ENTITY_TYPE_PED))
-        return nullptr;
-    CPed* ped = static_cast<CPed*>(physical);
-    if (reinterpret_cast<uintptr_t>(ped) < 0x10000u)
-        return nullptr;
-    const int ref = OrcSafeGetPedRef(ped);
-    if (ref < 0 || CPools::GetPed(ref) != ped)
-        return nullptr;
-    return ped;
+    return OrcWeaponAudioValidatePedCandidate(static_cast<CPed*>(physical), "physical");
 }
 
 CPed* OrcWeaponAudioPedFromWeaponAudio(CAEWeaponAudioEntity* self) {
-    if (!self)
+    if (!OrcAudioPointerLooksReadable(self))
         return nullptr;
-    if (self->m_pPed) {
-        CPed* ped = self->m_pPed;
-        if (reinterpret_cast<uintptr_t>(ped) >= 0x10000u) {
-            const int ref = OrcSafeGetPedRef(ped);
-            if (ref >= 0 && CPools::GetPed(ref) == ped)
-                return ped;
-        }
+
+    CPed* directPed = nullptr;
+    CEntity* entity = nullptr;
+    __try {
+        directPed = self->m_pPed;
+        entity = self->m_pEntity;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogInfoThrottled(918, 4000u, "weapon audio: read weapon audio entity SEH ex=0x%08X self=%p", GetExceptionCode(), self);
+        return nullptr;
     }
-    return OrcWeaponAudioPedFromPhysical(reinterpret_cast<CPhysical*>(self->m_pEntity));
+
+    if (CPed* ped = OrcWeaponAudioValidatePedCandidate(directPed, "weaponAudio.m_pPed"))
+        return ped;
+
+    return OrcWeaponAudioPedFromPhysical(reinterpret_cast<CPhysical*>(entity));
 }
 
 CPed* OrcWeaponAudioResolvePedFromSoundBase(CAEAudioEntity* base) {
-    if (!base)
+    if (!OrcAudioPointerLooksReadable(base))
         return nullptr;
-    if (base->m_pEntity) {
-        CEntity* ent = base->m_pEntity;
-        if ((static_cast<unsigned>(ent->m_nType) & 7u) == static_cast<unsigned>(ENTITY_TYPE_PED)) {
-            CPed* ped = static_cast<CPed*>(ent);
-            if (reinterpret_cast<uintptr_t>(ped) >= 0x10000u) {
-                const int ref = OrcSafeGetPedRef(ped);
-                if (ref >= 0 && CPools::GetPed(ref) == ped)
-                    return ped;
-            }
-        }
+
+    CEntity* entity = nullptr;
+    __try {
+        entity = base->m_pEntity;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogInfoThrottled(919, 4000u, "weapon audio: read sound base SEH ex=0x%08X base=%p", GetExceptionCode(), base);
+        return nullptr;
     }
+
+    if (CPed* ped = OrcWeaponAudioValidatePedCandidate(static_cast<CPed*>(entity), "soundBase.m_pEntity"))
+        return ped;
+
     return OrcWeaponAudioPedFromWeaponAudio(reinterpret_cast<CAEWeaponAudioEntity*>(base));
 }
 
 bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudioStemContext& out) {
     out = {};
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || !ped || weaponType < 0)
+    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || weaponType < 0)
         return false;
-    if (ped->m_nType != ENTITY_TYPE_PED)
+    ped = OrcWeaponAudioValidatePedCandidate(ped, "stemContext");
+    if (!ped)
         return false;
     WeaponReplacementAsset* asset = OrcResolveUsableWeaponReplacementAssetForPed(ped, weaponType, true);
     if (!asset || asset->dffPath.empty())

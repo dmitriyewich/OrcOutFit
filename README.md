@@ -54,7 +54,7 @@
 3. Запустите игру: рядом с ASI будет использован/создан `OrcOutFit.ini`.
 4. При необходимости задайте уровень лога в `[Features] DebugLogLevel`: `0` — в `OrcOutFit.log` ничего не пишется (включая ошибки), `1` — только ошибки, `2` — полный trace. Файл лога появляется рядом с INI при первой записи.
 
-При сборке из исходников: submodule `source/external/openal-soft` (тег **1.24.3**). Первая инициализация: `git submodule update --init --recursive`, затем [`.github/scripts/build-openal-soft.ps1`](.github/scripts/build-openal-soft.ps1) **или** обычный MSBuild `OrcOutFit.sln` Release|x86 (PreBuild соберёт OpenAL сам). Нужен **CMake** (компонент Visual Studio или отдельная установка). Статическая линковка — **LGPL**, `OpenAL32.dll` в игру класть не нужно; артефакт: `build/Release/OrcOutFit.asi`. Подробности — в правилах сборки репозитория (секция OpenAL Soft).
+При сборке из исходников: submodule `source/external/openal-soft` (тег **1.24.3**). Первая инициализация: `git submodule update --init --recursive`, затем [`.github/scripts/build-openal-soft.ps1`](.github/scripts/build-openal-soft.ps1) **или** обычный MSBuild `OrcOutFit.sln` Release|x86 (PreBuild соберёт OpenAL сам). Нужен **CMake** (компонент Visual Studio или отдельная установка). Статическая линковка — **LGPL**, `OpenAL32.dll` в игру класть не нужно; артефакт: `build/Release/OrcOutFit.asi`. Локальная Release-сборка также создаёт PDB рядом с ASI; GitHub Actions собирает без PDB. Подробности — в правилах сборки репозитория (секция OpenAL Soft).
 
 Сборка Lite: `msbuild OrcOutFit.sln "/p:Configuration=Release;Platform=x86;OrcEdition=Lite"` → `build/Release/OrcOutFitLite.asi` (без OpenAL; OpenAL submodule для Lite не нужен).
 

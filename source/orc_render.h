@@ -10,6 +10,7 @@ void OrcApplyAttachmentLightingForPed(CPed* ped, const CVector& sampleWorldPos, 
 bool OrcTryPedSetupLighting(CPed* ped);
 void OrcTryPedRemoveLighting(CPed* ped);
 void OrcTryRpClumpRender(RpClump* clump);
+RwFrame* OrcGetRwFrameParentSafe(RwFrame* frame);
 
 void OrcApplyAttachmentOffset(RwMatrix* m, float ox, float oy, float oz);
 void OrcRotateAttachmentMatrix(RwMatrix* m, float rx, float ry, float rz);

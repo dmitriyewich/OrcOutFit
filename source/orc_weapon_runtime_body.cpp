@@ -53,9 +53,7 @@ static bool OrcRwFrameIsDescendantOf(RwFrame* frame, RwFrame* ancestor) {
         return false;
     constexpr int kMaxAnc = 64;
     int steps = 0;
-    for (RwFrame* x = frame; x && steps < kMaxAnc;
-         x = reinterpret_cast<RwFrame*>(plugin::GetObjectParent(reinterpret_cast<RwObject*>(x))),
-            ++steps) {
+    for (RwFrame* x = frame; x && steps < kMaxAnc; x = OrcGetRwFrameParentSafe(x), ++steps) {
         if (x == ancestor)
             return true;
     }
