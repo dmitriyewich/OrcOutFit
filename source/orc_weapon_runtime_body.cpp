@@ -244,7 +244,7 @@ void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* 
     int curType = 0;
     if (curSlot < 13) curType = (int)ped->m_aWeapons[curSlot].m_eWeaponType;
     const int heldVisWt = (g_weaponReplacementEnabled && g_weaponReplacementInHands)
-        ? OrcResolveWeaponHeldVisualWeaponType(ped)
+        ? OrcResolveActiveHeldWeaponTypeForBodySuppression(ped)
         : 0;
     if (g_cfg.empty()) return;
     const int maxWt = (int)g_cfg.size();

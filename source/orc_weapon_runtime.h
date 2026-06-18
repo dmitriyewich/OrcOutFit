@@ -56,6 +56,8 @@ void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped, int wtHint = 0);
 void OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(CPed* ped, int wt);
 /// Same weapon-type resolution path as held replacement / Guns TXD (`m_aWeapons`, `m_nWeaponModelId`, saved weapon).
 int OrcResolveWeaponHeldVisualWeaponType(CPed* ped);
+/// Visual weapon type that is really in hands and may suppress body render; returns 0 for fists/stale saved weapon.
+int OrcResolveActiveHeldWeaponTypeForBodySuppression(CPed* ped);
 /// Не рисовать body-attachment для wt, который сейчас в руках (SA:MP: visWt может != curSlot).
 void OrcWeaponSuppressBodyForHeldVisualWeapon(CPed* ped, std::vector<char>* suppress);
 /// If ped slots read empty but Guns held clone exists (SA:MP), reuse its weapon type for HUD icon resolution.
