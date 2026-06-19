@@ -9,6 +9,7 @@
 #include "CModelInfo.h"
 #include "CBaseModelInfo.h"
 #include "CClumpModelInfo.h"
+#include "CTxdStore.h"
 #include "CVisibilityPlugins.h"
 #include "ePedState.h"
 #include "eModelInfoType.h"
@@ -38,16 +39,20 @@ struct PedNativeSkinState {
     std::string remapKey;
     std::string remapFallbackKey;
     int txdSlot = -1;
+    int baseTxdSlot = -1;
     RpClump* appliedClump = nullptr;
     bool failed = false;
     bool applyDeferred = false;
     bool restoreDeferred = false;
     bool overlayFallback = false;
+    bool baseTxdRefAdded = false;
     DWORD retryAfterMs = 0;
     DWORD lastLogMs = 0;
 };
 
-static std::unordered_map<int, PedNativeSkinState> g_nativeSkinStates;
+using NativeSkinStateMap = std::unordered_map<int, PedNativeSkinState>;
+
+static NativeSkinStateMap g_nativeSkinStates;
 static bool g_nativeSetModelInProgress = false;
 static bool g_nativeSetModelHookInstalled = false;
 static int g_nativeSetModelHookDepth = 0;
@@ -57,6 +62,8 @@ static constexpr uintptr_t kAddr_CPed_SetModelIndex = 0x5E4880;
 
 using CPedSetModelIndexFn = void(__thiscall*)(CPed*, unsigned int);
 static CPedSetModelIndexFn g_CPedSetModelIndex_Orig = nullptr;
+
+static void ReleaseNativeBaseTxdRef(PedNativeSkinState& state);
 
 static int NativePedKey(CPed* ped) {
     const int ref = OrcSafeGetPedRef(ped);
@@ -163,10 +170,12 @@ static void PruneNativeStates() {
     }
 
     for (auto it = g_nativeSkinStates.begin(); it != g_nativeSkinStates.end();) {
-        if (!it->second.ped || alive.find(it->second.ped) == alive.end())
+        if (!it->second.ped || alive.find(it->second.ped) == alive.end()) {
+            ReleaseNativeBaseTxdRef(it->second);
             it = g_nativeSkinStates.erase(it);
-        else
+        } else {
             ++it;
+        }
     }
 }
 
@@ -225,6 +234,113 @@ static void CallPedSetModelIndexOriginal(CPed* ped, unsigned int modelId) {
     }
 }
 
+static TxdDef* GetTxdDefByIndex(int txdIndex) {
+    if (txdIndex < 0 || !CTxdStore::ms_pTxdPool || !CTxdStore::ms_pTxdPool->m_pObjects)
+        return nullptr;
+    if (txdIndex >= CTxdStore::ms_pTxdPool->m_nSize)
+        return nullptr;
+    return CTxdStore::ms_pTxdPool->GetAt(txdIndex);
+}
+
+static RwTexDictionary* GetTxdDictionaryByIndex(int txdIndex) {
+    TxdDef* txd = GetTxdDefByIndex(txdIndex);
+    return txd ? txd->m_pRwDictionary : nullptr;
+}
+
+static void ReleaseNativeBaseTxdRef(PedNativeSkinState& state) {
+    if (!state.baseTxdRefAdded)
+        return;
+
+    const int txdSlot = state.baseTxdSlot;
+    state.baseTxdRefAdded = false;
+    state.baseTxdSlot = -1;
+
+    if (!GetTxdDefByIndex(txdSlot))
+        return;
+
+    __try {
+        CTxdStore::RemoveRef(txdSlot);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("native skin: base TXD ref release SEH ex=0x%08X txd=%d", GetExceptionCode(), txdSlot);
+    }
+}
+
+static NativeSkinStateMap::iterator EraseNativeState(NativeSkinStateMap::iterator it) {
+    if (it == g_nativeSkinStates.end())
+        return it;
+    ReleaseNativeBaseTxdRef(it->second);
+    return g_nativeSkinStates.erase(it);
+}
+
+static void EraseNativeStateByKey(int key) {
+    auto it = g_nativeSkinStates.find(key);
+    if (it != g_nativeSkinStates.end())
+        EraseNativeState(it);
+}
+
+static std::pair<NativeSkinStateMap::iterator, bool> ReplaceNativeState(int key, PedNativeSkinState&& state) {
+    auto existing = g_nativeSkinStates.find(key);
+    if (existing != g_nativeSkinStates.end())
+        ReleaseNativeBaseTxdRef(existing->second);
+    return g_nativeSkinStates.insert_or_assign(key, std::move(state));
+}
+
+static bool AcquireNativeBaseTxdRef(PedNativeSkinState& state, CBaseModelInfo* baseMi, int baseModelId) {
+    if (!baseMi)
+        return false;
+
+    const int txdSlot = baseMi->m_nTxdIndex;
+    if (txdSlot < 0) {
+        OrcLogError("native skin: base model has no TXD base=%d skin=%s", baseModelId, state.customName.c_str());
+        return false;
+    }
+
+    const bool hadDict = GetTxdDictionaryByIndex(txdSlot) != nullptr;
+    if (!hadDict) {
+        __try {
+            CStreaming::RequestTxdModel(txdSlot, GAME_REQUIRED);
+            CStreaming::LoadAllRequestedModels(false);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            OrcLogError("native skin: base TXD load SEH ex=0x%08X base=%d txd=%d skin=%s",
+                GetExceptionCode(),
+                baseModelId,
+                txdSlot,
+                state.customName.c_str());
+            return false;
+        }
+    }
+
+    if (!GetTxdDictionaryByIndex(txdSlot)) {
+        OrcLogError("native skin: base TXD dictionary unavailable base=%d txd=%d skin=%s",
+            baseModelId,
+            txdSlot,
+            state.customName.c_str());
+        return false;
+    }
+
+    __try {
+        CTxdStore::AddRef(txdSlot);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("native skin: base TXD AddRef SEH ex=0x%08X base=%d txd=%d skin=%s",
+            GetExceptionCode(),
+            baseModelId,
+            txdSlot,
+            state.customName.c_str());
+        return false;
+    }
+
+    state.baseTxdSlot = txdSlot;
+    state.baseTxdRefAdded = true;
+
+    if (!hadDict) {
+        OrcLogInfo("native skin: reloaded base TXD for anims base=%d txd=%d skin=%s",
+            baseModelId,
+            txdSlot,
+            state.customName.c_str());
+    }
+    return true;
+}
+
 static void FillNativeStateFromSkin(PedNativeSkinState& state, CPed* ped, int key, int baseModelId, const CustomSkinCfg& skin) {
     state.ped = ped;
     state.pedRef = key;
@@ -236,11 +352,9 @@ static void FillNativeStateFromSkin(PedNativeSkinState& state, CPed* ped, int ke
     state.txdSlot = skin.txdSlot;
 }
 
-static void StoreAppliedNativeState(CPed* ped, int key, int baseModelId, const CustomSkinCfg& skin, RpClump* clump) {
-    PedNativeSkinState state;
-    FillNativeStateFromSkin(state, ped, key, baseModelId, skin);
+static void StoreAppliedNativeState(PedNativeSkinState&& state, RpClump* clump) {
     state.appliedClump = clump;
-    g_nativeSkinStates.insert_or_assign(key, std::move(state));
+    ReplaceNativeState(state.pedRef, std::move(state));
 }
 
 static void MarkNativeFailure(CPed* ped,
@@ -255,7 +369,7 @@ static void MarkNativeFailure(CPed* ped,
     state.overlayFallback = overlayFallback && g_skinNativeFallback == SKIN_NATIVE_FALLBACK_OVERLAY;
     state.lastLogMs = GetTickCount();
     const bool usesOverlayFallback = state.overlayFallback;
-    g_nativeSkinStates.insert_or_assign(key, std::move(state));
+    ReplaceNativeState(key, std::move(state));
 
     OrcLogError("native skin: fallback=%s ped=%p base=%d skin=%s reason=%s",
         usesOverlayFallback ? "overlay" : "vanilla",
@@ -269,8 +383,8 @@ static void DeferNativeApply(CPed* ped, int key, int baseModelId, const CustomSk
     PedNativeSkinState state;
     auto existing = g_nativeSkinStates.find(key);
     if (existing != g_nativeSkinStates.end() && existing->second.ped == ped && !existing->second.appliedClump) {
-        state = std::move(existing->second);
-        g_nativeSkinStates.erase(existing);
+        state.lastLogMs = existing->second.lastLogMs;
+        EraseNativeState(existing);
     }
 
     FillNativeStateFromSkin(state, ped, key, baseModelId, skin);
@@ -281,21 +395,21 @@ static void DeferNativeApply(CPed* ped, int key, int baseModelId, const CustomSk
     state.overlayFallback = false;
     state.retryAfterMs = GetTickCount() + kNativeSkinRetryMs;
 
-    auto result = g_nativeSkinStates.insert_or_assign(key, std::move(state));
+    auto result = ReplaceNativeState(key, std::move(state));
     LogNativeSetModelDeferred(result.first->second, "apply");
 }
 
 static bool RestoreNativeState(int key, PedNativeSkinState& state) {
     if (!state.ped || state.baseModelId < 0) {
-        g_nativeSkinStates.erase(key);
+        EraseNativeStateByKey(key);
         return true;
     }
     if (state.failed || !state.appliedClump) {
-        g_nativeSkinStates.erase(key);
+        EraseNativeStateByKey(key);
         return true;
     }
     if (!IsPedAliveInPool(state.ped)) {
-        g_nativeSkinStates.erase(key);
+        EraseNativeStateByKey(key);
         return true;
     }
     if (IsNativeSetModelUnsafe(state.ped)) {
@@ -314,7 +428,7 @@ static bool RestoreNativeState(int key, PedNativeSkinState& state) {
     }
     g_nativeSetModelInProgress = false;
     OrcLogInfo("native skin restore: ped=%p base=%d skin=%s", state.ped, state.baseModelId, state.customName.c_str());
-    g_nativeSkinStates.erase(key);
+    EraseNativeStateByKey(key);
     return true;
 }
 
@@ -359,6 +473,13 @@ static bool ApplyNativeSkin(CPed* ped, int key, int baseModelId, CustomSkinCfg& 
         return false;
     }
 
+    PedNativeSkinState pendingState;
+    FillNativeStateFromSkin(pendingState, ped, key, baseModelId, skin);
+    if (!AcquireNativeBaseTxdRef(pendingState, baseMi, baseModelId)) {
+        MarkNativeFailure(ped, key, baseModelId, skin, "base TXD dictionary unavailable", true);
+        return false;
+    }
+
     RpClump* oldClump = ped->m_pRwClump;
     bool setOk = true;
     {
@@ -376,13 +497,14 @@ static bool ApplyNativeSkin(CPed* ped, int key, int baseModelId, CustomSkinCfg& 
 
     RpClump* newClump = ped->m_pRwClump;
     if (!setOk || !newClump || newClump == oldClump) {
+        ReleaseNativeBaseTxdRef(pendingState);
         MarkNativeFailure(ped, key, baseModelId, skin, setOk ? "SetModelIndex did not create custom clump" : "SetModelIndex failed", true);
         return false;
     }
 
     PreparePedClump(newClump, clumpMi);
 
-    StoreAppliedNativeState(ped, key, baseModelId, skin, newClump);
+    StoreAppliedNativeState(std::move(pendingState), newClump);
 
     OrcLogInfo("native skin apply: ped=%p base=%d custom=%s txd=%d clump=%p samp=%s",
         ped,
@@ -435,7 +557,7 @@ static void UpdateNativePed(CPed* ped, CPlayerPed* localPlayer) {
                 return;
             }
         }
-        g_nativeSkinStates.erase(it);
+        EraseNativeState(it);
     } else if (it != g_nativeSkinStates.end()) {
         if (!RestoreNativeState(key, it->second))
             return;
@@ -482,28 +604,45 @@ static void __fastcall CPedSetModelIndex_Detour(CPed* ped, void*, unsigned int m
             RpClump* templateClump = reinterpret_cast<RpClump*>(skin.rwObject);
             PreparePedClump(templateClump, clumpMi);
 
-            bool setOk = true;
-            {
-                ScopedModelInfoOverride scoped(baseMi, skin.rwObject, skin.txdSlot);
+            PedNativeSkinState pendingState;
+            FillNativeStateFromSkin(pendingState, ped, key, (int)modelId, skin);
+            if (!AcquireNativeBaseTxdRef(pendingState, baseMi, (int)modelId)) {
+                ReleaseNativeBaseTxdRef(pendingState);
+                MarkNativeFailure(ped, key, (int)modelId, skin, "base TXD dictionary unavailable in SetModelIndex hook", true);
+
                 g_nativeSetModelInProgress = true;
                 __try {
                     g_CPedSetModelIndex_Orig(ped, modelId);
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
-                    setOk = false;
-                    OrcLogError("native skin hook: SetModelIndex SEH ex=0x%08X ped=%p base=%u skin=%s",
+                    OrcLogError("native skin hook fallback: SetModelIndex SEH ex=0x%08X ped=%p base=%u skin=%s",
                         GetExceptionCode(), ped, modelId, skin.name.c_str());
                 }
                 g_nativeSetModelInProgress = false;
-            }
-
-            RpClump* newClump = ped ? ped->m_pRwClump : nullptr;
-            if (setOk && newClump) {
-                PreparePedClump(newClump, clumpMi);
-                StoreAppliedNativeState(ped, key, (int)modelId, skin, newClump);
-                OrcLogInfo("native skin hook apply: ped=%p base=%u custom=%s txd=%d clump=%p samp=%s",
-                    ped, modelId, skin.name.c_str(), skin.txdSlot, newClump, samp_bridge::GetVersionName());
             } else {
-                MarkNativeFailure(ped, key, (int)modelId, skin, setOk ? "SetModelIndex hook produced no clump" : "SetModelIndex hook failed", true);
+                bool setOk = true;
+                {
+                    ScopedModelInfoOverride scoped(baseMi, skin.rwObject, skin.txdSlot);
+                    g_nativeSetModelInProgress = true;
+                    __try {
+                        g_CPedSetModelIndex_Orig(ped, modelId);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        setOk = false;
+                        OrcLogError("native skin hook: SetModelIndex SEH ex=0x%08X ped=%p base=%u skin=%s",
+                            GetExceptionCode(), ped, modelId, skin.name.c_str());
+                    }
+                    g_nativeSetModelInProgress = false;
+                }
+
+                RpClump* newClump = ped ? ped->m_pRwClump : nullptr;
+                if (setOk && newClump) {
+                    PreparePedClump(newClump, clumpMi);
+                    StoreAppliedNativeState(std::move(pendingState), newClump);
+                    OrcLogInfo("native skin hook apply: ped=%p base=%u custom=%s txd=%d clump=%p samp=%s",
+                        ped, modelId, skin.name.c_str(), skin.txdSlot, newClump, samp_bridge::GetVersionName());
+                } else {
+                    ReleaseNativeBaseTxdRef(pendingState);
+                    MarkNativeFailure(ped, key, (int)modelId, skin, setOk ? "SetModelIndex hook produced no clump" : "SetModelIndex hook failed", true);
+                }
             }
             handled = true;
         }
@@ -573,7 +712,7 @@ void OrcSkinNativeOnPedSetModel(CPed* ped, int) {
         return;
     const int key = NativePedKey(ped);
     if (key)
-        g_nativeSkinStates.erase(key);
+        EraseNativeStateByKey(key);
 }
 
 void OrcSkinNativeClearRuntimeState() {
@@ -590,7 +729,7 @@ void OrcSkinNativeOnSkinAssetsReleased() {
     for (auto it = g_nativeSkinStates.begin(); it != g_nativeSkinStates.end();) {
         const PedNativeSkinState& state = it->second;
         if (state.failed || state.applyDeferred || !state.appliedClump)
-            it = g_nativeSkinStates.erase(it);
+            it = EraseNativeState(it);
         else
             ++it;
     }

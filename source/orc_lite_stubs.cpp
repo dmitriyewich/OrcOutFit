@@ -72,6 +72,7 @@ void OrcHeldPoseBeginSimFrame() {}
 void OrcHeldWeaponTraceGameProcessTick() {}
 void OrcWeaponSuppressBodyForHeldVisualWeapon(CPed*, std::vector<char>*) {}
 int  OrcResolveWeaponHeldVisualWeaponType(CPed*) { return -1; }
+int  OrcResolveActiveHeldWeaponTypeForBodySuppression(CPed*) { return 0; }
 int  OrcWeaponHudGetHeldReplacementWeaponTypeIfAny(CPed*) { return -1; }
 bool OrcGetHeldReplacementKeyForPed(CPed*, int, std::string&) { return false; }
 // OrcWeaponHudRefreshSampSpriteInterceptCache определён в orc_weapon_assets.cpp (KEEP) — не стабим.
