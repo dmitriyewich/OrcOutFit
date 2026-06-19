@@ -35,6 +35,7 @@
 #include "orc_log.h"
 #include "orc_path.h"
 #include "orc_render.h"
+#include "orc_skin_native.h"
 #include "orc_texture_remap.h"
 #include "orc_types.h"
 #include "samp_bridge.h"
@@ -188,21 +189,21 @@ static int PopRandomPoolVariant(SkinRandomPool& pool) {
     return pick;
 }
 
-static CustomSkinCfg* ResolveRandomSkinForPed(CPed* ped) {
+static CustomSkinCfg* ResolveRandomSkinForPedModel(CPed* ped, int modelId) {
     if (!g_skinRandomFromPools || !ped)
         return nullptr;
-    SkinRandomPool* pool = FindRandomPoolForModelId(ped->m_nModelIndex);
+    SkinRandomPool* pool = FindRandomPoolForModelId(modelId);
     if (!pool)
         return nullptr;
     const int n = (int)pool->variants.size();
     if (n <= 0)
         return nullptr;
     auto it = g_pedRandomSkinIdx.find(ped);
-    if (it == g_pedRandomSkinIdx.end() || it->second.modelId != (int)ped->m_nModelIndex ||
+    if (it == g_pedRandomSkinIdx.end() || it->second.modelId != modelId ||
         it->second.variant < 0 || it->second.variant >= n) {
         const int pick = PopRandomPoolVariant(*pool);
         if (pick < 0) return nullptr;
-        g_pedRandomSkinIdx[ped] = PedRandomSkinState{ (int)ped->m_nModelIndex, pick };
+        g_pedRandomSkinIdx[ped] = PedRandomSkinState{ modelId, pick };
         it = g_pedRandomSkinIdx.find(ped);
     }
     return &pool->variants[(size_t)it->second.variant];
@@ -258,7 +259,7 @@ static void DestroyAllRandomPoolSkins() {
     g_skinRandomPoolVariants = 0;
 }
 
-static bool EnsureCustomSkinLoaded(CustomSkinCfg& s) {
+bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s) {
     if (s.rwObject) return true;
     if (!OrcFileExistsA(s.dffPath.c_str())) {
         static std::unordered_set<std::string> s_once;
@@ -556,6 +557,10 @@ void SaveStandardSkinCfgToIni(const StandardSkinCfg& s) {
 
 void OrcAppendSkinFeatureIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "SkinMode", g_skinModeEnabled ? 1 : 0);
+    AddIniValue(values, "Features", "SkinCustomMode",
+        g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ? "overlay" : "native");
+    AddIniValue(values, "Features", "SkinNativeFallback",
+        g_skinNativeFallback == SKIN_NATIVE_FALLBACK_OVERLAY ? "overlay" : "vanilla");
     AddIniInt(values, "Features", "SkinHideBasePed", g_skinHideBasePed ? 1 : 0);
     AddIniInt(values, "Features", "SkinNickMode", g_skinNickMode ? 1 : 0);
     AddIniInt(values, "Features", "SkinLocalPreferSelected", g_skinLocalPreferSelected ? 1 : 0);
@@ -641,6 +646,7 @@ static void DiscoverRandomSkinPools() {
 }
 
 void DiscoverCustomSkins() {
+    OrcSkinNativeOnSkinAssetsReleased();
     for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
     g_customSkins.clear();
     InvalidateCustomSkinLookupCache();
@@ -820,14 +826,8 @@ static StandardSkinCfg* GetSelectedStandardSkin() {
     return OrcGetStandardSkinCfgByModelId(g_standardSkinSelectedModelId, true);
 }
 
-struct ResolvedPedSkin {
-    CustomSkinCfg* custom = nullptr;
-    StandardSkinCfg* standard = nullptr;
-    bool isLocalPed = false;
-};
-
-static ResolvedPedSkin ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
-    ResolvedPedSkin result;
+OrcResolvedPedSkin OrcResolveSkinForPedModel(CPed* ped, CPlayerPed* localPlayer, int baseModelId) {
+    OrcResolvedPedSkin result;
     if (!ped || (!g_skinModeEnabled && !g_skinRandomFromPools)) return result;
     CustomSkinCfg* selectedCustom = (g_skinModeEnabled && g_skinSelectedSource == SKIN_SELECTED_CUSTOM) ? GetSelectedSkin() : nullptr;
     StandardSkinCfg* selectedStandard = (g_skinModeEnabled && g_skinSelectedSource == SKIN_SELECTED_STANDARD) ? GetSelectedStandardSkin() : nullptr;
@@ -864,17 +864,21 @@ static ResolvedPedSkin ResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
     }
 
     if (isLocalByPtr) result.isLocalPed = true;
-    if (CustomSkinCfg* randomSkin = ResolveRandomSkinForPed(ped)) {
+    if (CustomSkinCfg* randomSkin = ResolveRandomSkinForPedModel(ped, baseModelId)) {
         result.custom = randomSkin;
         result.standard = nullptr;
     }
     return result;
 }
 
+OrcResolvedPedSkin OrcResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
+    return OrcResolveSkinForPedModel(ped, localPlayer, ped ? (int)ped->m_nModelIndex : -1);
+}
+
 static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
     if (!ped || !ped->m_pRwClump || !sel) return;
     RpClump* pedClump = ped->m_pRwClump;
-    if (!EnsureCustomSkinLoaded(*sel)) return;
+    if (!OrcEnsureCustomSkinLoaded(*sel)) return;
     if (!sel->rwObject || sel->rwObject->type != rpCLUMP) return;
     RpClump* clump = reinterpret_cast<RpClump*>(sel->rwObject);
     if (!clump) return;
@@ -968,17 +972,19 @@ void OrcSkinsRenderForPeds(CPlayerPed* localPlayer) {
     for (int i = 0; i < CPools::ms_pPedPool->m_nSize; i++) {
         CPed* ped = CPools::ms_pPedPool->GetAt(i);
         if (!ped || !ped->m_pRwClump) continue;
-        ResolvedPedSkin skin = ResolveSkinForPed(ped, localPlayer);
+        OrcResolvedPedSkin skin = OrcResolveSkinForPed(ped, localPlayer);
         if (!skin.custom && !skin.standard) continue;
-        if (skin.custom)
+        if (skin.custom && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
+            OrcSkinNativeShouldOverlayFallback(ped, skin.custom)))
             RenderSkinOnPed(ped, skin.custom, skin.isLocalPed);
-        else
+        else if (skin.standard)
             RenderStandardSkinOnPed(ped, skin.standard, skin.isLocalPed);
         if (skin.isLocalPed) localDone = true;
     }
     if (!localDone) {
-        ResolvedPedSkin skin = ResolveSkinForPed(localPlayer, localPlayer);
-        if (skin.custom)
+        OrcResolvedPedSkin skin = OrcResolveSkinForPed(localPlayer, localPlayer);
+        if (skin.custom && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
+            OrcSkinNativeShouldOverlayFallback(localPlayer, skin.custom)))
             RenderSkinOnPed(localPlayer, skin.custom, true);
         else if (skin.standard)
             RenderStandardSkinOnPed(localPlayer, skin.standard, true);
@@ -996,10 +1002,14 @@ void OrcSkinsOnPedRenderBefore(CPed* ped) {
     if ((!g_skinModeEnabled && !g_skinRandomFromPools) || !g_skinHideBasePed) return;
     CPlayerPed* player = FindPlayerPed(0);
     if (!ped || !ped->m_pRwClump) return;
-    ResolvedPedSkin skin = ResolveSkinForPed(ped, player);
+    OrcResolvedPedSkin skin = OrcResolveSkinForPed(ped, player);
     if (!skin.custom && !skin.standard) return;
     if (skin.custom) {
-        if (!EnsureCustomSkinLoaded(*skin.custom)) return;
+        if (g_skinCustomMode != SKIN_CUSTOM_MODE_OVERLAY &&
+            !OrcSkinNativeShouldOverlayFallback(ped, skin.custom)) {
+            return;
+        }
+        if (!OrcEnsureCustomSkinLoaded(*skin.custom)) return;
     } else {
         if (!EnsureStandardSkinLoaded(*skin.standard)) return;
     }
@@ -1034,6 +1044,7 @@ void OrcSkinsOnPedRenderAfter(CPed* ped) {
 }
 
 void OrcSkinsReleaseAllInstancesAndPreview() {
+    OrcSkinNativeOnSkinAssetsReleased();
     OrcSkinsDestroyPreview();
     for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
     for (auto& s : g_standardSkins) DestroyStandardSkinInstance(s);
@@ -1041,6 +1052,7 @@ void OrcSkinsReleaseAllInstancesAndPreview() {
 }
 
 void OrcSkinsShutdown() {
+    OrcSkinNativeOnSkinAssetsReleased();
     OrcSkinsDestroyPreview();
     g_hideSnapshotValid = false;
     g_hiddenPed = nullptr;

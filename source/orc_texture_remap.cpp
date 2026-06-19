@@ -32,6 +32,7 @@
 #include "orc_ini.h"
 #include "orc_ini_cache.h"
 #include "orc_log.h"
+#include "orc_skin_native.h"
 #include "orc_weapon_assets.h"
 #include "samp_bridge.h"
 #include "external/MinHook/include/MinHook.h"
@@ -1027,6 +1028,20 @@ static PedTextureRemapState* EnsureClumpTextureRemapState(
     return &inserted.first->second;
 }
 
+static PedTextureRemapState* EnsureActiveTextureRemapState(CPed* ped, bool forceRescan = false) {
+    OrcNativeSkinActiveInfo nativeInfo;
+    if (OrcSkinNativeGetActiveInfo(ped, nativeInfo)) {
+        return EnsureClumpTextureRemapState(
+            ped,
+            nativeInfo.clump,
+            nativeInfo.dffName,
+            nativeInfo.fallbackDffName,
+            nativeInfo.txdSlot,
+            forceRescan);
+    }
+    return EnsurePedTextureRemapState(ped, forceRescan);
+}
+
 static void FillTextureRemapPedInfo(const PedTextureRemapState& state, TextureRemapPedInfo& out) {
     out = TextureRemapPedInfo{};
     out.modelId = state.modelId;
@@ -1056,6 +1071,14 @@ void OrcCollectPedTextureRemapStats(std::vector<TextureRemapPedInfo>& out) {
         FillTextureRemapPedInfo(state, info);
         out.push_back(std::move(info));
     }
+    for (const auto& kv : g_clumpTextureRemaps) {
+        const PedTextureRemapState& state = kv.second;
+        if (!state.scanned || state.totalRemapTextures <= 0)
+            continue;
+        TextureRemapPedInfo info;
+        FillTextureRemapPedInfo(state, info);
+        out.push_back(std::move(info));
+    }
     std::sort(out.begin(), out.end(), [](const TextureRemapPedInfo& a, const TextureRemapPedInfo& b) {
         return a.modelId < b.modelId;
     });
@@ -1067,7 +1090,7 @@ bool OrcGetLocalPedTextureRemaps(TextureRemapPedInfo& out) {
         out = TextureRemapPedInfo{};
         return false;
     }
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state) {
         out = TextureRemapPedInfo{};
         return false;
@@ -1078,7 +1101,7 @@ bool OrcGetLocalPedTextureRemaps(TextureRemapPedInfo& out) {
 
 bool OrcSetLocalPedTextureRemap(int slot, int remap) {
     CPlayerPed* ped = FindPlayerPed(0);
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state || slot < 0 || slot >= state->slotCount)
         return false;
     TextureRemapSlotState& s = state->slots[(size_t)slot];
@@ -1087,7 +1110,7 @@ bool OrcSetLocalPedTextureRemap(int slot, int remap) {
 
 bool OrcRandomizeLocalPedTextureRemaps() {
     CPlayerPed* ped = FindPlayerPed(0);
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, true);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, true);
     if (!state || state->totalRemapTextures <= 0)
         return false;
     SelectRandomTextureRemaps(*state);
@@ -1096,7 +1119,7 @@ bool OrcRandomizeLocalPedTextureRemaps() {
 
 bool OrcSetAllLocalPedTextureRemaps(int remap) {
     CPlayerPed* ped = FindPlayerPed(0);
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state)
         return false;
     bool ok = true;
@@ -1115,7 +1138,7 @@ void OrcReloadTextureRemapNickBindings() {
 void OrcCollectLocalPedTextureRemapNickBindings(std::vector<TextureRemapNickBindingInfo>& out) {
     out.clear();
     CPlayerPed* ped = FindPlayerPed(0);
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state)
         return;
 
@@ -1143,7 +1166,7 @@ bool OrcSaveLocalPedTextureRemapNickBinding(const char* nickCsv) {
         return false;
 
     CPlayerPed* ped = FindPlayerPed(0);
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state || state->slotCount <= 0)
         return false;
 
@@ -1191,7 +1214,7 @@ bool OrcSaveLocalPedTextureRemapNickBinding(const char* nickCsv) {
 
 bool OrcDeleteLocalPedTextureRemapNickBinding(int bindingId) {
     CPlayerPed* ped = FindPlayerPed(0);
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state || bindingId < 0)
         return false;
 
@@ -1241,7 +1264,7 @@ static RpAtomic* TextureRemapApplyAtomicCB(RpAtomic* atomic, void* data) {
 void OrcTextureRemapApplyBefore(CPed* ped) {
     if (!g_enabled || !g_skinTextureRemapEnabled || !ped || !ped->m_pRwClump)
         return;
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state || state->slotCount <= 0 || (state->totalRemapTextures <= 0 && state->totalAutoNickTextures <= 0))
         return;
     ApplyTextureRemapNickBinding(ped, *state);
@@ -1332,14 +1355,14 @@ void OrcTextureRemapOnPedSetModel(CPed* ped, int) {
 }
 
 extern "C" int32_t __declspec(dllexport) Ext_GetPedRemap(CPed* ped, int index) {
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state || index < 0 || index >= state->slotCount)
         return -1;
     return state->slots[(size_t)index].selected;
 }
 
 extern "C" void __declspec(dllexport) Ext_SetPedRemap(CPed* ped, int index, int num) {
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state || index < 0 || index >= state->slotCount)
         return;
     TextureRemapSlotState& s = state->slots[(size_t)index];
@@ -1347,7 +1370,7 @@ extern "C" void __declspec(dllexport) Ext_SetPedRemap(CPed* ped, int index, int 
 }
 
 extern "C" void __declspec(dllexport) Ext_SetAllPedRemaps(CPed* ped, int num) {
-    PedTextureRemapState* state = EnsurePedTextureRemapState(ped, false);
+    PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state)
         return;
     for (int i = 0; i < state->slotCount; ++i) {

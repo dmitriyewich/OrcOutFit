@@ -87,6 +87,12 @@
     X(RenderCustomObjects, "Показывать кастомные объекты (папка Objects)", "Render custom objects (Objects folder)") \
     X(RenderStandardObjects, "Показывать стандартные объекты (ID игры)", "Render standard objects (game IDs)") \
     X(SkinMode, "Режим overlay-скинов", "Overlay skin mode") \
+    X(SkinCustomMode, "Кастомные скины: режим", "Custom skins: mode") \
+    X(SkinCustomModeNative, "Native replacement", "Native replacement") \
+    X(SkinCustomModeOverlay, "Overlay legacy", "Overlay legacy") \
+    X(SkinNativeFallback, "Native fallback", "Native fallback") \
+    X(SkinNativeFallbackVanilla, "Vanilla ped", "Vanilla ped") \
+    X(SkinNativeFallbackOverlay, "Overlay legacy", "Overlay legacy") \
     X(SkinHideBasePed, "Скин: скрывать базового ped", "Skin: hide base ped") \
     X(UnsupportedSampNickBinding, "Неподдерживаемая сборка SA:MP - привязка по нику неактивна (режим SP).", "Unsupported SA:MP build - nick binding inactive (SP mode).") \
     X(SkinNickBinding, "Скин: привязка по нику (SA:MP)", "Skin: nick binding (SA:MP)") \

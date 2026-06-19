@@ -617,7 +617,41 @@ void OrcUiDraw() {
             OrcUiCheckbox("render_standard_objects", T(OrcTextId::RenderStandardObjects), &g_renderStandardObjects);
 #ifndef ORC_LITE
             OrcUiCheckbox("skin_mode", T(OrcTextId::SkinMode), &g_skinModeEnabled);
+            const OrcTextId skinModeLabels[] = { OrcTextId::SkinCustomModeNative, OrcTextId::SkinCustomModeOverlay };
+            if (g_skinCustomMode < SKIN_CUSTOM_MODE_NATIVE || g_skinCustomMode > SKIN_CUSTOM_MODE_OVERLAY)
+                g_skinCustomMode = SKIN_CUSTOM_MODE_NATIVE;
+            if (OrcUiBeginControlRow("skin_custom_mode", T(OrcTextId::SkinCustomMode))) {
+                if (ImGui::BeginCombo("##value", T(skinModeLabels[g_skinCustomMode]))) {
+                    for (int i = SKIN_CUSTOM_MODE_NATIVE; i <= SKIN_CUSTOM_MODE_OVERLAY; ++i) {
+                        if (ImGui::Selectable(T(skinModeLabels[i]), g_skinCustomMode == i)) {
+                            g_skinCustomMode = i;
+                            OrcUiSaveMainIniDebounced();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                OrcUiEndControlRow();
+            }
+            const OrcTextId fallbackLabels[] = { OrcTextId::SkinNativeFallbackVanilla, OrcTextId::SkinNativeFallbackOverlay };
+            if (g_skinNativeFallback < SKIN_NATIVE_FALLBACK_VANILLA || g_skinNativeFallback > SKIN_NATIVE_FALLBACK_OVERLAY)
+                g_skinNativeFallback = SKIN_NATIVE_FALLBACK_VANILLA;
+            ImGui::BeginDisabled(g_skinCustomMode != SKIN_CUSTOM_MODE_NATIVE);
+            if (OrcUiBeginControlRow("skin_native_fallback", T(OrcTextId::SkinNativeFallback))) {
+                if (ImGui::BeginCombo("##value", T(fallbackLabels[g_skinNativeFallback]))) {
+                    for (int i = SKIN_NATIVE_FALLBACK_VANILLA; i <= SKIN_NATIVE_FALLBACK_OVERLAY; ++i) {
+                        if (ImGui::Selectable(T(fallbackLabels[i]), g_skinNativeFallback == i)) {
+                            g_skinNativeFallback = i;
+                            OrcUiSaveMainIniDebounced();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                OrcUiEndControlRow();
+            }
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(g_skinCustomMode == SKIN_CUSTOM_MODE_NATIVE);
             OrcUiCheckbox("skin_hide_base_ped", T(OrcTextId::SkinHideBasePed), &g_skinHideBasePed);
+            ImGui::EndDisabled();
             const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
             if (sampNickUiOff)
                 ImGui::TextWrapped("%s", T(OrcTextId::UnsupportedSampNickBinding));

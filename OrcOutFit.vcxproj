@@ -133,6 +133,7 @@
     <ClCompile Include="source\main.cpp" />
     <ClCompile Include="source\orc_objects.cpp" />
     <ClCompile Include="source\orc_skins.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_skin_native.cpp" Condition="'$(OrcEdition)'!='Lite'" />
     <ClCompile Include="source\orc_attach.cpp" />
     <ClCompile Include="source\orc_path.cpp" />
     <ClCompile Include="source\orc_ped_index.cpp" />

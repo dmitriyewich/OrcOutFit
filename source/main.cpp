@@ -53,6 +53,7 @@
 #include "orc_ui.h"
 #include "orc_weapons_ui.h"
 #include "orc_texture_remap.h"
+#include "orc_skin_native.h"
 #include "orc_weapon_audio.h"
 #include "orc_weapon_audio_config.h"
 #include "orc_render.h"
@@ -405,6 +406,8 @@ static void InitWeaponTypesAndStorage() {
     }
 }
 bool g_skinModeEnabled = false;
+int g_skinCustomMode = SKIN_CUSTOM_MODE_NATIVE;
+int g_skinNativeFallback = SKIN_NATIVE_FALLBACK_VANILLA;
 bool g_skinHideBasePed = true;
 bool g_skinNickMode = true;
 bool g_skinLocalPreferSelected = false;
@@ -706,6 +709,20 @@ static void NormalizeCommand() {
     if (g_toggleCommand[0] != '/') g_toggleCommand.insert(g_toggleCommand.begin(), '/');
 }
 
+static int ParseSkinCustomMode(const char* text) {
+    const std::string value = OrcToLowerAscii(std::string(text ? text : ""));
+    if (value == "overlay" || value == "legacy" || value == "1")
+        return SKIN_CUSTOM_MODE_OVERLAY;
+    return SKIN_CUSTOM_MODE_NATIVE;
+}
+
+static int ParseSkinNativeFallback(const char* text) {
+    const std::string value = OrcToLowerAscii(std::string(text ? text : ""));
+    if (value == "overlay" || value == "1")
+        return SKIN_NATIVE_FALLBACK_OVERLAY;
+    return SKIN_NATIVE_FALLBACK_VANILLA;
+}
+
 static void ToggleOverlayFromSamp() {
     overlay::Toggle();
 }
@@ -731,6 +748,8 @@ void LoadConfig() {
     const bool v_renderCustomObjects = ini.GetInt("Features", "CustomObjects", 1) != 0;
     const bool v_renderStandardObjects = ini.GetInt("Features", "StandardObjects", 1) != 0;
     const bool v_skinModeEnabled = ini.GetInt("Features", "SkinMode", 0) != 0;
+    const int v_skinCustomMode = ParseSkinCustomMode(ini.GetString("Features", "SkinCustomMode", "native").c_str());
+    const int v_skinNativeFallback = ParseSkinNativeFallback(ini.GetString("Features", "SkinNativeFallback", "vanilla").c_str());
     const bool v_skinHideBasePed = ini.GetInt("Features", "SkinHideBasePed", 1) != 0;
     const bool v_skinNickMode = ini.GetInt("Features", "SkinNickMode", 1) != 0;
     // По умолчанию 1: пресеты `Weapons\<выбранный скин>.ini` для локального игрока, иначе часто остаётся basename модели
@@ -842,6 +861,8 @@ void LoadConfig() {
     g_renderCustomObjects = v_renderCustomObjects;
     g_renderStandardObjects = v_renderStandardObjects;
     g_skinModeEnabled = v_skinModeEnabled;
+    g_skinCustomMode = v_skinCustomMode;
+    g_skinNativeFallback = v_skinNativeFallback;
     g_skinHideBasePed = v_skinHideBasePed;
     g_skinNickMode = v_skinNickMode;
     g_skinLocalPreferSelected = v_skinLocalPreferSelected;
@@ -1013,6 +1034,8 @@ static void SaveDefaultConfig() {
           "CustomWeaponSoundMaxAlternatives=10\n"
           "CustomWeaponSoundDistantGain=0.0\n"
           "SkinMode=0\n"
+          "SkinCustomMode=native\n"
+          "SkinNativeFallback=vanilla\n"
           "SkinHideBasePed=1\n"
           "SkinNickMode=1\n"
           "SkinLocalPreferSelected=1\n"
@@ -1810,6 +1833,8 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "CustomWeaponSoundMaxAlternatives=%d\n", g_weaponCustomSoundMaxAlternatives);
     AppendFormat(out, "CustomWeaponSoundDistantGain=%.2f\n", g_weaponCustomSoundDistantGain);
     AppendFormat(out, "SkinMode=%d\n", g_skinModeEnabled ? 1 : 0);
+    AppendFormat(out, "SkinCustomMode=%s\n", g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ? "overlay" : "native");
+    AppendFormat(out, "SkinNativeFallback=%s\n", g_skinNativeFallback == SKIN_NATIVE_FALLBACK_OVERLAY ? "overlay" : "vanilla");
     AppendFormat(out, "SkinHideBasePed=%d\n", g_skinHideBasePed ? 1 : 0);
     AppendFormat(out, "SkinNickMode=%d\n", g_skinNickMode ? 1 : 0);
     AppendFormat(out, "SkinLocalPreferSelected=%d\n", g_skinLocalPreferSelected ? 1 : 0);
@@ -2132,6 +2157,9 @@ static void SyncAndRender() {
         OrcDestroyAllHeldWeaponReplacementInstances();
         OrcRestoreWeaponTextureOverrides();
         OrcSkinsReleaseAllInstancesAndPreview();
+#ifndef ORC_LITE
+        OrcSkinNativeClearRuntimeState();
+#endif
         OrcObjectsReleaseAllInstances();
         OrcTextureRemapClearRuntimeState();
         return;
@@ -2144,6 +2172,9 @@ static void SyncAndRender() {
         OrcDestroyAllHeldWeaponReplacementInstances();
         OrcRestoreWeaponTextureOverrides();
         OrcSkinsReleaseAllInstancesAndPreview();
+#ifndef ORC_LITE
+        OrcSkinNativeClearRuntimeState();
+#endif
         OrcObjectsReleaseAllInstances();
         OrcTextureRemapClearRuntimeState();
         return;
@@ -2162,6 +2193,9 @@ static void SyncAndRender() {
     suppressPed.assign(g_cfg.size(), 0);
     std::vector<char> objectUsed;
     objectUsed.assign(g_customObjects.size(), 0);
+#ifndef ORC_LITE
+    OrcSkinNativeUpdateForPeds(player);
+#endif
     OrcObjectsBeginFrame();
     int active = 0;
     for (int i = 0; i < OrcWeaponSlotMax; i++) if (g_rendered[i].active) active++;
@@ -2282,7 +2316,7 @@ static void OnDrawingEvent() {
             SetupDefaults();
             SaveDefaultConfig();
             LoadConfig();
-            OrcLogInfo("session start: skin path SetupLighting+ApplyAttachment+RemoveLighting");
+            OrcLogInfo("session start: skin path native SetModelIndex + overlay fallback");
             OrcLogInfo("paths logfile=%s inifile=%s", OrcLogGetPath(), g_iniPath);
             DiscoverCustomObjectsAndEnsureIni();
             LoadStandardObjectsFromIni();
@@ -2381,6 +2415,7 @@ public:
 #ifndef ORC_LITE
         Events::processScriptsEvent += &OrcTextureRemapOnProcessScripts;
         Events::pedSetModelEvent += &OrcTextureRemapOnPedSetModel;
+        Events::pedSetModelEvent += &OrcSkinNativeOnPedSetModel;
 #endif
         Events::pedRenderEvent.before += &OnPedRenderBefore;
         Events::pedRenderEvent.after += &OnPedRenderAfter;
@@ -2410,6 +2445,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         OrcWeaponEnsureFireFxHooksInstalled();
         OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
         OrcTextureRemapInstallHooks();
+        OrcSkinNativeInstallHooks();
         OrcWeaponAudioSetPluginModule(module);
         OrcWeaponAudioEnsureHooksInstalled();
 #else

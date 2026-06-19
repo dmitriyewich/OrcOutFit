@@ -113,6 +113,8 @@ extern std::string g_livePreviewStandardObjectSkinDff;
 extern CustomObjectSkinParams g_livePreviewStandardObjectParams;
 
 extern bool g_skinModeEnabled;
+extern int g_skinCustomMode;
+extern int g_skinNativeFallback;
 extern bool g_skinHideBasePed;
 extern bool g_skinNickMode;
 extern bool g_skinLocalPreferSelected;
@@ -134,6 +136,14 @@ extern std::vector<std::string> g_pedModelNameById;
 bool OrcIsValidStandardSkinModel(int modelId);
 void OrcAppendSkinFeatureIniValues(std::vector<OrcIniValue>& values);
 void OrcAppendSkinModeIniValues(std::vector<OrcIniValue>& values);
+struct OrcResolvedPedSkin {
+    CustomSkinCfg* custom = nullptr;
+    StandardSkinCfg* standard = nullptr;
+    bool isLocalPed = false;
+};
+OrcResolvedPedSkin OrcResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer);
+OrcResolvedPedSkin OrcResolveSkinForPedModel(CPed* ped, CPlayerPed* localPlayer, int baseModelId);
+bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s);
 void OrcSkinsRenderForPeds(CPlayerPed* localPlayer);
 void OrcSkinsReleaseAllInstancesAndPreview();
 bool OrcSkinsLocalSelectionAddsActiveWork();

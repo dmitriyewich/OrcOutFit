@@ -108,6 +108,16 @@ enum SkinSelectedSource {
     SKIN_SELECTED_STANDARD = 1,
 };
 
+enum SkinCustomMode {
+    SKIN_CUSTOM_MODE_NATIVE = 0,
+    SKIN_CUSTOM_MODE_OVERLAY = 1,
+};
+
+enum SkinNativeFallback {
+    SKIN_NATIVE_FALLBACK_VANILLA = 0,
+    SKIN_NATIVE_FALLBACK_OVERLAY = 1,
+};
+
 struct TextureRemapSlotInfo {
     std::string originalName;
     std::vector<std::string> remapNames;
