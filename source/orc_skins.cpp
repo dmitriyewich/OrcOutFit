@@ -34,6 +34,7 @@
 #include "orc_ini_cache.h"
 #include "orc_log.h"
 #include "orc_path.h"
+#include "orc_random_pick.h"
 #include "orc_render.h"
 #include "orc_skin_native.h"
 #include "orc_texture_remap.h"
@@ -123,18 +124,39 @@ struct SkinRandomPool {
     std::string folderName;
     std::vector<CustomSkinCfg> variants;
     std::vector<int> shuffleBag;
+    std::vector<int> sequentialPool;
+    OrcSequentialPickState sequentialState;
+    std::unordered_map<std::string, int> sequentialAssignments;
 };
 
 static std::vector<SkinRandomPool> g_skinRandomPools;
 struct PedRandomSkinState {
     int modelId = -1;
     int variant = -1;
+    std::string sequentialChoiceKey;
 };
 static std::unordered_map<CPed*, PedRandomSkinState> g_pedRandomSkinIdx;
 
 static void DestroyCustomSkinInstance(CustomSkinCfg& s);
 static void DestroyStandardSkinInstance(StandardSkinCfg& s);
 static void DestroyAllRandomPoolSkins();
+static SkinRandomPool* FindRandomPoolForModelId(int modelId);
+
+static std::string SkinRandomChoiceKeyForPed(CPed* ped) {
+    const int ref = OrcSafeGetPedRef(ped);
+    if (ref > 0)
+        return "r:" + std::to_string(ref);
+    return "p:" + std::to_string(reinterpret_cast<uintptr_t>(ped));
+}
+
+static void ReleasePedRandomSkinSequentialChoice(const PedRandomSkinState& state) {
+    if (state.sequentialChoiceKey.empty())
+        return;
+    SkinRandomPool* pool = FindRandomPoolForModelId(state.modelId);
+    if (!pool)
+        return;
+    OrcSequentialEraseChoice(pool->sequentialState, pool->sequentialAssignments, state.sequentialChoiceKey);
+}
 
 static void PrunePedRandomSkinMap() {
     std::unordered_set<CPed*> alive;
@@ -145,10 +167,12 @@ static void PrunePedRandomSkinMap() {
         }
     }
     for (auto it = g_pedRandomSkinIdx.begin(); it != g_pedRandomSkinIdx.end();) {
-        if (alive.find(it->first) == alive.end())
+        if (alive.find(it->first) == alive.end()) {
+            ReleasePedRandomSkinSequentialChoice(it->second);
             it = g_pedRandomSkinIdx.erase(it);
-        else
+        } else {
             ++it;
+        }
     }
 }
 
@@ -189,6 +213,20 @@ static int PopRandomPoolVariant(SkinRandomPool& pool) {
     return pick;
 }
 
+static int PickSequentialPoolVariant(SkinRandomPool& pool, CPed* ped) {
+    if (pool.sequentialPool.empty()) {
+        const int n = (int)pool.variants.size();
+        if (n <= 0)
+            return -1;
+        pool.sequentialPool.reserve((size_t)n);
+        for (int i = 0; i < n; ++i)
+            pool.sequentialPool.push_back(i);
+    }
+
+    const std::string choiceKey = SkinRandomChoiceKeyForPed(ped);
+    return OrcSequentialPickSticky(pool.sequentialState, pool.sequentialAssignments, choiceKey, pool.sequentialPool, -1);
+}
+
 static CustomSkinCfg* ResolveRandomSkinForPedModel(CPed* ped, int modelId) {
     if (!g_skinRandomFromPools || !ped)
         return nullptr;
@@ -199,11 +237,28 @@ static CustomSkinCfg* ResolveRandomSkinForPedModel(CPed* ped, int modelId) {
     if (n <= 0)
         return nullptr;
     auto it = g_pedRandomSkinIdx.find(ped);
-    if (it == g_pedRandomSkinIdx.end() || it->second.modelId != modelId ||
-        it->second.variant < 0 || it->second.variant >= n) {
-        const int pick = PopRandomPoolVariant(*pool);
+    if (it != g_pedRandomSkinIdx.end() &&
+        (it->second.modelId != modelId || it->second.variant < 0 || it->second.variant >= n)) {
+        ReleasePedRandomSkinSequentialChoice(it->second);
+        g_pedRandomSkinIdx.erase(it);
+        it = g_pedRandomSkinIdx.end();
+    }
+    if (it != g_pedRandomSkinIdx.end() &&
+        g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL &&
+        it->second.sequentialChoiceKey.empty()) {
+        g_pedRandomSkinIdx.erase(it);
+        it = g_pedRandomSkinIdx.end();
+    }
+    if (it == g_pedRandomSkinIdx.end()) {
+        const bool sequential = g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL;
+        const int pick = sequential ? PickSequentialPoolVariant(*pool, ped) : PopRandomPoolVariant(*pool);
         if (pick < 0) return nullptr;
-        g_pedRandomSkinIdx[ped] = PedRandomSkinState{ modelId, pick };
+        PedRandomSkinState state;
+        state.modelId = modelId;
+        state.variant = pick;
+        if (sequential)
+            state.sequentialChoiceKey = SkinRandomChoiceKeyForPed(ped);
+        g_pedRandomSkinIdx[ped] = std::move(state);
         it = g_pedRandomSkinIdx.find(ped);
     }
     return &pool->variants[(size_t)it->second.variant];
@@ -568,6 +623,8 @@ void OrcAppendSkinFeatureIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "SkinTextureRemapNickMode", g_skinTextureRemapNickMode ? 1 : 0);
     AddIniInt(values, "Features", "SkinTextureRemapAutoNickMode", g_skinTextureRemapAutoNickMode ? 1 : 0);
     AddIniInt(values, "Features", "SkinTextureRemapRandomMode", g_skinTextureRemapRandomMode);
+    AddIniValue(values, "Features", "SkinTextureRemapPickMode",
+        g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random");
 }
 
 void OrcAppendSkinModeIniValues(std::vector<OrcIniValue>& values) {
@@ -575,6 +632,8 @@ void OrcAppendSkinModeIniValues(std::vector<OrcIniValue>& values) {
     AddIniValue(values, "SkinMode", "SelectedSource", g_skinSelectedSource == SKIN_SELECTED_STANDARD ? "standard" : "custom");
     AddIniInt(values, "SkinMode", "StandardSelected", g_standardSkinSelectedModelId);
     AddIniInt(values, "SkinMode", "RandomFromPools", g_skinRandomFromPools ? 1 : 0);
+    AddIniValue(values, "SkinMode", "RandomPickMode",
+        g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random");
 }
 
 void SaveSkinModeIni() {
@@ -632,8 +691,15 @@ static void DiscoverRandomSkinPools() {
         } while (FindNextFileA(hf, &fileData));
         FindClose(hf);
 
-        if (!pool.variants.empty())
+        if (!pool.variants.empty()) {
+            std::sort(pool.variants.begin(), pool.variants.end(), [](const CustomSkinCfg& a, const CustomSkinCfg& b) {
+                return OrcToLowerAscii(a.name) < OrcToLowerAscii(b.name);
+            });
+            pool.sequentialPool.reserve(pool.variants.size());
+            for (int i = 0; i < (int)pool.variants.size(); ++i)
+                pool.sequentialPool.push_back(i);
             g_skinRandomPools.push_back(std::move(pool));
+        }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 
@@ -1052,7 +1118,7 @@ void OrcSkinsReleaseAllInstancesAndPreview() {
 }
 
 void OrcSkinsShutdown() {
-    OrcSkinNativeOnSkinAssetsReleased();
+    OrcSkinNativeShutdown();
     OrcSkinsDestroyPreview();
     g_hideSnapshotValid = false;
     g_hiddenPed = nullptr;

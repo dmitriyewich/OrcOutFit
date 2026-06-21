@@ -45,6 +45,31 @@ static const char* WT(OrcTextId id) {
     return OrcText(id);
 }
 
+static bool OrcWeaponUiComboRandomPickMode(const char* rowId, int* value) {
+    const OrcTextId optIds[] = { OrcTextId::RandomPickModeRandom, OrcTextId::RandomPickModeSequential };
+    int v = *value;
+    if (v != ORC_RANDOM_PICK_SEQUENTIAL)
+        v = ORC_RANDOM_PICK_RANDOM;
+    if (!OrcUiBeginControlRow(rowId, WT(OrcTextId::RandomPickMode)))
+        return false;
+    bool changed = false;
+    if (ImGui::BeginCombo("##value", WT(optIds[v]))) {
+        for (int i = ORC_RANDOM_PICK_RANDOM; i <= ORC_RANDOM_PICK_SEQUENTIAL; ++i) {
+            if (ImGui::Selectable(WT(optIds[i]), v == i)) {
+                if (v != i) {
+                    v = i;
+                    changed = true;
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    OrcUiEndControlRow();
+    if (changed)
+        *value = v;
+    return changed;
+}
+
 static int g_uiWeaponIdx = WEAPONTYPE_M4;
 static std::vector<WeaponCfg> g_uiWeapon1;
 static std::vector<WeaponCfg> g_uiWeapon2;
@@ -580,6 +605,7 @@ void OrcWeaponsUiDrawWeaponsTab() {
             OrcUiCheckbox("weapon_replacement_rand_vanilla",
                 WT(OrcTextId::WeaponReplacementRandomIncludeVanilla),
                 &g_weaponReplacementRandomIncludeVanilla);
+            OrcWeaponUiComboRandomPickMode("weapon_replacement_pick_mode", &g_weaponReplacementRandomPickMode);
             ImGui::TextWrapped("%s", WT(OrcTextId::WeaponReplacementRandomIncludeVanillaHint));
             ImGui::TextWrapped("%s", WT(OrcTextId::WeaponReplacementHint));
             WeaponReplacementStats stats = OrcGetWeaponReplacementStats();
@@ -641,6 +667,7 @@ void OrcWeaponsUiDrawWeaponsTab() {
             OrcUiCheckbox("weapon_texture_nick", WT(OrcTextId::WeaponTextureNickBinding), &g_weaponTextureNickMode);
             ImGui::EndDisabled();
             OrcUiCheckbox("weapon_texture_random", WT(OrcTextId::WeaponTextureRandomMode), &g_weaponTextureRandomMode);
+            OrcWeaponUiComboRandomPickMode("weapon_texture_pick_mode", &g_weaponTextureRandomPickMode);
             OrcUiCheckbox("weapon_texture_std_remap",
                 WT(OrcTextId::WeaponTextureStandardRemap),
                 &g_weaponTextureStandardRemap);

@@ -79,6 +79,11 @@ bool OrcWeaponAudioHasFireRelatedCustomAudio(const OrcWeaponAudioStemContext& ct
 bool OrcWeaponAudioShouldSuppressVanillaGun(class CAEWeaponAudioEntity* self);
 bool OrcWeaponAudioHasLoopCustomAudio(const OrcWeaponAudioStemContext& ctx);
 bool OrcWeaponAudioShouldSkipWeaponFireOneShot(int weaponType, const OrcWeaponAudioStemContext& ctx);
+bool OrcWeaponAudioIsLocalPlayerPed(CPed* ped);
+float OrcWeaponAudioLocalPedDistance(CPed* ped);
+bool OrcWeaponAudioIsBeyondMaxDistance(CPed* ped, float maxDist);
+float OrcWeaponAudioApplyDistanceCullGain(CPed* ped, float maxDist, float gain);
+OrcWeaponSpatial OrcWeaponAudioSpatialForPed(CPed* ped);
 
 void OrcWeaponAudioLoopsEnsureInstalled();
 void OrcWeaponAudioLoopsShutdown();
@@ -92,5 +97,4 @@ bool OrcWeaponAudioPedIsMinigunFiring(CPed* ped);
 bool OrcWeaponAudioPedWantsMinigunFireLoop(CPed* ped);
 void OrcWeaponAudioHooksClearShootThrottleState();
 
-float OrcWeaponAudioCamPedDistance(CPed* ped);
 bool OrcWeaponAudioIsInterior();

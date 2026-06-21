@@ -27,10 +27,10 @@
     X(TabWeaponSounds, "Звуки", "Sounds") \
     X(EnableCustomWeaponSounds, "Кастомные звуки оружия (OpenAL)", "Custom weapon sounds (OpenAL)") \
     X(CustomWeaponSoundGain, "Громкость (близко / loop)", "Volume (close / loop)") \
-    X(CustomWeaponSoundDistantThreshold, "Порог distant (м)", "Distant threshold (m)") \
+    X(CustomWeaponSoundDistantThreshold, "Порог distant от игрока (м)", "Distant threshold from player (m)") \
     X(CustomWeaponSoundMaxAlternatives, "Макс. альтернатив (_shootN)", "Max alternatives (_shootN)") \
     X(CustomWeaponSoundDistantGain, "Громкость distant", "Distant volume") \
-    X(WeaponSoundHint, "Файлы рядом с DFF замены: <stem>_suffix (приоритет над bare shoot.wav и т.п. в той же папке). Расширения .wav / .mp3 / .flac / .ogg. 3D: [WeaponAudio] и <stem>.audio (Class.Pitch). Слышишь только ты; стрелок — любой ped с той же заменой на этом клиенте (без сети в SA:MP). Нужны CustomWeaponSounds и замена оружия.", "Files beside the replacement DFF: <stem>_suffix (over bare shoot.wav etc. in the same folder). Extensions .wav / .mp3 / .flac / .ogg. 3D: [WeaponAudio] and <stem>.audio (Class.Pitch). Only you hear it; any ped with the same replacement on this client can trigger it (no SA:MP network sync). Requires custom sounds and weapon replacement.") \
+    X(WeaponSoundHint, "Файлы рядом с DFF замены: <stem>_suffix (приоритет над bare shoot.wav и т.п.). Локальный ped звучит как 2D, остальные ped — 3D из позиции ped; MaxDist отсекает слышимость. Расширения .wav / .mp3 / .flac / .ogg. Настройки: [WeaponAudio] и <stem>.audio.", "Files beside the replacement DFF: <stem>_suffix (over bare shoot.wav etc.). Local ped stays 2D; other peds play as 3D sources at ped position, with MaxDist culling. Extensions .wav / .mp3 / .flac / .ogg. Settings: [WeaponAudio] and <stem>.audio.") \
     X(WeaponSoundDistantGainHint, "0 — та же громкость, что «Громкость (близко / loop)».", "0 — same volume as «Volume (close / loop)».") \
     X(WeaponAudioEfxReverb, "Reverb (OpenAL EFX) для world-источников", "Reverb (OpenAL EFX) for world sources") \
     X(WeaponAudioEfxInteriorOnly, "Reverb только в интерьерах (currArea)", "Reverb in interiors only (currArea)") \
@@ -163,6 +163,9 @@
     X(EnableRandomSkins, "Включить рандомные скины", "Enable random skins") \
     X(RandomSkinPoolsFormat, "Пулов: %d, вариантов: %d", "Pools: %d, variants: %d") \
     X(RandomSkinPoolRowFormat, "%s: %d вариант(ов)", "%s: %d variant(s)") \
+    X(RandomPickMode, "Режим выбора", "Pick mode") \
+    X(RandomPickModeRandom, "Случайный", "Random") \
+    X(RandomPickModeSequential, "Последовательный", "Sequential") \
     X(SelectedSkinSource, "Источник выбранного overlay-скина", "Selected overlay skin source") \
     X(SelectedCustomSkin, "Кастомный скин", "Custom skin") \
     X(SelectedStandardSkin, "Стандартный скин", "Standard skin") \

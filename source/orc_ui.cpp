@@ -316,6 +316,31 @@ static bool OrcUiComboTrace012(const char* rowId, OrcTextId labelId, int* value)
     return changed;
 }
 
+static bool OrcUiComboRandomPickMode(const char* rowId, int* value) {
+    const OrcTextId optIds[] = { OrcTextId::RandomPickModeRandom, OrcTextId::RandomPickModeSequential };
+    int v = *value;
+    if (v != ORC_RANDOM_PICK_SEQUENTIAL)
+        v = ORC_RANDOM_PICK_RANDOM;
+    if (!OrcUiBeginControlRow(rowId, T(OrcTextId::RandomPickMode)))
+        return false;
+    bool changed = false;
+    if (ImGui::BeginCombo("##value", T(optIds[v]))) {
+        for (int i = ORC_RANDOM_PICK_RANDOM; i <= ORC_RANDOM_PICK_SEQUENTIAL; ++i) {
+            if (ImGui::Selectable(T(optIds[i]), v == i)) {
+                if (v != i) {
+                    v = i;
+                    changed = true;
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    OrcUiEndControlRow();
+    if (changed)
+        *value = v;
+    return changed;
+}
+
 static bool UiSliderFloat(const char* id, const char* label, float* value, float minValue, float maxValue, const char* format, ImGuiSliderFlags flags = 0) {
     UiBeginWideControl(id, label);
     const bool changed = ImGui::SliderFloat("##value", value, minValue, maxValue, format, flags);
@@ -1169,6 +1194,7 @@ void OrcUiDraw() {
 
                 if (ImGui::BeginTabItem(T(OrcTextId::TabRandomSkins))) {
                     OrcUiCheckbox("enable_random_skins", T(OrcTextId::EnableRandomSkins), &g_skinRandomFromPools);
+                    OrcUiComboRandomPickMode("random_skin_pick_mode", &g_skinRandomPickMode);
                     ImGui::TextWrapped("%s", T(OrcTextId::RandomSkinsHint));
                     ImGui::Text("%s", OrcFormat(OrcTextId::RandomSkinPoolsFormat, g_skinRandomPoolModels, g_skinRandomPoolVariants).c_str());
 
@@ -1203,6 +1229,7 @@ void OrcUiDraw() {
                     OrcUiCheckbox("texture_nick_binding", T(OrcTextId::TextureNickBinding), &g_skinTextureRemapNickMode);
                     OrcUiCheckbox("texture_auto_nick_binding", T(OrcTextId::TextureAutoNickBinding), &g_skinTextureRemapAutoNickMode);
                     ImGui::EndDisabled();
+                    OrcUiComboRandomPickMode("texture_pick_mode", &g_skinTextureRemapPickMode);
                     const OrcTextId randomModeNames[] = { OrcTextId::RandomModePerTexture, OrcTextId::RandomModeLinkedVariant };
                     if (g_skinTextureRemapRandomMode < TEXTURE_REMAP_RANDOM_PER_TEXTURE ||
                         g_skinTextureRemapRandomMode > TEXTURE_REMAP_RANDOM_LINKED_VARIANT) {

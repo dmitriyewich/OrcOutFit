@@ -325,7 +325,7 @@ static RwObject* OrcResolveActiveReplacementWeaponObject(CPed* ped) {
     if (!fp || ped != fp || !samp_bridge::IsSampBuildKnown())
         return nullptr;
     for (const auto& kv : g_heldWeaponReplacements) {
-        CPed* other = CPools::GetPed(kv.first);
+        CPed* other = OrcSafeGetPed(kv.first);
         if (!other)
             continue;
         if (CPools::GetPedRef(other) != kv.first)
@@ -416,7 +416,7 @@ RpClump* OrcPedResolveGunflashTargetClump(CPed* ped, int wtHint) {
     CPlayerPed* fp = FindPlayerPed(0);
     if (fp && ped != fp && samp_bridge::IsSampBuildKnown()) {
         for (const auto& kv : g_heldWeaponReplacements) {
-            CPed* owner = CPools::GetPed(kv.first);
+            CPed* owner = OrcSafeGetPed(kv.first);
             if (!owner)
                 continue;
             if (OrcSampMirrorReplacementOwnerPedRef(owner) != pedRef)
@@ -500,6 +500,10 @@ static void OrcRestoreDeferredHeldStockIfSlotStillHasClone(CPed* ped) {
 
 void OrcFlushDeferredHeldWeaponSlotRestore() {
     /// `pedRenderEvent.after` fires before GTA draws held `m_pWeaponObject`; restores here (EndScene/Present).
+    if (OrcIsRuntimeShuttingDown()) {
+        g_deferredHeldWeaponStockRestore.clear();
+        return;
+    }
     OrcRestoreWeaponHeldTextureOverrides();
     if (g_deferredHeldWeaponStockRestore.empty())
         return;
@@ -508,7 +512,7 @@ void OrcFlushDeferredHeldWeaponSlotRestore() {
         return;
     }
     for (auto& kv : g_deferredHeldWeaponStockRestore) {
-        CPed* ped = CPools::GetPed(kv.first);
+        CPed* ped = OrcSafeGetPed(kv.first);
         DeferredHeldWeaponSlotRestore& r = kv.second;
         if (ped && OrcDeferredHeldRestoreAppliesToCurrentSlot(ped, r)) {
             ped->m_pWeaponObject = r.stock;
@@ -2833,7 +2837,7 @@ static bool OrcHeldSuppressAndDrawDualSecondaryViaAtomicDefault(RpAtomic* atomic
     if (!atomic || !g_enabled || !g_weaponReplacementEnabled)
         return false;
     for (auto& kv : g_heldWeaponReplacements) {
-        CPed* ped = CPools::GetPed(kv.first);
+        CPed* ped = OrcSafeGetPed(kv.first);
         HeldWeaponReplacementState& st = kv.second;
         if (!ped || !st.rwObjectSecondary || st.weaponType <= 0)
             continue;
@@ -2921,6 +2925,9 @@ static void OrcHeldTryDrawDualSecondaryAfterStockClumpPass(CPed* ped, HeldWeapon
 }
 
 static RpClump* __cdecl RpClumpRender_Detour(RpClump* clump) {
+    if (OrcIsRuntimeShuttingDown())
+        return g_RpClumpRender_Orig ? g_RpClumpRender_Orig(clump) : nullptr;
+
     CPed* dualPassPed = nullptr;
     HeldWeaponReplacementState* dualPassState = nullptr;
     uint8_t dualPassNum = 0;
@@ -2939,7 +2946,7 @@ static RpClump* __cdecl RpClumpRender_Detour(RpClump* clump) {
                 HeldWeaponReplacementState& st = kv.second;
                 if (!st.rwObjectSecondary)
                     continue;
-                CPed* p = CPools::GetPed(kv.first);
+                CPed* p = OrcSafeGetPed(kv.first);
                 if (!p)
                     continue;
                 dualPassNum = OrcHeldBumpDualStockClumpPass(p, st, clump);
@@ -2965,6 +2972,9 @@ static RpClump* __cdecl RpClumpRender_Detour(RpClump* clump) {
 }
 
 static RpAtomic* __cdecl AtomicDefaultRenderCallBack_Detour(RpAtomic* atomic) {
+    if (OrcIsRuntimeShuttingDown())
+        return g_AtomicDefaultRender_Orig ? g_AtomicDefaultRender_Orig(atomic) : nullptr;
+
     if (s_renderingHeldReplacementClone)
         return g_AtomicDefaultRender_Orig ? g_AtomicDefaultRender_Orig(atomic) : nullptr;
     HeldRwcbFrameRestore restore{};
@@ -2991,6 +3001,11 @@ static RpAtomic* __cdecl AtomicDefaultRenderCallBack_Detour(RpAtomic* atomic) {
 }
 
 static void __cdecl RenderWeaponCB_Detour(RpAtomic* atomic) {
+    if (OrcIsRuntimeShuttingDown()) {
+        OrcCallRenderWeaponCbOrigSafe(atomic, "rwcb:shutdown");
+        return;
+    }
+
     if (s_renderingHeldReplacementClone) {
         if (g_AtomicDefaultRender_Orig)
             g_AtomicDefaultRender_Orig(atomic);
@@ -3101,6 +3116,9 @@ void OrcHeldWeaponTraceGameProcessTick() {
 }
 
 void OrcHeldPoseBeginSimFrame() {
+    if (OrcIsRuntimeShuttingDown())
+        return;
+
     ++s_heldPrepSimSerial;
     OrcHeldGunflashMuzzleDeltaResetForSimTick();
     s_heldPreRwDrawAppliedPedRefs.clear();
@@ -3128,11 +3146,17 @@ void OrcHeldPoseBeginSimFrame() {
 }
 
 static void __cdecl RenderWeaponPedsForPC_Detour() {
+    if (OrcIsRuntimeShuttingDown()) {
+        if (g_RenderWeaponPedsForPC_Orig)
+            g_RenderWeaponPedsForPC_Orig();
+        return;
+    }
+
     // Каждый вызов — батч RenderWeaponCB; сбрасываем кеш базы Held, чтобы каждый колбэк брал свежий IK-снимок
     // (ваниль может пересчитать матрицу между вызовами на один клумп).
     ++s_heldRwpfcBatchCounter;
     for (auto& kv : g_heldWeaponReplacements) {
-        CPed* p = CPools::GetPed(kv.first);
+        CPed* p = OrcSafeGetPed(kv.first);
         if (!p || kv.second.weaponType <= 0)
             continue;
         if (OrcPedWantsDualWieldHeld(p, kv.second.weaponType)) {
@@ -3172,7 +3196,7 @@ static void OrcHeldTryDrawPendingDualSecondaryClonesAfterWeaponBatch() {
         HeldWeaponReplacementState& st = kv.second;
         if (!st.rwObjectSecondary || st.weaponType <= 0)
             continue;
-        CPed* ped = CPools::GetPed(kv.first);
+        CPed* ped = OrcSafeGetPed(kv.first);
         if (!ped || !OrcPedWantsDualWieldHeld(ped, st.weaponType))
             continue;
         RwObject* stockWo = OrcHeldResolveDualStockClumpForPed(ped, st);
@@ -3186,6 +3210,9 @@ static void OrcHeldTryDrawPendingDualSecondaryClonesAfterWeaponBatch() {
 }
 
 bool OrcApplyHeldWeaponPoseAdjust(CPed* ped) {
+    if (OrcIsRuntimeShuttingDown())
+        return false;
+
     if (!g_enabled) {
         OrcLogInfoThrottled(431, 5000u, "held pose: skip plugin disabled");
         return false;
@@ -3207,10 +3234,13 @@ bool OrcApplyHeldWeaponPoseAdjust(CPed* ped) {
 }
 
 void OrcDestroyAllHeldWeaponReplacementInstances() {
-    OrcFlushDeferredHeldWeaponSlotRestore();
+    if (!OrcIsRuntimeShuttingDown())
+        OrcFlushDeferredHeldWeaponSlotRestore();
+    else
+        g_deferredHeldWeaponStockRestore.clear();
     for (auto& kv : g_heldWeaponReplacements) {
         HeldWeaponReplacementState& st = kv.second;
-        CPed* ped = CPools::GetPed(kv.first);
+        CPed* ped = OrcSafeGetPed(kv.first);
         if (ped && st.originalObject) {
             const bool slotIsClone = st.rwObject && ped->m_pWeaponObject == st.rwObject;
             // Слот с клоном: восстанавливаем сток даже если `captureActive` уже false (окно между after и EndScene).
@@ -3233,6 +3263,10 @@ void OrcDestroyAllHeldWeaponReplacementInstances() {
 }
 
 void OrcPruneHeldWeaponReplacementInstances() {
+    if (OrcIsRuntimeShuttingDown()) {
+        OrcDestroyAllHeldWeaponReplacementInstances();
+        return;
+    }
     if (!CPools::ms_pPedPool) {
         OrcDestroyAllHeldWeaponReplacementInstances();
         return;

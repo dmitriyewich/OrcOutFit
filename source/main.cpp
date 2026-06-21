@@ -105,6 +105,7 @@ static void LogInit() {
 // Config: per-weapon attachment (типы и кости: orc_types.h)
 // ----------------------------------------------------------------------------
 bool g_enabled = true;
+bool g_orcRuntimeShuttingDown = false;
 bool g_renderAllPedsWeapons = false;
 bool g_renderAllPedsObjects = false;
 float g_renderAllPedsRadius = 80.0f;
@@ -121,9 +122,11 @@ bool g_weaponReplacementEnabled = true;
 bool g_weaponReplacementOnBody = true;
 bool g_weaponReplacementInHands = true;
 bool g_weaponReplacementRandomIncludeVanilla = false;
+int g_weaponReplacementRandomPickMode = ORC_RANDOM_PICK_RANDOM;
 bool g_weaponTexturesEnabled = true;
 bool g_weaponTextureNickMode = true;
 bool g_weaponTextureRandomMode = true;
+int g_weaponTextureRandomPickMode = ORC_RANDOM_PICK_RANDOM;
 bool g_weaponTextureStandardRemap = true;
 bool g_weaponHudIconFromGunsTxd = true;
 bool g_weaponCustomSounds = false;
@@ -138,6 +141,89 @@ int  g_heldWeaponTrace = 0;
 int  g_heldWeaponStatusIntervalMs = 10000;
 std::vector<WeaponCfg> g_cfg;
 std::vector<WeaponCfg> g_cfg2; // secondary dual-wield placement
+
+static constexpr uintptr_t kAddr_RwRasterDestroy = 0x7C6A10;
+static constexpr uintptr_t kAddr_RwRasterFreeList = 0xC978B8;
+static constexpr uintptr_t kAddr_HAnimDestructor = 0x7C4770;
+
+using RwRasterDestroyFn = RwBool(__cdecl*)(RwRaster*);
+using HAnimDestructorFn = void*(__cdecl*)(void*, int, int);
+static RwRasterDestroyFn g_RwRasterDestroy_Orig = nullptr;
+static HAnimDestructorFn g_HAnimDestructor_Orig = nullptr;
+static bool g_renderWareShutdownGuardsInstalled = false;
+
+static void* GetRwRasterFreeList() {
+    __try {
+        return *reinterpret_cast<void**>(kAddr_RwRasterFreeList);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+static RwBool __cdecl RwRasterDestroy_Detour(RwRaster* raster) {
+    if (g_orcRuntimeShuttingDown && raster && !GetRwRasterFreeList()) {
+        OrcLogInfoThrottled(511,
+            3000u,
+            "shutdown guard: skip late RwRasterDestroy raster=%p freeList=null",
+            static_cast<void*>(raster));
+        return TRUE;
+    }
+    return g_RwRasterDestroy_Orig ? g_RwRasterDestroy_Orig(raster) : FALSE;
+}
+
+static void* __cdecl HAnimDestructor_Detour(void* object, int offset, int size) {
+    if (g_orcRuntimeShuttingDown) {
+        OrcLogInfoThrottled(512,
+            3000u,
+            "shutdown guard: skip late HAnimDestructor object=%p offset=%d size=%d",
+            object,
+            offset,
+            size);
+        return object;
+    }
+    return g_HAnimDestructor_Orig ? g_HAnimDestructor_Orig(object, offset, size) : object;
+}
+
+static void EnsureRenderWareShutdownGuardsInstalled() {
+    if (g_renderWareShutdownGuardsInstalled)
+        return;
+    g_renderWareShutdownGuardsInstalled = true;
+
+    MH_STATUS st = MH_Initialize();
+    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
+        OrcLogError("shutdown guard: MH_Initialize -> %s", MH_StatusToString(st));
+        return;
+    }
+
+    st = MH_CreateHook(reinterpret_cast<void*>(kAddr_RwRasterDestroy),
+        reinterpret_cast<void*>(&RwRasterDestroy_Detour),
+        reinterpret_cast<void**>(&g_RwRasterDestroy_Orig));
+    if (st != MH_OK && st != MH_ERROR_ALREADY_CREATED) {
+        OrcLogError("shutdown guard: MH_CreateHook RwRasterDestroy -> %s", MH_StatusToString(st));
+        return;
+    }
+
+    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_RwRasterDestroy));
+    if (st != MH_OK && st != MH_ERROR_ENABLED)
+        OrcLogError("shutdown guard: MH_EnableHook RwRasterDestroy -> %s", MH_StatusToString(st));
+    else
+        OrcLogInfo("shutdown guard installed (RwRasterDestroy 0x%08X)", (unsigned)kAddr_RwRasterDestroy);
+
+    st = MH_CreateHook(reinterpret_cast<void*>(kAddr_HAnimDestructor),
+        reinterpret_cast<void*>(&HAnimDestructor_Detour),
+        reinterpret_cast<void**>(&g_HAnimDestructor_Orig));
+    if (st != MH_OK && st != MH_ERROR_ALREADY_CREATED) {
+        OrcLogError("shutdown guard: MH_CreateHook HAnimDestructor -> %s", MH_StatusToString(st));
+        return;
+    }
+
+    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_HAnimDestructor));
+    if (st != MH_OK && st != MH_ERROR_ENABLED)
+        OrcLogError("shutdown guard: MH_EnableHook HAnimDestructor -> %s", MH_StatusToString(st));
+    else
+        OrcLogInfo("shutdown guard installed (HAnimDestructor 0x%08X)", (unsigned)kAddr_HAnimDestructor);
+}
+
 bool g_livePreviewWeaponsActive = false;
 std::string g_livePreviewWeaponSkinDff;
 std::vector<WeaponCfg> g_livePreviewWeapon1;
@@ -415,7 +501,9 @@ bool g_skinTextureRemapEnabled = false;
 bool g_skinTextureRemapNickMode = true;
 bool g_skinTextureRemapAutoNickMode = true;
 int g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
+int g_skinTextureRemapPickMode = ORC_RANDOM_PICK_RANDOM;
 bool g_skinRandomFromPools = false;
+int g_skinRandomPickMode = ORC_RANDOM_PICK_RANDOM;
 int g_skinRandomPoolModels = 0;
 int g_skinRandomPoolVariants = 0;
 std::string g_skinSelectedName;
@@ -723,6 +811,17 @@ static int ParseSkinNativeFallback(const char* text) {
     return SKIN_NATIVE_FALLBACK_VANILLA;
 }
 
+static int ParseRandomPickMode(const char* text) {
+    const std::string value = OrcToLowerAscii(std::string(text ? text : ""));
+    if (value == "sequential" || value == "sequence" || value == "seq" || value == "1")
+        return ORC_RANDOM_PICK_SEQUENTIAL;
+    return ORC_RANDOM_PICK_RANDOM;
+}
+
+static const char* RandomPickModeToIni(int mode) {
+    return mode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random";
+}
+
 static void ToggleOverlayFromSamp() {
     overlay::Toggle();
 }
@@ -763,6 +862,8 @@ void LoadConfig() {
         v_skinTextureRemapRandomMode > TEXTURE_REMAP_RANDOM_LINKED_VARIANT) {
         v_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
     }
+    const int v_skinTextureRemapPickMode =
+        ParseRandomPickMode(ini.GetString("Features", "SkinTextureRemapPickMode", "random").c_str());
     const bool v_sampAllowActivationKey = ini.GetInt("Main", "SampAllowActivationKey", 0) != 0;
     const bool v_uiAutoScale = ini.GetInt("Main", "UiAutoScale", 0) != 0;
     const float v_uiScale = ClampConfigFloat(ReadIniFloat("Main", "UiScale", 1.0f, ini), 0.75f, 1.60f, 1.0f);
@@ -777,9 +878,13 @@ void LoadConfig() {
     const bool v_weaponReplacementInHands = ini.GetInt("Features", "WeaponReplacementInHands", 1) != 0;
     const bool v_weaponReplacementRandomIncludeVanilla =
         ini.GetInt("Features", "WeaponReplacementRandomIncludeVanilla", 0) != 0;
+    const int v_weaponReplacementRandomPickMode =
+        ParseRandomPickMode(ini.GetString("Features", "WeaponReplacementRandomPickMode", "random").c_str());
     const bool v_weaponTexturesEnabled = ini.GetInt("Features", "WeaponTextures", 1) != 0;
     const bool v_weaponTextureNickMode = ini.GetInt("Features", "WeaponTextureNickMode", 1) != 0;
     const bool v_weaponTextureRandomMode = ini.GetInt("Features", "WeaponTextureRandomMode", 1) != 0;
+    const int v_weaponTextureRandomPickMode =
+        ParseRandomPickMode(ini.GetString("Features", "WeaponTextureRandomPickMode", "random").c_str());
     const bool v_weaponTextureStandardRemap = ini.GetInt("Features", "WeaponTextureStandardRemap", 1) != 0;
     const bool v_weaponHudIconFromGunsTxd = ini.GetInt("Features", "WeaponHudIconFromGunsTxd", 1) != 0;
     const bool v_weaponCustomSounds = ini.GetInt("Features", "CustomWeaponSounds", 0) != 0;
@@ -840,6 +945,8 @@ void LoadConfig() {
     }
 
     const bool v_skinRandomFromPools = ini.GetInt("SkinMode", "RandomFromPools", 0) != 0;
+    const int v_skinRandomPickMode =
+        ParseRandomPickMode(ini.GetString("SkinMode", "RandomPickMode", "random").c_str());
     std::string v_skinSelectedName = ini.GetString("SkinMode", "Selected", "");
     const std::string selectedSource = ini.GetString("SkinMode", "SelectedSource", "custom");
     const int v_skinSelectedSource =
@@ -870,6 +977,7 @@ void LoadConfig() {
     g_skinTextureRemapNickMode = v_skinTextureRemapNickMode;
     g_skinTextureRemapAutoNickMode = v_skinTextureRemapAutoNickMode;
     g_skinTextureRemapRandomMode = v_skinTextureRemapRandomMode;
+    g_skinTextureRemapPickMode = v_skinTextureRemapPickMode;
     g_sampAllowActivationKey = v_sampAllowActivationKey;
     g_uiAutoScale = v_uiAutoScale;
     g_uiScale = v_uiScale;
@@ -882,9 +990,11 @@ void LoadConfig() {
     g_weaponReplacementOnBody = v_weaponReplacementOnBody;
     g_weaponReplacementInHands = v_weaponReplacementInHands;
     g_weaponReplacementRandomIncludeVanilla = v_weaponReplacementRandomIncludeVanilla;
+    g_weaponReplacementRandomPickMode = v_weaponReplacementRandomPickMode;
     g_weaponTexturesEnabled = v_weaponTexturesEnabled;
     g_weaponTextureNickMode = v_weaponTextureNickMode;
     g_weaponTextureRandomMode = v_weaponTextureRandomMode;
+    g_weaponTextureRandomPickMode = v_weaponTextureRandomPickMode;
     g_weaponTextureStandardRemap = v_weaponTextureStandardRemap;
     g_weaponHudIconFromGunsTxd = v_weaponHudIconFromGunsTxd;
     g_weaponCustomSounds = v_weaponCustomSounds;
@@ -896,6 +1006,7 @@ void LoadConfig() {
     g_heldWeaponTrace = v_heldWeaponTrace;
     g_heldWeaponStatusIntervalMs = v_heldWeaponStatusIntervalMs;
     g_skinRandomFromPools = v_skinRandomFromPools;
+    g_skinRandomPickMode = v_skinRandomPickMode;
     g_skinSelectedName = std::move(v_skinSelectedName);
     g_skinSelectedSource = v_skinSelectedSource;
     g_standardSkinSelectedModelId = v_standardSkinSelectedModelId;
@@ -958,9 +1069,13 @@ static void AppendMainIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "WeaponReplacementInHands", g_weaponReplacementInHands ? 1 : 0);
     AddIniInt(values, "Features", "WeaponReplacementRandomIncludeVanilla",
         g_weaponReplacementRandomIncludeVanilla ? 1 : 0);
+    AddIniValue(values, "Features", "WeaponReplacementRandomPickMode",
+        RandomPickModeToIni(g_weaponReplacementRandomPickMode));
     AddIniInt(values, "Features", "WeaponTextures", g_weaponTexturesEnabled ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextureNickMode", g_weaponTextureNickMode ? 1 : 0);
     AddIniInt(values, "Features", "WeaponTextureRandomMode", g_weaponTextureRandomMode ? 1 : 0);
+    AddIniValue(values, "Features", "WeaponTextureRandomPickMode",
+        RandomPickModeToIni(g_weaponTextureRandomPickMode));
     AddIniInt(values, "Features", "WeaponTextureStandardRemap", g_weaponTextureStandardRemap ? 1 : 0);
     AddIniInt(values, "Features", "WeaponHudIconFromGunsTxd", g_weaponHudIconFromGunsTxd ? 1 : 0);
 #ifndef ORC_LITE
@@ -1021,9 +1136,11 @@ static void SaveDefaultConfig() {
           "WeaponReplacementInHands=1\n"
           "; WeaponReplacementRandomIncludeVanilla=1: vanilla game weapon can be picked in Guns random pools.\n"
           "WeaponReplacementRandomIncludeVanilla=0\n"
+          "WeaponReplacementRandomPickMode=random\n"
           "WeaponTextures=1\n"
           "WeaponTextureNickMode=1\n"
           "WeaponTextureRandomMode=1\n"
+          "WeaponTextureRandomPickMode=random\n"
           "WeaponTextureStandardRemap=1\n"
           "; HUD weapon icon uses `<weapon>icon` from Orc Guns texture / replacement dictionary when present (local player).\n"
           "WeaponHudIconFromGunsTxd=1\n"
@@ -1043,6 +1160,7 @@ static void SaveDefaultConfig() {
           "SkinTextureRemapNickMode=1\n"
           "SkinTextureRemapAutoNickMode=1\n"
           "SkinTextureRemapRandomMode=1\n"
+          "SkinTextureRemapPickMode=random\n"
           "; DebugLogLevel: 0=off, 1=errors only, 2=info (full). Legacy DebugLog=1 equals level 2.\n"
           "DebugLogLevel=0\n"
           "DebugLog=0\n"
@@ -1061,7 +1179,8 @@ static void SaveDefaultConfig() {
           "Selected=\n"
           "SelectedSource=custom\n"
           "StandardSelected=-1\n"
-          "RandomFromPools=0\n\n", f);
+          "RandomFromPools=0\n"
+          "RandomPickMode=random\n\n", f);
     fclose(f);
 }
 
@@ -1822,9 +1941,11 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "WeaponReplacementInHands=%d\n", g_weaponReplacementInHands ? 1 : 0);
     AppendFormat(out, "WeaponReplacementRandomIncludeVanilla=%d\n",
         g_weaponReplacementRandomIncludeVanilla ? 1 : 0);
+    AppendFormat(out, "WeaponReplacementRandomPickMode=%s\n", RandomPickModeToIni(g_weaponReplacementRandomPickMode));
     AppendFormat(out, "WeaponTextures=%d\n", g_weaponTexturesEnabled ? 1 : 0);
     AppendFormat(out, "WeaponTextureNickMode=%d\n", g_weaponTextureNickMode ? 1 : 0);
     AppendFormat(out, "WeaponTextureRandomMode=%d\n", g_weaponTextureRandomMode ? 1 : 0);
+    AppendFormat(out, "WeaponTextureRandomPickMode=%s\n", RandomPickModeToIni(g_weaponTextureRandomPickMode));
     AppendFormat(out, "WeaponTextureStandardRemap=%d\n", g_weaponTextureStandardRemap ? 1 : 0);
     AppendFormat(out, "WeaponHudIconFromGunsTxd=%d\n", g_weaponHudIconFromGunsTxd ? 1 : 0);
     AppendFormat(out, "CustomWeaponSounds=%d\n", g_weaponCustomSounds ? 1 : 0);
@@ -1842,6 +1963,7 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "SkinTextureRemapNickMode=%d\n", g_skinTextureRemapNickMode ? 1 : 0);
     AppendFormat(out, "SkinTextureRemapAutoNickMode=%d\n", g_skinTextureRemapAutoNickMode ? 1 : 0);
     AppendFormat(out, "SkinTextureRemapRandomMode=%d\n", g_skinTextureRemapRandomMode);
+    AppendFormat(out, "SkinTextureRemapPickMode=%s\n", RandomPickModeToIni(g_skinTextureRemapPickMode));
     AppendFormat(out, "DebugLogLevel=%d\n", static_cast<int>(g_orcLogLevel));
     AppendFormat(out, "DebugLog=%d\n\n", (g_orcLogLevel >= OrcLogLevel::Info) ? 1 : 0);
 
@@ -1849,7 +1971,8 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "Selected=%s\n", g_skinSelectedName.c_str());
     AppendFormat(out, "SelectedSource=%s\n", g_skinSelectedSource == SKIN_SELECTED_STANDARD ? "standard" : "custom");
     AppendFormat(out, "StandardSelected=%d\n", g_standardSkinSelectedModelId);
-    AppendFormat(out, "RandomFromPools=%d\n\n", g_skinRandomFromPools ? 1 : 0);
+    AppendFormat(out, "RandomFromPools=%d\n", g_skinRandomFromPools ? 1 : 0);
+    AppendFormat(out, "RandomPickMode=%s\n\n", RandomPickModeToIni(g_skinRandomPickMode));
 }
 
 static bool NearlyEqualCfgFloat(float a, float b) {
@@ -2279,13 +2402,27 @@ static void SyncAndRender() {
 }
 
 int OrcSafeGetPedRef(CPed* ped) {
-    if (!ped)
+    if (!ped || g_orcRuntimeShuttingDown || !CPools::ms_pPedPool)
         return 0;
     __try {
         return CPools::GetPedRef(ped);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
+}
+
+CPed* OrcSafeGetPed(int pedRef) {
+    if (pedRef <= 0 || g_orcRuntimeShuttingDown || !CPools::ms_pPedPool)
+        return nullptr;
+    __try {
+        return CPools::GetPed(pedRef);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+bool OrcIsRuntimeShuttingDown() {
+    return g_orcRuntimeShuttingDown;
 }
 
 static void OnInitRw() {}
@@ -2309,6 +2446,9 @@ static void OnD3dReset() {
 static void OnShutdownRw();
 
 static void OnDrawingEvent() {
+    if (g_orcRuntimeShuttingDown)
+        return;
+
     static bool inited = false;
     if (!inited) {
         inited = true;
@@ -2353,6 +2493,9 @@ static void OnDrawingEvent() {
 }
 
 static void OnPedRenderBefore(CPed* ped) {
+    if (g_orcRuntimeShuttingDown)
+        return;
+
     OrcTextureRemapApplyBefore(ped);
     // Replacement must run first: PrepareHeldWeaponTextureBefore targets `m_pWeaponObject`.
     // If we textured the stock mesh then swapped the slot to the replacement clone,
@@ -2363,6 +2506,9 @@ static void OnPedRenderBefore(CPed* ped) {
 }
 
 static void OnPedRenderAfter(CPed* ped) {
+    if (g_orcRuntimeShuttingDown)
+        return;
+
     OrcTextureRemapRestoreAfter();
     OrcRestoreHeldWeaponReplacementAfter(ped);
     // Held weapon RwMaterial swaps are deferred to EndScene (see OrcFlushDeferredHeldWeaponSlotRestore): this
@@ -2371,6 +2517,9 @@ static void OnPedRenderAfter(CPed* ped) {
 }
 
 static void OnGameProcessBegin() {
+    if (g_orcRuntimeShuttingDown)
+        return;
+
     overlay::ReleaseInputCaptureIfClosed();
     OrcFlushDeferredHeldWeaponSlotRestore();
     OrcHeldPoseBeginSimFrame();
@@ -2379,6 +2528,7 @@ static void OnGameProcessBegin() {
 }
 
 static void OnShutdownRw() {
+    g_orcRuntimeShuttingDown = true;
     FlushPendingMainIniSaveForce();
     OrcWeaponSkinPresetAsyncShutdown();
     OrcLogInfo("shutdownRw: releasing hooks and instances");
@@ -2439,6 +2589,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         // Hook before first drawing frame: `LoadWeaponObject` runs during boot weapon IDE loading.
         OrcWeaponsEnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();
+        EnsureRenderWareShutdownGuardsInstalled();
 #ifndef ORC_LITE
         // Lite не ставит хуки оружия в руках / FX / HUD / texture remap / аудио.
         OrcWeaponEnsurePedModelHooksInstalled();

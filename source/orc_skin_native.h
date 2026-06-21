@@ -19,5 +19,6 @@ void OrcSkinNativeInstallHooks();
 void OrcSkinNativeOnPedSetModel(CPed* ped, int modelId);
 void OrcSkinNativeClearRuntimeState();
 void OrcSkinNativeOnSkinAssetsReleased();
+void OrcSkinNativeShutdown();
 bool OrcSkinNativeGetActiveInfo(CPed* ped, OrcNativeSkinActiveInfo& out);
 bool OrcSkinNativeShouldOverlayFallback(CPed* ped, const CustomSkinCfg* skin);

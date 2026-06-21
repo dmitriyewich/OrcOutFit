@@ -59,11 +59,57 @@ static int g_nativeSetModelHookDepth = 0;
 static constexpr DWORD kNativeSkinRetryMs = 500;
 static constexpr DWORD kNativeSkinDeferLogMs = 3000;
 static constexpr uintptr_t kAddr_CPed_SetModelIndex = 0x5E4880;
+static constexpr uintptr_t kAddr_GetFirstTexture = 0x734940;
+static constexpr uintptr_t kAddr_RwTexDictionaryFindHashNamedTexture = 0x734E50;
 
 using CPedSetModelIndexFn = void(__thiscall*)(CPed*, unsigned int);
+using GetFirstTextureFn = RwTexture*(__cdecl*)(RwTexDictionary*);
+using FindHashNamedTextureFn = RwTexture*(__cdecl*)(RwTexDictionary*, unsigned int);
 static CPedSetModelIndexFn g_CPedSetModelIndex_Orig = nullptr;
+static GetFirstTextureFn g_GetFirstTexture_Orig = nullptr;
+static FindHashNamedTextureFn g_RwTexDictionaryFindHashNamedTexture_Orig = nullptr;
 
 static void ReleaseNativeBaseTxdRef(PedNativeSkinState& state);
+
+static RwTexture* __cdecl GetFirstTexture_Detour(RwTexDictionary* txd) {
+    if (!txd) {
+        OrcLogInfoThrottled(509, 3000u, "native skin guard: GetFirstTexture null TXD");
+        return nullptr;
+    }
+    return g_GetFirstTexture_Orig ? g_GetFirstTexture_Orig(txd) : nullptr;
+}
+
+static RwTexture* __cdecl RwTexDictionaryFindHashNamedTexture_Detour(RwTexDictionary* txd, unsigned int hash) {
+    if (!txd) {
+        OrcLogInfoThrottled(510, 3000u, "native skin guard: FindHashNamedTexture null TXD hash=0x%08X", hash);
+        return nullptr;
+    }
+    return g_RwTexDictionaryFindHashNamedTexture_Orig ? g_RwTexDictionaryFindHashNamedTexture_Orig(txd, hash) : nullptr;
+}
+
+static void InstallNativeTextureDictionaryGuards() {
+    MH_STATUS st = MH_CreateHook(reinterpret_cast<void*>(kAddr_GetFirstTexture),
+        reinterpret_cast<void*>(&GetFirstTexture_Detour),
+        reinterpret_cast<void**>(&g_GetFirstTexture_Orig));
+    if (st == MH_OK || st == MH_ERROR_ALREADY_CREATED) {
+        st = MH_EnableHook(reinterpret_cast<void*>(kAddr_GetFirstTexture));
+        if (st != MH_OK && st != MH_ERROR_ENABLED)
+            OrcLogError("native skin guard: MH_EnableHook GetFirstTexture -> %s", MH_StatusToString(st));
+    } else {
+        OrcLogError("native skin guard: MH_CreateHook GetFirstTexture -> %s", MH_StatusToString(st));
+    }
+
+    st = MH_CreateHook(reinterpret_cast<void*>(kAddr_RwTexDictionaryFindHashNamedTexture),
+        reinterpret_cast<void*>(&RwTexDictionaryFindHashNamedTexture_Detour),
+        reinterpret_cast<void**>(&g_RwTexDictionaryFindHashNamedTexture_Orig));
+    if (st == MH_OK || st == MH_ERROR_ALREADY_CREATED) {
+        st = MH_EnableHook(reinterpret_cast<void*>(kAddr_RwTexDictionaryFindHashNamedTexture));
+        if (st != MH_OK && st != MH_ERROR_ENABLED)
+            OrcLogError("native skin guard: MH_EnableHook FindHashNamedTexture -> %s", MH_StatusToString(st));
+    } else {
+        OrcLogError("native skin guard: MH_CreateHook FindHashNamedTexture -> %s", MH_StatusToString(st));
+    }
+}
 
 static int NativePedKey(CPed* ped) {
     const int ref = OrcSafeGetPedRef(ped);
@@ -571,6 +617,7 @@ static void __fastcall CPedSetModelIndex_Detour(CPed* ped, void*, unsigned int m
         return;
 
     if (g_nativeSetModelInProgress || g_nativeSetModelHookDepth > 0 ||
+        OrcIsRuntimeShuttingDown() ||
         g_skinCustomMode != SKIN_CUSTOM_MODE_NATIVE || (!g_skinModeEnabled && !g_skinRandomFromPools) ||
         !ped || !OrcIsValidStandardSkinModel((int)modelId)) {
         g_CPedSetModelIndex_Orig(ped, modelId);
@@ -666,6 +713,8 @@ void OrcSkinNativeInstallHooks() {
         return;
     }
 
+    InstallNativeTextureDictionaryGuards();
+
     st = MH_CreateHook(reinterpret_cast<void*>(kAddr_CPed_SetModelIndex),
         reinterpret_cast<void*>(&CPedSetModelIndex_Detour),
         reinterpret_cast<void**>(&g_CPedSetModelIndex_Orig));
@@ -684,6 +733,9 @@ void OrcSkinNativeInstallHooks() {
 }
 
 void OrcSkinNativeUpdateForPeds(CPlayerPed* localPlayer) {
+    if (OrcIsRuntimeShuttingDown())
+        return;
+
     if (g_skinCustomMode != SKIN_CUSTOM_MODE_NATIVE || (!g_skinModeEnabled && !g_skinRandomFromPools)) {
         OrcSkinNativeClearRuntimeState();
         return;
@@ -708,7 +760,7 @@ void OrcSkinNativeUpdateForPeds(CPlayerPed* localPlayer) {
 }
 
 void OrcSkinNativeOnPedSetModel(CPed* ped, int) {
-    if (!ped || g_nativeSetModelInProgress)
+    if (!ped || g_nativeSetModelInProgress || OrcIsRuntimeShuttingDown())
         return;
     const int key = NativePedKey(ped);
     if (key)
@@ -716,6 +768,11 @@ void OrcSkinNativeOnPedSetModel(CPed* ped, int) {
 }
 
 void OrcSkinNativeClearRuntimeState() {
+    if (OrcIsRuntimeShuttingDown()) {
+        OrcSkinNativeShutdown();
+        return;
+    }
+
     for (auto it = g_nativeSkinStates.begin(); it != g_nativeSkinStates.end();) {
         const int key = it->first;
         if (RestoreNativeState(key, it->second))
@@ -726,6 +783,11 @@ void OrcSkinNativeClearRuntimeState() {
 }
 
 void OrcSkinNativeOnSkinAssetsReleased() {
+    if (OrcIsRuntimeShuttingDown()) {
+        OrcSkinNativeShutdown();
+        return;
+    }
+
     for (auto it = g_nativeSkinStates.begin(); it != g_nativeSkinStates.end();) {
         const PedNativeSkinState& state = it->second;
         if (state.failed || state.applyDeferred || !state.appliedClump)
@@ -734,6 +796,14 @@ void OrcSkinNativeOnSkinAssetsReleased() {
             ++it;
     }
     PruneNativeStates();
+}
+
+void OrcSkinNativeShutdown() {
+    for (auto& kv : g_nativeSkinStates)
+        ReleaseNativeBaseTxdRef(kv.second);
+    g_nativeSkinStates.clear();
+    g_nativeSetModelInProgress = false;
+    g_nativeSetModelHookDepth = 0;
 }
 
 bool OrcSkinNativeGetActiveInfo(CPed* ped, OrcNativeSkinActiveInfo& out) {

@@ -2,8 +2,8 @@
 
 #include "plugin.h"
 
-#include "CCamera.h"
 #include "CGame.h"
+#include "CPlayerPed.h"
 #include "CPed.h"
 #include "CPools.h"
 #include "CPhysical.h"
@@ -122,6 +122,50 @@ CPed* OrcWeaponAudioPedFromPhysical(CPhysical* physical) {
     return OrcWeaponAudioValidatePedCandidate(static_cast<CPed*>(physical), "physical");
 }
 
+bool OrcWeaponAudioIsLocalPlayerPed(CPed* ped) {
+    if (!ped)
+        return false;
+    CPlayerPed* local = FindPlayerPed(0);
+    if (!local)
+        return false;
+    if (ped == local)
+        return true;
+
+    const int pedRef = OrcSafeGetPedRef(ped);
+    const int localRef = OrcSafeGetPedRef(local);
+    return pedRef > 0 && pedRef == localRef;
+}
+
+float OrcWeaponAudioLocalPedDistance(CPed* ped) {
+    if (!ped || OrcWeaponAudioIsLocalPlayerPed(ped))
+        return 0.0f;
+
+    CPlayerPed* local = FindPlayerPed(0);
+    if (!local)
+        return 0.0f;
+
+    const CVector lp = local->GetPosition();
+    const CVector p = ped->GetPosition();
+    const float dx = lp.x - p.x;
+    const float dy = lp.y - p.y;
+    const float dz = lp.z - p.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+bool OrcWeaponAudioIsBeyondMaxDistance(CPed* ped, float maxDist) {
+    if (!ped || maxDist <= 0.0f || maxDist >= 999999.0f || OrcWeaponAudioIsLocalPlayerPed(ped))
+        return false;
+    return OrcWeaponAudioLocalPedDistance(ped) > maxDist;
+}
+
+float OrcWeaponAudioApplyDistanceCullGain(CPed* ped, float maxDist, float gain) {
+    return OrcWeaponAudioIsBeyondMaxDistance(ped, maxDist) ? 0.0f : gain;
+}
+
+OrcWeaponSpatial OrcWeaponAudioSpatialForPed(CPed* ped) {
+    return OrcWeaponAudioIsLocalPlayerPed(ped) ? OrcWeaponSpatial::ListenerRelative : OrcWeaponSpatial::WorldAtPed;
+}
+
 CPed* OrcWeaponAudioPedFromWeaponAudio(CAEWeaponAudioEntity* self) {
     if (!OrcAudioPointerLooksReadable(self))
         return nullptr;
@@ -136,10 +180,10 @@ CPed* OrcWeaponAudioPedFromWeaponAudio(CAEWeaponAudioEntity* self) {
         return nullptr;
     }
 
-    if (CPed* ped = OrcWeaponAudioValidatePedCandidate(directPed, "weaponAudio.m_pPed"))
+    if (CPed* ped = OrcWeaponAudioPedFromPhysical(reinterpret_cast<CPhysical*>(entity)))
         return ped;
 
-    return OrcWeaponAudioPedFromPhysical(reinterpret_cast<CPhysical*>(entity));
+    return OrcWeaponAudioValidatePedCandidate(directPed, "weaponAudio.m_pPed");
 }
 
 CPed* OrcWeaponAudioResolvePedFromSoundBase(CAEAudioEntity* base) {
@@ -208,6 +252,18 @@ bool OrcWeaponAudioTryPlaySuffix(const OrcWeaponAudioStemContext& ctx, const cha
     const OrcWeaponSoundClass cls = OrcWeaponInferSoundClassFromSuffix(suffix);
     OrcWeaponAudioPlayParams params = OrcWeaponAudioBuildPlayParams(&ctx, gainScale, spatial, cls);
 
+    if (params.spatial == OrcWeaponSpatial::WorldAtPed && OrcWeaponAudioIsBeyondMaxDistance(ctx.ped, params.att.maxDist)) {
+        OrcWeaponAudioMarkSuppressVanilla();
+        OrcLogInfoThrottled(409,
+            2000u,
+            "weapon audio: cull one-shot pedRef=%d suffix=%s dist=%.1f max=%.1f",
+            OrcSafeGetPedRef(ctx.ped),
+            suffix,
+            OrcWeaponAudioLocalPedDistance(ctx.ped),
+            params.att.maxDist);
+        return true;
+    }
+
     if (!OrcWeaponAudioTryPlayPath(path.c_str(), params, ctx.ped))
         return false;
     OrcWeaponAudioMarkSuppressVanilla();
@@ -216,17 +272,6 @@ bool OrcWeaponAudioTryPlaySuffix(const OrcWeaponAudioStemContext& ctx, const cha
 
 void OrcWeaponAudioMarkSuppressVanilla() {
     g_suppressVanillaGunSoundsUntilTick = GetTickCount() + 120;
-}
-
-float OrcWeaponAudioCamPedDistance(CPed* ped) {
-    if (!ped)
-        return 0.0f;
-    const CVector cam = *TheCamera.GetGameCamPosition();
-    const CVector p = ped->GetPosition();
-    const float dx = cam.x - p.x;
-    const float dy = cam.y - p.y;
-    const float dz = cam.z - p.z;
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 bool OrcWeaponAudioIsInterior() {

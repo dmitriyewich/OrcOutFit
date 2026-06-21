@@ -168,6 +168,11 @@ enum TextureRemapRandomMode {
     TEXTURE_REMAP_RANDOM_LINKED_VARIANT = 1,
 };
 
+enum OrcRandomPickMode {
+    ORC_RANDOM_PICK_RANDOM = 0,
+    ORC_RANDOM_PICK_SEQUENTIAL = 1,
+};
+
 // Per standard ped skin (ped.dat DFF name): stored under [Skin.<name>] in `Objects\\<obj>.ini`.
 struct CustomObjectSkinParams {
     bool enabled = true;

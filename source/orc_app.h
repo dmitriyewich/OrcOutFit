@@ -15,6 +15,8 @@ class CPlayerPed;
 
 /// `CPools::GetPedRef` с проверкой null и SEH на освобождённый ped (SA:MP / audio).
 int OrcSafeGetPedRef(CPed* ped);
+CPed* OrcSafeGetPed(int pedRef);
+bool OrcIsRuntimeShuttingDown();
 
 extern char g_iniPath[MAX_PATH];
 extern char g_gameObjDir[MAX_PATH];
@@ -41,9 +43,11 @@ extern bool g_weaponReplacementEnabled;
 extern bool g_weaponReplacementOnBody;
 extern bool g_weaponReplacementInHands;
 extern bool g_weaponReplacementRandomIncludeVanilla;
+extern int g_weaponReplacementRandomPickMode;
 extern bool g_weaponTexturesEnabled;
 extern bool g_weaponTextureNickMode;
 extern bool g_weaponTextureRandomMode;
+extern int g_weaponTextureRandomPickMode;
 /// Use `*_remap` pairs inside the game's loaded weapon model TXD (PedFuncs-style per slot).
 extern bool g_weaponTextureStandardRemap;
 /// HUD `DrawWeaponIcon`: if Guns/replacement dictionary has `<weapon>icon`, use as current TXD for the call (local player).
@@ -122,8 +126,10 @@ extern bool g_skinTextureRemapEnabled;
 extern bool g_skinTextureRemapNickMode;
 extern bool g_skinTextureRemapAutoNickMode;
 extern int g_skinTextureRemapRandomMode;
+extern int g_skinTextureRemapPickMode;
 // SKINS/random/<dffBaseName>/*.dff — случайный вариант на каждого педа с этим model id.
 extern bool g_skinRandomFromPools;
+extern int g_skinRandomPickMode;
 extern int g_skinRandomPoolModels;
 extern int g_skinRandomPoolVariants;
 extern std::string g_skinSelectedName;

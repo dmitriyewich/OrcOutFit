@@ -125,15 +125,16 @@ static bool OrcTryDistantShot(const OrcWeaponAudioStemContext& ctx) {
 static bool OrcTryAfterSuffix(const OrcWeaponAudioStemContext& ctx, const char* afterSuffix, float gain) {
     if (OrcWeaponAudioIsInterior())
         return false;
-    return OrcWeaponAudioTryPlaySuffix(ctx, afterSuffix, gain, OrcWeaponSpatial::ListenerRelative);
+    return OrcWeaponAudioTryPlaySuffix(ctx, afterSuffix, gain, OrcWeaponAudioSpatialForPed(ctx.ped));
 }
 
 static bool OrcTryCloseShoot(const OrcWeaponAudioStemContext& ctx) {
     const float gain = OrcWeaponAudioCloseGain();
     const int maxAlt = std::max(1, std::min(10, g_weaponCustomSoundMaxAlternatives));
+    const OrcWeaponSpatial spatial = OrcWeaponAudioSpatialForPed(ctx.ped);
 
     int shootIndex = -1;
-    if (OrcTryFirstExistingNumbered(ctx, "_shoot", maxAlt, gain, OrcWeaponSpatial::ListenerRelative, &shootIndex)) {
+    if (OrcTryFirstExistingNumbered(ctx, "_shoot", maxAlt, gain, spatial, &shootIndex)) {
         if (shootIndex >= 0) {
             char afterSuf[32];
             sprintf_s(afterSuf, "_after%d", shootIndex);
@@ -142,7 +143,7 @@ static bool OrcTryCloseShoot(const OrcWeaponAudioStemContext& ctx) {
         return true;
     }
 
-    if (OrcWeaponAudioTryPlaySuffix(ctx, "_shoot", gain, OrcWeaponSpatial::ListenerRelative)) {
+    if (OrcWeaponAudioTryPlaySuffix(ctx, "_shoot", gain, spatial)) {
         OrcTryAfterSuffix(ctx, "_after", gain);
         return true;
     }
@@ -167,19 +168,17 @@ static bool OrcWeaponAudioConsumeMinigunShootOnlyThrottle(const OrcWeaponAudioSt
     return false;
 }
 
-static bool OrcWeaponAudioTryCustomWeaponFire(CAEWeaponAudioEntity* self, eWeaponType weaponType) {
-    if (!self)
-        return false;
-    CPed* ped = OrcWeaponAudioPedFromWeaponAudio(self);
+static bool OrcWeaponAudioTryCustomWeaponFire(CPed* ped, eWeaponType weaponType) {
     if (!ped)
         return false;
     OrcWeaponAudioStemContext ctx;
     if (!OrcWeaponAudioTryBuildStemContext(ped, static_cast<int>(weaponType), ctx))
         return false;
 
-    const float dist = OrcWeaponAudioCamPedDistance(ped);
+    const float dist = OrcWeaponAudioLocalPedDistance(ped);
     const bool farAway = dist >= g_weaponCustomSoundDistantThreshold;
     const bool close = !farAway;
+    const OrcWeaponSpatial spatial = OrcWeaponAudioSpatialForPed(ped);
 
     CWeapon* weap = ped->GetWeapon();
     CWeaponInfo* info = CWeaponInfo::GetWeaponInfo(weaponType, ped->GetWeaponSkill());
@@ -189,10 +188,10 @@ static bool OrcWeaponAudioTryCustomWeaponFire(CAEWeaponAudioEntity* self, eWeapo
         const unsigned clip = info->m_nAmmoClip;
         const unsigned left = clip / 3;
         if (ammo < left) {
-            if (OrcWeaponAudioTryPlaySuffix(ctx, "_low_ammo", OrcWeaponAudioCloseGain(), OrcWeaponSpatial::ListenerRelative))
+            if (OrcWeaponAudioTryPlaySuffix(ctx, "_low_ammo", OrcWeaponAudioCloseGain(), spatial))
                 return true;
             if (ammo < 2) {
-                if (OrcWeaponAudioTryPlaySuffix(ctx, "_dryfire", OrcWeaponAudioCloseGain(), OrcWeaponSpatial::ListenerRelative))
+                if (OrcWeaponAudioTryPlaySuffix(ctx, "_dryfire", OrcWeaponAudioCloseGain(), spatial))
                     return true;
             }
         }
@@ -252,7 +251,7 @@ static bool OrcTryMeleeSuffixForPed(CPed* ped, const char* suffix, float gain) {
     OrcWeaponAudioStemContext ctx;
     if (!OrcWeaponAudioTryBuildStemContext(ped, wt, ctx))
         return false;
-    return OrcWeaponAudioTryPlaySuffix(ctx, suffix, gain, OrcWeaponSpatial::ListenerRelative);
+    return OrcWeaponAudioTryPlaySuffix(ctx, suffix, gain, OrcWeaponAudioSpatialForPed(ped));
 }
 
 static void __fastcall WeaponFire_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, eWeaponType weaponType, CPhysical* entity,
@@ -288,7 +287,7 @@ static void __fastcall WeaponFire_Detour(CAEWeaponAudioEntity* self, void* /*edx
         }
         if (OrcWeaponAudioConsumeMinigunShootOnlyThrottle(ctx))
             return;
-        if (OrcWeaponAudioTryCustomWeaponFire(self, weaponType))
+        if (OrcWeaponAudioTryCustomWeaponFire(ped, weaponType))
             return;
     }
 
@@ -363,12 +362,13 @@ static void __fastcall WeaponReload_Detour(CAEWeaponAudioEntity* self, void* /*e
     }
 
     const float gain = OrcWeaponAudioCloseGain();
+    const OrcWeaponSpatial spatial = OrcWeaponAudioSpatialForPed(ped);
     const char* specific = OrcReloadSuffixForEvent(audioEventId);
     if (strcmp(specific, "_reload") != 0) {
-        if (OrcWeaponAudioTryPlaySuffix(ctx, specific, gain, OrcWeaponSpatial::ListenerRelative))
+        if (OrcWeaponAudioTryPlaySuffix(ctx, specific, gain, spatial))
             return;
     }
-    if (OrcWeaponAudioTryPlaySuffix(ctx, "_reload", gain, OrcWeaponSpatial::ListenerRelative))
+    if (OrcWeaponAudioTryPlaySuffix(ctx, "_reload", gain, spatial))
         return;
 
     g_WeaponReload_Orig(self, weaponType, entity, audioEventId);

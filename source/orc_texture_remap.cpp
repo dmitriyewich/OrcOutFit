@@ -32,6 +32,7 @@
 #include "orc_ini.h"
 #include "orc_ini_cache.h"
 #include "orc_log.h"
+#include "orc_random_pick.h"
 #include "orc_skin_native.h"
 #include "orc_weapon_assets.h"
 #include "samp_bridge.h"
@@ -151,6 +152,7 @@ struct PedTextureRemapState {
     int txdIndex = -1;
     std::string dffName;
     std::string fallbackDffName;
+    std::string sequentialOwnerKey;
     bool scanned = false;
     bool nickBindingApplied = false;
     int nickBindingId = -1;
@@ -177,12 +179,16 @@ static bool g_textureRemapHooksInstalled = false;
 static bool g_textureRemapTxdsNotLoadedYet = true;
 static bool g_textureRemapAnyAdditionalPedsTxd = false;
 static int g_textureRemapPedsTxdIndex[4] = {};
+static bool g_textureRemapPedsTxdRefAdded[4] = {};
 static RwTexDictionary* g_textureRemapPedsTxdDict[4] = {};
 static int g_textureRemapGangHandsTxdIndex = 0;
+static bool g_textureRemapGangHandsTxdRefAdded = false;
 static RwTexDictionary* g_textureRemapGangHandsDict = nullptr;
 static unsigned int g_textureRemapCutsceneLastTime = 0;
 static std::unordered_map<int, PedTextureRemapState> g_pedTextureRemaps;
 static std::unordered_map<std::string, PedTextureRemapState> g_clumpTextureRemaps;
+static std::unordered_map<std::string, OrcSequentialPickState> g_textureRemapSequentialStates;
+static std::unordered_map<std::string, int> g_textureRemapSequentialAssignments;
 static std::vector<TextureRemapRestoreEntry> g_textureRemapRestoreEntries;
 static std::unordered_map<std::string, std::vector<TextureRemapNickBinding>> g_textureRemapNickBindingsByDff;
 
@@ -199,6 +205,84 @@ static RwTexDictionary* GetTxdDictionaryByIndex(int txdIndex) {
     if (txdIndex >= CTxdStore::ms_pTxdPool->m_nSize)
         return nullptr;
     return CTxdStore::ms_pTxdPool->m_pObjects[txdIndex].m_pRwDictionary;
+}
+
+static bool IsValidTxdSlotIndex(int txdIndex) {
+    return txdIndex >= 0 &&
+        CTxdStore::ms_pTxdPool &&
+        CTxdStore::ms_pTxdPool->m_pObjects &&
+        txdIndex < CTxdStore::ms_pTxdPool->m_nSize;
+}
+
+static void ReleaseTextureRemapTxdRef(int& txdIndex, bool& refAdded, RwTexDictionary*& dict, const char* label) {
+    if (!refAdded) {
+        txdIndex = 0;
+        dict = nullptr;
+        return;
+    }
+
+    const int slot = txdIndex;
+    refAdded = false;
+    txdIndex = 0;
+    dict = nullptr;
+
+    if (!IsValidTxdSlotIndex(slot))
+        return;
+
+    __try {
+        CTxdStore::RemoveRef(slot);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("texture remap: %s TXD RemoveRef SEH ex=0x%08X slot=%d",
+            label ? label : "?",
+            GetExceptionCode(),
+            slot);
+    }
+}
+
+static bool AddTextureRemapTxdRef(int& txdIndex, bool& refAdded, RwTexDictionary*& dict, int slot, const char* label) {
+    if (slot <= 0)
+        return false;
+    if (refAdded && txdIndex == slot)
+        return true;
+
+    ReleaseTextureRemapTxdRef(txdIndex, refAdded, dict, label);
+
+    if (!IsValidTxdSlotIndex(slot)) {
+        OrcLogError("texture remap: %s TXD slot invalid slot=%d", label ? label : "?", slot);
+        return false;
+    }
+
+    __try {
+        CTxdStore::AddRef(slot);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("texture remap: %s TXD AddRef SEH ex=0x%08X slot=%d",
+            label ? label : "?",
+            GetExceptionCode(),
+            slot);
+        return false;
+    }
+
+    txdIndex = slot;
+    refAdded = true;
+    dict = nullptr;
+    g_textureRemapTxdsNotLoadedYet = true;
+    return true;
+}
+
+static void ReleaseAdditionalTextureRemapTxds() {
+    for (int i = 0; i < 4; ++i)
+        ReleaseTextureRemapTxdRef(g_textureRemapPedsTxdIndex[i],
+            g_textureRemapPedsTxdRefAdded[i],
+            g_textureRemapPedsTxdDict[i],
+            "peds");
+
+    ReleaseTextureRemapTxdRef(g_textureRemapGangHandsTxdIndex,
+        g_textureRemapGangHandsTxdRefAdded,
+        g_textureRemapGangHandsDict,
+        "ganghands");
+
+    g_textureRemapAnyAdditionalPedsTxd = false;
+    g_textureRemapTxdsNotLoadedYet = true;
 }
 
 static RwTexture* FindTextureInDictOnly(RwTexDictionary* dict, const char* name) {
@@ -243,14 +327,21 @@ static void __cdecl CustomAssignRemapTxd(const char* txdName, uint16_t txdId) {
         if (_strnicmp(txdName, "peds", 4) == 0 && len > 1 && std::isdigit(static_cast<unsigned char>(txdName[len - 1]))) {
             const int arrayIndex = txdName[len - 1] - '1';
             if (arrayIndex >= 0 && arrayIndex < 4) {
-                g_textureRemapPedsTxdIndex[arrayIndex] = txdId;
-                CTxdStore::AddRef(txdId);
-                g_textureRemapAnyAdditionalPedsTxd = true;
-                OrcLogInfo("texture remap: found additional %s.txd slot=%u", txdName, (unsigned)txdId);
+                if (AddTextureRemapTxdRef(g_textureRemapPedsTxdIndex[arrayIndex],
+                        g_textureRemapPedsTxdRefAdded[arrayIndex],
+                        g_textureRemapPedsTxdDict[arrayIndex],
+                        txdId,
+                        txdName)) {
+                    g_textureRemapAnyAdditionalPedsTxd = true;
+                    OrcLogInfo("texture remap: found additional %s.txd slot=%u", txdName, (unsigned)txdId);
+                }
             }
         } else if (g_textureRemapGangHandsTxdIndex == 0 && _strnicmp(txdName, "ganghands", 9) == 0) {
-            g_textureRemapGangHandsTxdIndex = txdId;
-            CTxdStore::AddRef(txdId);
+            AddTextureRemapTxdRef(g_textureRemapGangHandsTxdIndex,
+                g_textureRemapGangHandsTxdRefAdded,
+                g_textureRemapGangHandsDict,
+                txdId,
+                txdName);
         }
     }
     if (g_AssignRemapTxd_Orig)
@@ -378,7 +469,156 @@ static int ClampTextureRemapRandomMode(int mode) {
     return TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
 }
 
+static std::string TextureRemapSequentialOwnerKey(CPed* ped) {
+    const int ref = OrcSafeGetPedRef(ped);
+    if (ref > 0)
+        return "r:" + std::to_string(ref);
+    return "p:" + std::to_string(reinterpret_cast<uintptr_t>(ped));
+}
+
+static std::string TextureRemapSequentialBaseKey(const PedTextureRemapState& state) {
+    std::string key;
+    key.reserve(96);
+    key += TextureRemapToLowerAscii(state.dffName.empty() ? std::string("?") : state.dffName);
+    key += "|";
+    key += TextureRemapToLowerAscii(state.fallbackDffName.empty() ? std::string("-") : state.fallbackDffName);
+    key += "|m:";
+    key += std::to_string(state.modelId);
+    key += "|t:";
+    key += std::to_string(state.txdIndex);
+    return key;
+}
+
+static std::string TextureRemapSequentialLinkedPoolKey(const PedTextureRemapState& state) {
+    return std::string("linked|") + TextureRemapSequentialBaseKey(state);
+}
+
+static std::string TextureRemapSequentialSlotPoolKey(
+    const PedTextureRemapState& state,
+    const TextureRemapSlotState& slot) {
+    return std::string("slot|") + TextureRemapSequentialBaseKey(state) + "|" +
+        TextureRemapToLowerAscii(slot.originalName);
+}
+
+static std::string TextureRemapSequentialChoiceKey(const PedTextureRemapState& state, const std::string& poolKey) {
+    return state.sequentialOwnerKey + "|" + poolKey;
+}
+
+static std::vector<int> TextureRemapIndexPool(int total) {
+    std::vector<int> pool;
+    if (total <= 0)
+        return pool;
+    pool.reserve((size_t)total);
+    for (int i = 0; i < total; ++i)
+        pool.push_back(i);
+    return pool;
+}
+
+static void EraseTextureRemapSequentialChoiceFromStates(const std::string& choiceKey) {
+    for (auto& kv : g_textureRemapSequentialStates)
+        kv.second.activeChoiceKeys.erase(choiceKey);
+}
+
+static void PruneTextureRemapSequentialAssignments() {
+    for (auto it = g_textureRemapSequentialAssignments.begin(); it != g_textureRemapSequentialAssignments.end();) {
+        bool erase = false;
+        if (it->first.rfind("r:", 0) == 0) {
+            const size_t sep = it->first.find('|');
+            const int ref = (sep == std::string::npos) ? 0 : std::atoi(it->first.substr(2, sep - 2).c_str());
+            erase = ref > 0 && !OrcSafeGetPed(ref);
+        }
+
+        if (erase) {
+            EraseTextureRemapSequentialChoiceFromStates(it->first);
+            it = g_textureRemapSequentialAssignments.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void ReleaseTextureRemapSequentialAssignmentsForOwner(const std::string& ownerKey) {
+    if (ownerKey.empty())
+        return;
+    const std::string prefix = ownerKey + "|";
+    for (auto it = g_textureRemapSequentialAssignments.begin(); it != g_textureRemapSequentialAssignments.end();) {
+        if (it->first.rfind(prefix, 0) == 0) {
+            EraseTextureRemapSequentialChoiceFromStates(it->first);
+            it = g_textureRemapSequentialAssignments.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static bool TextureRemapPedPointerAlive(uintptr_t pedPtr) {
+    if (!pedPtr || !CPools::ms_pPedPool)
+        return true;
+    CPed* target = reinterpret_cast<CPed*>(pedPtr);
+    __try {
+        for (int i = 0; i < CPools::ms_pPedPool->m_nSize; ++i) {
+            if (CPools::ms_pPedPool->GetAt(i) == target)
+                return true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+    return false;
+}
+
+static bool TextureRemapOwnerIsDead(const std::string& ownerKey) {
+    if (ownerKey.rfind("r:", 0) == 0) {
+        const int ref = std::atoi(ownerKey.c_str() + 2);
+        return ref > 0 && !OrcSafeGetPed(ref);
+    }
+    if (ownerKey.rfind("p:", 0) == 0) {
+        const uintptr_t ptr = static_cast<uintptr_t>(_strtoui64(ownerKey.c_str() + 2, nullptr, 10));
+        return ptr != 0 && !TextureRemapPedPointerAlive(ptr);
+    }
+    return false;
+}
+
+static void PruneTextureRemapStateMaps() {
+    if (g_skinTextureRemapPickMode != ORC_RANDOM_PICK_SEQUENTIAL)
+        return;
+
+    for (auto it = g_pedTextureRemaps.begin(); it != g_pedTextureRemaps.end();) {
+        if (TextureRemapOwnerIsDead(it->second.sequentialOwnerKey)) {
+            ReleaseTextureRemapSequentialAssignmentsForOwner(it->second.sequentialOwnerKey);
+            it = g_pedTextureRemaps.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto it = g_clumpTextureRemaps.begin(); it != g_clumpTextureRemaps.end();) {
+        if (TextureRemapOwnerIsDead(it->second.sequentialOwnerKey)) {
+            ReleaseTextureRemapSequentialAssignmentsForOwner(it->second.sequentialOwnerKey);
+            it = g_clumpTextureRemaps.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    PruneTextureRemapSequentialAssignments();
+}
+
+static int PickSequentialTextureRemapIndex(PedTextureRemapState& state, const std::string& poolKey, int total) {
+    const std::vector<int> pool = TextureRemapIndexPool(total);
+    if (pool.empty() || state.sequentialOwnerKey.empty())
+        return -1;
+    PruneTextureRemapSequentialAssignments();
+    return OrcSequentialPickSticky(
+        g_textureRemapSequentialStates[poolKey],
+        g_textureRemapSequentialAssignments,
+        TextureRemapSequentialChoiceKey(state, poolKey),
+        pool,
+        -1);
+}
+
 static void SelectRandomTextureRemapsPerTexture(PedTextureRemapState& state) {
+    const bool sequential = g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL &&
+        !state.sequentialOwnerKey.empty();
     for (int i = 0; i < state.slotCount; ++i) {
         TextureRemapSlotState& slot = state.slots[(size_t)i];
         const int total = (int)slot.remaps.size();
@@ -386,7 +626,12 @@ static void SelectRandomTextureRemapsPerTexture(PedTextureRemapState& state) {
             slot.selected = -1;
             continue;
         }
-        slot.selected = RandomInclusive(0, total - 1);
+        if (sequential) {
+            const int picked = PickSequentialTextureRemapIndex(state, TextureRemapSequentialSlotPoolKey(state, slot), total);
+            slot.selected = (picked >= 0 && picked < total) ? picked : RandomInclusive(0, total - 1);
+        } else {
+            slot.selected = RandomInclusive(0, total - 1);
+        }
     }
 }
 
@@ -403,7 +648,13 @@ static void SelectRandomTextureRemapsLinkedVariant(PedTextureRemapState& state) 
         return;
     }
 
-    const int linkedVariant = RandomInclusive(0, maxVariants - 1);
+    const bool sequential = g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL &&
+        !state.sequentialOwnerKey.empty();
+    int linkedVariant = -1;
+    if (sequential)
+        linkedVariant = PickSequentialTextureRemapIndex(state, TextureRemapSequentialLinkedPoolKey(state), maxVariants);
+    if (linkedVariant < 0 || linkedVariant >= maxVariants)
+        linkedVariant = RandomInclusive(0, maxVariants - 1);
     for (int i = 0; i < state.slotCount; ++i) {
         TextureRemapSlotState& slot = state.slots[(size_t)i];
         const int total = (int)slot.remaps.size();
@@ -411,6 +662,9 @@ static void SelectRandomTextureRemapsLinkedVariant(PedTextureRemapState& state) 
             slot.selected = -1;
         } else if (linkedVariant < total) {
             slot.selected = linkedVariant;
+        } else if (sequential) {
+            const int picked = PickSequentialTextureRemapIndex(state, TextureRemapSequentialSlotPoolKey(state, slot), total);
+            slot.selected = (picked >= 0 && picked < total) ? picked : RandomInclusive(0, total - 1);
         } else {
             slot.selected = RandomInclusive(0, total - 1);
         }
@@ -742,6 +996,30 @@ static RwTexture* TextureRemapCollectTextureCB(RwTexture* texture, void* data) {
     return texture;
 }
 
+static void SortTextureRemapVariants(PedTextureRemapState& state) {
+    for (int i = 0; i < state.slotCount; ++i) {
+        TextureRemapSlotState& slot = state.slots[(size_t)i];
+        std::vector<size_t> order;
+        order.reserve(slot.remapNames.size());
+        for (size_t idx = 0; idx < slot.remapNames.size(); ++idx)
+            order.push_back(idx);
+        std::sort(order.begin(), order.end(), [&slot](size_t a, size_t b) {
+            return TextureRemapToLowerAscii(slot.remapNames[a]) < TextureRemapToLowerAscii(slot.remapNames[b]);
+        });
+
+        std::vector<RwTexture*> sortedRemaps;
+        std::vector<std::string> sortedNames;
+        sortedRemaps.reserve(order.size());
+        sortedNames.reserve(order.size());
+        for (size_t idx : order) {
+            sortedRemaps.push_back(slot.remaps[idx]);
+            sortedNames.push_back(slot.remapNames[idx]);
+        }
+        slot.remaps = std::move(sortedRemaps);
+        slot.remapNames = std::move(sortedNames);
+    }
+}
+
 static bool TextureRemapHasOriginalName(const std::vector<TextureRemapOriginalName>& originals, const std::string& lowerName) {
     for (const auto& original : originals) {
         if (original.lowerName == lowerName)
@@ -867,9 +1145,10 @@ static void CollectAutoNickTextureCandidates(
     }
 }
 
-static bool ScanTextureRemapsForPed(CPed* ped, int modelId, PedTextureRemapState& out) {
+static bool ScanTextureRemapsForPed(CPed* ped, int modelId, const std::string& ownerKey, PedTextureRemapState& out) {
     out = PedTextureRemapState{};
     out.modelId = modelId;
+    out.sequentialOwnerKey = ownerKey;
     const char* dff = OrcTryGetPedModelNameById(modelId);
     if (dff && dff[0])
         out.dffName = dff;
@@ -892,6 +1171,7 @@ static bool ScanTextureRemapsForPed(CPed* ped, int modelId, PedTextureRemapState
         OrcLogError("texture remap scan: SEH ex=0x%08X model=%d txd=%d", GetExceptionCode(), modelId, out.txdIndex);
         out = PedTextureRemapState{};
         out.modelId = modelId;
+        out.sequentialOwnerKey = ownerKey;
         return false;
     }
 
@@ -901,6 +1181,7 @@ static bool ScanTextureRemapsForPed(CPed* ped, int modelId, PedTextureRemapState
 
     out.scanned = true;
     if (out.totalRemapTextures > 0 || out.totalAutoNickTextures > 0) {
+        SortTextureRemapVariants(out);
         SelectRandomTextureRemaps(out);
         OrcLogInfo("texture remap scan: model=%d txd=%d slots=%d variants=%d autoNick=%d",
                    modelId, out.txdIndex, out.slotCount, out.totalRemapTextures, out.totalAutoNickTextures);
@@ -914,11 +1195,13 @@ static bool ScanTextureRemapsForClump(
     int txdIndex,
     const char* dffName,
     const char* fallbackDffName,
+    const std::string& ownerKey,
     PedTextureRemapState& out
 ) {
     out = PedTextureRemapState{};
     out.modelId = ped ? (int)ped->m_nModelIndex : -1;
     out.txdIndex = txdIndex;
+    out.sequentialOwnerKey = ownerKey;
     if (dffName && dffName[0])
         out.dffName = dffName;
     if (fallbackDffName && fallbackDffName[0] && _stricmp(fallbackDffName, out.dffName.c_str()) != 0)
@@ -936,6 +1219,7 @@ static bool ScanTextureRemapsForClump(
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         OrcLogError("texture remap clump scan: SEH ex=0x%08X txd=%d dff=%s", GetExceptionCode(), out.txdIndex, out.dffName.c_str());
         out = PedTextureRemapState{};
+        out.sequentialOwnerKey = ownerKey;
         return false;
     }
 
@@ -945,6 +1229,7 @@ static bool ScanTextureRemapsForClump(
 
     out.scanned = true;
     if (out.totalRemapTextures > 0 || out.totalAutoNickTextures > 0) {
+        SortTextureRemapVariants(out);
         SelectRandomTextureRemaps(out);
         OrcLogInfo("texture remap clump scan: dff=%s fallback=%s model=%d txd=%d slots=%d variants=%d autoNick=%d",
                    out.dffName.empty() ? "?" : out.dffName.c_str(),
@@ -969,6 +1254,7 @@ static int TextureRemapPedKey(CPed* ped) {
 
 static PedTextureRemapState* EnsurePedTextureRemapState(CPed* ped, bool forceRescan = false) {
     if (!ped) return nullptr;
+    PruneTextureRemapStateMaps();
     const int key = TextureRemapPedKey(ped);
     if (!key) return nullptr;
 
@@ -980,9 +1266,11 @@ static PedTextureRemapState* EnsurePedTextureRemapState(CPed* ped, bool forceRes
         return &it->second;
     }
 
+    const std::string ownerKey = TextureRemapSequentialOwnerKey(ped);
     PedTextureRemapState fresh;
-    if (!ScanTextureRemapsForPed(ped, (int)ped->m_nModelIndex, fresh)) {
+    if (!ScanTextureRemapsForPed(ped, (int)ped->m_nModelIndex, ownerKey, fresh)) {
         fresh.modelId = (int)ped->m_nModelIndex;
+        fresh.sequentialOwnerKey = ownerKey;
         fresh.scanned = true;
     }
     auto inserted = g_pedTextureRemaps.insert_or_assign(key, std::move(fresh));
@@ -999,6 +1287,7 @@ static PedTextureRemapState* EnsureClumpTextureRemapState(
 ) {
     if (!ped || !clump || txdIndex < 0)
         return nullptr;
+    PruneTextureRemapStateMaps();
     const int pedKey = TextureRemapPedKey(ped);
     if (!pedKey)
         return nullptr;
@@ -1014,10 +1303,12 @@ static PedTextureRemapState* EnsureClumpTextureRemapState(
     if (it != g_clumpTextureRemaps.end() && !forceRescan && it->second.scanned)
         return &it->second;
 
+    const std::string ownerKey = TextureRemapSequentialOwnerKey(ped);
     PedTextureRemapState fresh;
-    if (!ScanTextureRemapsForClump(ped, clump, txdIndex, dffName, fallbackDffName, fresh)) {
+    if (!ScanTextureRemapsForClump(ped, clump, txdIndex, dffName, fallbackDffName, ownerKey, fresh)) {
         fresh.modelId = (int)ped->m_nModelIndex;
         fresh.txdIndex = txdIndex;
+        fresh.sequentialOwnerKey = ownerKey;
         if (dffName && dffName[0])
             fresh.dffName = dffName;
         if (fallbackDffName && fallbackDffName[0])
@@ -1105,11 +1396,20 @@ bool OrcSetLocalPedTextureRemap(int slot, int remap) {
     if (!state || slot < 0 || slot >= state->slotCount)
         return false;
     TextureRemapSlotState& s = state->slots[(size_t)slot];
+    if (g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL)
+        ReleaseTextureRemapSequentialAssignmentsForOwner(state->sequentialOwnerKey);
     return SetRealRemapSelection(s, remap);
 }
 
 bool OrcRandomizeLocalPedTextureRemaps() {
     CPlayerPed* ped = FindPlayerPed(0);
+    if (g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL) {
+        if (PedTextureRemapState* oldState = EnsureActiveTextureRemapState(ped, false))
+            ReleaseTextureRemapSequentialAssignmentsForOwner(oldState->sequentialOwnerKey);
+        PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, true);
+        return state && state->totalRemapTextures > 0;
+    }
+
     PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, true);
     if (!state || state->totalRemapTextures <= 0)
         return false;
@@ -1122,6 +1422,8 @@ bool OrcSetAllLocalPedTextureRemaps(int remap) {
     PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state)
         return false;
+    if (g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL)
+        ReleaseTextureRemapSequentialAssignmentsForOwner(state->sequentialOwnerKey);
     bool ok = true;
     for (int i = 0; i < state->slotCount; ++i) {
         TextureRemapSlotState& s = state->slots[(size_t)i];
@@ -1306,6 +1608,10 @@ void OrcTextureRemapClearRuntimeState() {
     OrcTextureRemapRestoreAfter();
     g_pedTextureRemaps.clear();
     g_clumpTextureRemaps.clear();
+    g_textureRemapSequentialStates.clear();
+    g_textureRemapSequentialAssignments.clear();
+    if (OrcIsRuntimeShuttingDown())
+        ReleaseAdditionalTextureRemapTxds();
 }
 
 int OrcTextureRemapQueryMaxLinkedVariantsForTxd(int txdIndex) {
@@ -1341,14 +1647,20 @@ void OrcTextureRemapOnPedSetModel(CPed* ped, int) {
     if (!ped)
         return;
     const int key = TextureRemapPedKey(ped);
-    if (key)
+    if (key) {
+        auto old = g_pedTextureRemaps.find(key);
+        if (old != g_pedTextureRemaps.end())
+            ReleaseTextureRemapSequentialAssignmentsForOwner(old->second.sequentialOwnerKey);
         g_pedTextureRemaps.erase(key);
+    }
     for (auto it = g_clumpTextureRemaps.begin(); it != g_clumpTextureRemaps.end();) {
         const std::string prefix = std::to_string(key) + "|";
-        if (key && it->first.rfind(prefix, 0) == 0)
+        if (key && it->first.rfind(prefix, 0) == 0) {
+            ReleaseTextureRemapSequentialAssignmentsForOwner(it->second.sequentialOwnerKey);
             it = g_clumpTextureRemaps.erase(it);
-        else
+        } else {
             ++it;
+        }
     }
     if ((CTimer::m_snTimeInMilliseconds - g_textureRemapCutsceneLastTime) > 3000 && g_skinTextureRemapEnabled)
         EnsurePedTextureRemapState(ped, true);

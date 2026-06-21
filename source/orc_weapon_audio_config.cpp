@@ -50,19 +50,19 @@ static void OrcEnsureBuiltinDefaults() {
         g_builtin[i].airAbsorption = air;
     };
     using O = OrcWeaponSoundClass;
-    set((int)O::Shoot, 1.5f, 10000.0f, 1.0f, 2.0f);
-    set((int)O::After, 2.3f, 10000.0f, 6.0f, 2.0f);
-    set((int)O::Reload, 2.3f, 10000.0f, 6.0f, 2.0f);
-    set((int)O::ReloadOne, 2.3f, 10000.0f, 6.0f, 2.0f);
-    set((int)O::ReloadTwo, 2.3f, 10000.0f, 6.0f, 2.0f);
+    set((int)O::Shoot, 1.5f, 250.0f, 1.0f, 2.0f);
+    set((int)O::After, 2.3f, 180.0f, 6.0f, 2.0f);
+    set((int)O::Reload, 2.3f, 45.0f, 6.0f, 2.0f);
+    set((int)O::ReloadOne, 2.3f, 45.0f, 6.0f, 2.0f);
+    set((int)O::ReloadTwo, 2.3f, 45.0f, 6.0f, 2.0f);
     set((int)O::Distant, 2.0f, 500.0f, 1.0f, 2.0f);
-    set((int)O::LowAmmo, 4.5f, 10000.0f, 1.0f, 2.0f);
-    set((int)O::Dryfire, 1.5f, 10000.0f, 1.0f, 2.0f);
-    set((int)O::Melee, 2.0f, 3000.0f, 3.0f, 1.0f);
+    set((int)O::LowAmmo, 4.5f, 80.0f, 1.0f, 2.0f);
+    set((int)O::Dryfire, 1.5f, 35.0f, 1.0f, 2.0f);
+    set((int)O::Melee, 2.0f, 35.0f, 3.0f, 1.0f);
     set((int)O::Loop, 2.0f, 200.0f, 1.0f, 1.0f);
-    set((int)O::MinigunSpin, 3.0f, 10000.0f, 1.5f, 0.8f);
-    set((int)O::MinigunSpinEnd, 3.0f, 10000.0f, 1.5f, 0.8f);
-    set((int)O::ChainsawStop, 2.0f, 10000.0f, 1.5f, 1.0f);
+    set((int)O::MinigunSpin, 3.0f, 160.0f, 1.5f, 0.8f);
+    set((int)O::MinigunSpinEnd, 3.0f, 160.0f, 1.5f, 0.8f);
+    set((int)O::ChainsawStop, 2.0f, 80.0f, 1.5f, 1.0f);
 }
 
 static bool OrcMergeClassAttFromIni(const OrcIniDocument& doc, OrcWeaponAudioAttenuation& io, const char* classKey) {

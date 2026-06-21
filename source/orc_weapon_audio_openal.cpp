@@ -114,12 +114,13 @@ static void OrcApplyPlayParamsToSource(ALuint src, const OrcWeaponAudioPlayParam
         att.rolloffFactor = 0.01f;
         att.airAbsorption = 0.0f;
     }
+    const float gain = world ? OrcWeaponAudioApplyDistanceCullGain(ped, att.maxDist, p.gain) : p.gain;
 
     alSourcef(src, AL_REFERENCE_DISTANCE, att.refDist);
     alSourcef(src, AL_MAX_DISTANCE, att.maxDist);
     alSourcef(src, AL_ROLLOFF_FACTOR, att.rolloffFactor);
     alSourcef(src, AL_AIR_ABSORPTION_FACTOR, att.airAbsorption);
-    alSourcef(src, AL_GAIN, p.gain);
+    alSourcef(src, AL_GAIN, gain);
     alSourcef(src, AL_PITCH, p.pitch);
 
     if (world) {
@@ -348,7 +349,9 @@ void OrcWeaponAudioSyncLoopSourceWorldPos(ALuint source, CPed* ped, float gain) 
         return;
     const CVector p = ped->GetPosition();
     alSource3f(source, AL_POSITION, p.x, p.y, p.z);
-    alSourcef(source, AL_GAIN, gain);
+    ALfloat maxDist = 0.0f;
+    alGetSourcef(source, AL_MAX_DISTANCE, &maxDist);
+    alSourcef(source, AL_GAIN, OrcWeaponAudioApplyDistanceCullGain(ped, maxDist, gain));
     const float pitch = std::max(0.01f, std::min(4.0f, CTimer::ms_fTimeScale));
     alSourcef(source, AL_PITCH, pitch);
 }
@@ -358,7 +361,6 @@ void OrcWeaponAudioUpdateLoopSources() {
         return;
     std::lock_guard<std::mutex> lock(g_loopMutex);
     const float pitch = std::max(0.01f, std::min(4.0f, CTimer::ms_fTimeScale));
-    const float gain = std::max(0.0f, g_weaponCustomSoundGain);
     for (auto it = g_loopSources.begin(); it != g_loopSources.end();) {
         const ALuint src = *it;
         if (!src || !alIsSource(src)) {
@@ -373,7 +375,6 @@ void OrcWeaponAudioUpdateLoopSources() {
             continue;
         }
         alSourcef(src, AL_PITCH, pitch);
-        alSourcef(src, AL_GAIN, gain);
         ++it;
     }
 }

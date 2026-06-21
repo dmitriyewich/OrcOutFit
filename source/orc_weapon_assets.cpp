@@ -27,6 +27,7 @@
 #include "orc_attach.h"
 #include "orc_log.h"
 #include "orc_path.h"
+#include "orc_random_pick.h"
 #include "orc_types.h"
 #include "orc_weapon_assets.h"
 #include "orc_weapon_runtime.h"
@@ -40,6 +41,7 @@ static std::unordered_map<std::string, int> g_weaponReplacementByNick;
 static std::unordered_map<std::string, std::vector<int>> g_weaponReplacementRandomBySkin;
 static std::unordered_map<std::string, std::vector<int>> g_weaponReplacementRandomByWeapon;
 static std::unordered_map<std::string, std::vector<int>> g_weaponReplacementRandomBags;
+static std::unordered_map<std::string, OrcSequentialPickState> g_weaponReplacementSequentialStates;
 static std::unordered_map<std::string, int> g_weaponReplacementRandomChoiceByPed;
 static WeaponReplacementStats g_weaponReplacementStats;
 
@@ -49,6 +51,34 @@ std::string OrcGetWeaponModelBaseNameLower(int wt);
 
 static std::string MakeWeaponReplacementKey(const std::string& weaponLower, const std::string& matchLower) {
     return weaponLower + "|" + matchLower;
+}
+
+static int PedRefFromRandomChoiceKey(const std::string& choiceKey) {
+    const size_t sep = choiceKey.find('|');
+    if (sep == std::string::npos || sep == 0)
+        return 0;
+    return std::atoi(choiceKey.substr(0, sep).c_str());
+}
+
+static void EraseSequentialChoiceKeyFromStates(
+    std::unordered_map<std::string, OrcSequentialPickState>& states,
+    const std::string& choiceKey) {
+    for (auto& kv : states)
+        kv.second.activeChoiceKeys.erase(choiceKey);
+}
+
+static void PruneRandomChoicesForDeadPeds(
+    std::unordered_map<std::string, int>& choices,
+    std::unordered_map<std::string, OrcSequentialPickState>& sequentialStates) {
+    for (auto it = choices.begin(); it != choices.end();) {
+        const int pedRef = PedRefFromRandomChoiceKey(it->first);
+        if (pedRef > 0 && !OrcSafeGetPed(pedRef)) {
+            EraseSequentialChoiceKeyFromStates(sequentialStates, it->first);
+            it = choices.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 static void AppendUniqueLower(std::vector<std::string>& out, const std::string& value) {
@@ -148,6 +178,27 @@ static bool WeaponReplacementChoiceMatchesSnapshot(int choice, const WeaponRepla
         OrcToLowerAscii(g_weaponReplacementAssets[(size_t)choice].key) == snapshot.assetKeyLower;
 }
 
+static std::string WeaponReplacementChoiceSortKey(int choice) {
+    if (choice == kWeaponReplacementVanillaChoice)
+        return std::string{};
+    if (choice < 0 || choice >= (int)g_weaponReplacementAssets.size())
+        return "~";
+    return OrcToLowerAscii(g_weaponReplacementAssets[(size_t)choice].key);
+}
+
+static void SortWeaponReplacementRandomPools() {
+    auto sortPool = [](std::vector<int>& pool) {
+        std::sort(pool.begin(), pool.end(), [](int a, int b) {
+            return WeaponReplacementChoiceSortKey(a) < WeaponReplacementChoiceSortKey(b);
+        });
+        pool.erase(std::unique(pool.begin(), pool.end()), pool.end());
+    };
+    for (auto& kv : g_weaponReplacementRandomBySkin)
+        sortPool(kv.second);
+    for (auto& kv : g_weaponReplacementRandomByWeapon)
+        sortPool(kv.second);
+}
+
 static std::string StripSampColorCodes(std::string value) {
     std::string out;
     out.reserve(value.size());
@@ -211,6 +262,7 @@ static void DestroyWeaponReplacementAssets() {
     g_weaponReplacementRandomBySkin.clear();
     g_weaponReplacementRandomByWeapon.clear();
     g_weaponReplacementRandomBags.clear();
+    g_weaponReplacementSequentialStates.clear();
     g_weaponReplacementRandomChoiceByPed.clear();
     g_weaponReplacementStats = {};
 }
@@ -490,6 +542,8 @@ void DiscoverWeaponReplacements(bool rerollStickyChoices) {
         }
     }
 
+    SortWeaponReplacementRandomPools();
+
     g_weaponReplacementStats.randomWeaponWeapons = 0;
     for (const auto& kv : g_weaponReplacementRandomByWeapon)
         g_weaponReplacementStats.randomWeaponWeapons += (int)kv.second.size();
@@ -525,6 +579,7 @@ static std::unordered_map<std::string, int> g_weaponTextureByNick;
 static std::unordered_map<std::string, int> g_weaponTextureBySkin;
 static std::unordered_map<std::string, std::vector<int>> g_weaponTextureRandomBySkin;
 static std::unordered_map<std::string, std::vector<int>> g_weaponTextureRandomBags;
+static std::unordered_map<std::string, OrcSequentialPickState> g_weaponTextureSequentialStates;
 static std::unordered_map<std::string, int> g_weaponTextureRandomChoiceByPed;
 static std::vector<WeaponTextureRestoreEntry> g_weaponTextureRestoreEntries;
 static std::vector<WeaponTextureRestoreEntry> g_weaponTextureHeldRestoreEntries;
@@ -901,6 +956,7 @@ static void DestroyWeaponTextureAssets() {
     g_weaponTextureBySkin.clear();
     g_weaponTextureRandomBySkin.clear();
     g_weaponTextureRandomBags.clear();
+    g_weaponTextureSequentialStates.clear();
     g_weaponTextureRandomChoiceByPed.clear();
     g_weaponTextureStats = {};
 }
@@ -981,6 +1037,22 @@ static void AddWeaponTextureAsset(const std::string& key,
         (*directMap)[mapKey] = index;
     if (randomMap)
         (*randomMap)[mapKey].push_back(index);
+}
+
+static std::string WeaponTextureChoiceSortKey(int choice) {
+    if (choice < 0 || choice >= (int)g_weaponTextureAssets.size())
+        return "~";
+    return OrcToLowerAscii(g_weaponTextureAssets[(size_t)choice].key);
+}
+
+static void SortWeaponTextureRandomPools() {
+    for (auto& kv : g_weaponTextureRandomBySkin) {
+        std::vector<int>& pool = kv.second;
+        std::sort(pool.begin(), pool.end(), [](int a, int b) {
+            return WeaponTextureChoiceSortKey(a) < WeaponTextureChoiceSortKey(b);
+        });
+        pool.erase(std::unique(pool.begin(), pool.end()), pool.end());
+    }
 }
 
 void DiscoverWeaponTextures() {
@@ -1103,6 +1175,8 @@ void DiscoverWeaponTextures() {
         }
     }
 
+    SortWeaponTextureRandomPools();
+
     g_weaponTextureStats.indexedTxdFiles = (int)g_weaponTextureAssets.size();
     g_weaponTextureStats.uniqueSkinTextures = (int)g_weaponTextureBySkin.size();
     g_weaponTextureStats.randomSkinTextures = 0;
@@ -1142,7 +1216,8 @@ static WeaponTextureAsset* PickRandomWeaponTextureAsset(const std::string& mapKe
 static WeaponTextureAsset* PickStickyRandomWeaponTextureAsset(CPed* ped, const std::string& mapKey) {
     if (!ped)
         return nullptr;
-    const int pedRef = CPools::GetPedRef(ped);
+    PruneRandomChoicesForDeadPeds(g_weaponTextureRandomChoiceByPed, g_weaponTextureSequentialStates);
+    const int pedRef = OrcSafeGetPedRef(ped);
     if (pedRef <= 0)
         return PickRandomWeaponTextureAsset(mapKey);
 
@@ -1150,17 +1225,35 @@ static WeaponTextureAsset* PickStickyRandomWeaponTextureAsset(CPed* ped, const s
     auto chosen = g_weaponTextureRandomChoiceByPed.find(choiceKey);
     if (chosen != g_weaponTextureRandomChoiceByPed.end()) {
         const int assetIndex = chosen->second;
-        if (assetIndex >= 0 && assetIndex < (int)g_weaponTextureAssets.size())
+        if (assetIndex >= 0 && assetIndex < (int)g_weaponTextureAssets.size()) {
+            if (g_weaponTextureRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL)
+                g_weaponTextureSequentialStates[mapKey].activeChoiceKeys.insert(choiceKey);
             return &g_weaponTextureAssets[(size_t)assetIndex];
+        }
     }
 
-    WeaponTextureAsset* asset = PickRandomWeaponTextureAsset(mapKey);
-    if (!asset)
+    int assetIndex = -1;
+    if (g_weaponTextureRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL) {
+        auto poolIt = g_weaponTextureRandomBySkin.find(mapKey);
+        if (poolIt == g_weaponTextureRandomBySkin.end() || poolIt->second.empty())
+            return nullptr;
+        assetIndex = OrcSequentialPickSticky(
+            g_weaponTextureSequentialStates[mapKey],
+            g_weaponTextureRandomChoiceByPed,
+            choiceKey,
+            poolIt->second,
+            -1);
+    } else {
+        WeaponTextureAsset* asset = PickRandomWeaponTextureAsset(mapKey);
+        if (!asset)
+            return nullptr;
+        assetIndex = (int)(asset - g_weaponTextureAssets.data());
+        if (assetIndex >= 0)
+            g_weaponTextureRandomChoiceByPed[choiceKey] = assetIndex;
+    }
+    if (assetIndex < 0 || assetIndex >= (int)g_weaponTextureAssets.size())
         return nullptr;
-    const int assetIndex = (int)(asset - g_weaponTextureAssets.data());
-    if (assetIndex >= 0)
-        g_weaponTextureRandomChoiceByPed[choiceKey] = assetIndex;
-    return asset;
+    return &g_weaponTextureAssets[(size_t)assetIndex];
 }
 
 /// `wprand:<weapon_folder>:<dff_basename>` (e.g. `wprand:desert_eagle:markvii`) — same match key as
@@ -1285,10 +1378,12 @@ WeaponTextureAsset* OrcResolveUsableWeaponTextureAssetForPed(CPed* ped,
     if (asset->key.rfind("skinrandom:", 0) == 0) {
         const int failedIndex = (int)(asset - g_weaponTextureAssets.data());
         for (auto it = g_weaponTextureRandomChoiceByPed.begin(); it != g_weaponTextureRandomChoiceByPed.end();) {
-            if (it->second == failedIndex)
+            if (it->second == failedIndex) {
+                EraseSequentialChoiceKeyFromStates(g_weaponTextureSequentialStates, it->first);
                 it = g_weaponTextureRandomChoiceByPed.erase(it);
-            else
+            } else {
                 ++it;
+            }
         }
     }
     return nullptr;
@@ -2250,19 +2345,41 @@ static int PopWeaponReplacementRandomChoice(const std::string& bagPoolKey, const
     return v;
 }
 
+static std::vector<int> BuildWeaponReplacementSequentialPool(const std::vector<int>& sourcePool) {
+    std::vector<int> pool = sourcePool;
+    if (g_weaponReplacementRandomIncludeVanilla &&
+        std::find(pool.begin(), pool.end(), kWeaponReplacementVanillaChoice) == pool.end()) {
+        pool.insert(pool.begin(), kWeaponReplacementVanillaChoice);
+    }
+    return pool;
+}
+
 static int PickStickyWeaponReplacementChoice(CPed* ped,
     const std::string& stickySuffix,
     const std::string& bagPoolKey,
     const std::vector<int>& sourcePool) {
     if (!ped || sourcePool.empty())
         return -2;
+    PruneRandomChoicesForDeadPeds(g_weaponReplacementRandomChoiceByPed, g_weaponReplacementSequentialStates);
     const int pedRef = OrcSafeGetPedRef(ped);
     if (pedRef <= 0)
         return PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool);
     const std::string choiceKey = std::to_string(pedRef) + "|" + stickySuffix;
     auto chosen = g_weaponReplacementRandomChoiceByPed.find(choiceKey);
-    if (chosen != g_weaponReplacementRandomChoiceByPed.end())
+    if (chosen != g_weaponReplacementRandomChoiceByPed.end()) {
+        if (g_weaponReplacementRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL)
+            g_weaponReplacementSequentialStates[bagPoolKey].activeChoiceKeys.insert(choiceKey);
         return chosen->second;
+    }
+    if (g_weaponReplacementRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL) {
+        const std::vector<int> sequentialPool = BuildWeaponReplacementSequentialPool(sourcePool);
+        return OrcSequentialPickSticky(
+            g_weaponReplacementSequentialStates[bagPoolKey],
+            g_weaponReplacementRandomChoiceByPed,
+            choiceKey,
+            sequentialPool,
+            -2);
+    }
     const int pick = PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool);
     int finalPick = pick;
     auto avoidIt = g_weaponReplacementRerollAvoidChoiceByPed.find(choiceKey);
@@ -2367,10 +2484,12 @@ WeaponReplacementAsset* OrcResolveUsableWeaponReplacementAssetForPed(CPed* ped, 
         if (asset->key.rfind("skinrandom:", 0) == 0 || asset->key.rfind("wprand:", 0) == 0) {
             const int failedIndex = (int)(asset - g_weaponReplacementAssets.data());
             for (auto it = g_weaponReplacementRandomChoiceByPed.begin(); it != g_weaponReplacementRandomChoiceByPed.end();) {
-                if (it->second == failedIndex)
+                if (it->second == failedIndex) {
+                    EraseSequentialChoiceKeyFromStates(g_weaponReplacementSequentialStates, it->first);
                     it = g_weaponReplacementRandomChoiceByPed.erase(it);
-                else
+                } else {
                     ++it;
+                }
             }
         }
         return nullptr;

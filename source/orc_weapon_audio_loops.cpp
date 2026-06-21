@@ -180,7 +180,8 @@ static bool OrcTryStartLoopSuffix(const OrcWeaponAudioStemContext& ctx, const ch
         OrcLogError("weapon audio: decode failed for loop %s", path.c_str());
         return false;
     }
-    OrcWeaponAudioPlayParams lp = OrcWeaponAudioBuildPlayParams(&ctx, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed, OrcWeaponSoundClass::Loop);
+    const OrcWeaponSoundClass cls = OrcWeaponInferSoundClassFromSuffix(suffix);
+    OrcWeaponAudioPlayParams lp = OrcWeaponAudioBuildPlayParams(&ctx, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed, cls);
     ALuint& src = OrcLoopRef(ctx.ped, slot);
     if (OrcWeaponAudioStartLoopSource(buf, lp, ctx.ped, src)) {
         OrcWeaponAudioMarkSuppressVanilla();
@@ -356,7 +357,7 @@ bool OrcWeaponAudioHandleVanillaSfx(CAESound* snd) {
         return true;
     }
     if (cls == OrcWeaponSoundClass::MinigunSpinEnd) {
-        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed)) {
+        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped))) {
             OrcStopLoopSlot(ped, OrcLoop_MinigunBarrelSpin);
             OrcWeaponAudioMarkSuppressVanilla();
             return true;
@@ -364,7 +365,7 @@ bool OrcWeaponAudioHandleVanillaSfx(CAESound* snd) {
         return false;
     }
     if (cls == OrcWeaponSoundClass::ChainsawStop) {
-        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed)) {
+        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped))) {
             OrcStopChainsawLoops(ped);
             OrcWeaponAudioMarkSuppressVanilla();
             return true;
@@ -372,7 +373,7 @@ bool OrcWeaponAudioHandleVanillaSfx(CAESound* snd) {
         return false;
     }
     if (cls == OrcWeaponSoundClass::Shoot) {
-        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed)) {
+        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped))) {
             OrcWeaponAudioMarkSuppressVanilla();
             return true;
         }
@@ -469,20 +470,20 @@ static void OrcStopChainsawLoops(CPed* ped) {
 
 static void __fastcall PlayFlameThrowerSounds_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPhysical* entity, short sfx1,
     short sfx2, int audioEventId, float audability, float speed) {
-    (void)entity;
     (void)audioEventId;
     (void)audability;
     (void)speed;
 
     bool handled = false;
     if (g_weaponCustomSounds && g_weaponReplacementEnabled && self) {
-        CPed* ped = OrcWeaponAudioPedFromWeaponAudio(self);
+        CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
         if (!ped)
-            ped = OrcWeaponAudioPedFromPhysical(entity);
+            ped = OrcWeaponAudioPedFromWeaponAudio(self);
         const int wt = static_cast<int>(WEAPONTYPE_FTHROWER);
         OrcWeaponAudioStemContext ctx;
         if (ped && OrcWeaponAudioTryBuildStemContext(ped, wt, ctx)) {
-            if (sfx1 == 83 && OrcWeaponAudioTryPlaySuffix(ctx, "_flamethrower_start", OrcLoopGain(), OrcWeaponSpatial::WorldAtPed))
+            if (sfx1 == 83 &&
+                OrcWeaponAudioTryPlaySuffix(ctx, "_flamethrower_start", OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped)))
                 handled = true;
             if (sfx2 == 26 && OrcTryStartLoopSuffix(ctx, "_flamethrower_fire", OrcLoop_FlameFire))
                 handled = true;
@@ -496,9 +497,9 @@ static void __fastcall PlayFlameThrowerSounds_Detour(CAEWeaponAudioEntity* self,
 static void __fastcall PlayFlameIdleGas_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPhysical* entity) {
     bool handled = false;
     if (g_weaponCustomSounds && g_weaponReplacementEnabled && self) {
-        CPed* ped = OrcWeaponAudioPedFromWeaponAudio(self);
+        CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
         if (!ped)
-            ped = OrcWeaponAudioPedFromPhysical(entity);
+            ped = OrcWeaponAudioPedFromWeaponAudio(self);
         if (ped &&
             OrcTryStartLoopSuffixForPed(ped, static_cast<int>(WEAPONTYPE_FTHROWER), "_flamethrower_idlegasloop",
                 OrcLoop_FlameGasIdle))
@@ -665,7 +666,7 @@ static void OrcUpdateChainsawLoops(CAEWeaponAudioEntity* self, CPed* ped) {
         break;
     case kChainsawStateStopping:
     case kChainsawStateStopped:
-        OrcWeaponAudioTryPlaySuffix(ctx, "_chainsaw_stop", OrcLoopGain(), OrcWeaponSpatial::WorldAtPed);
+        OrcWeaponAudioTryPlaySuffix(ctx, "_chainsaw_stop", OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped));
         OrcStopChainsawLoops(ped);
         break;
     default:
