@@ -146,6 +146,7 @@ struct OrcResolvedPedSkin {
     CustomSkinCfg* custom = nullptr;
     StandardSkinCfg* standard = nullptr;
     bool isLocalPed = false;
+    bool fromRandomPool = false;
 };
 OrcResolvedPedSkin OrcResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer);
 OrcResolvedPedSkin OrcResolveSkinForPedModel(CPed* ped, CPlayerPed* localPlayer, int baseModelId);

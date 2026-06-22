@@ -46,6 +46,7 @@ struct PedNativeSkinState {
     bool restoreDeferred = false;
     bool overlayFallback = false;
     bool baseTxdRefAdded = false;
+    bool lateSetModelAllowed = false;
     DWORD retryAfterMs = 0;
     DWORD lastLogMs = 0;
 };
@@ -124,6 +125,18 @@ static bool NativeStateTargetMatches(const PedNativeSkinState& state, CPed* ped,
     return state.ped == ped &&
         state.baseModelId == baseModelId &&
         state.customNameLower == OrcToLowerAscii(skin.name);
+}
+
+static bool NativeStateOwnsCurrentClump(const PedNativeSkinState& state, CPed* ped) {
+    return ped &&
+        state.ped == ped &&
+        !state.failed &&
+        state.appliedClump &&
+        ped->m_pRwClump == state.appliedClump;
+}
+
+static bool ShouldAllowLateNativeSetModel(const OrcResolvedPedSkin& resolved) {
+    return resolved.isLocalPed && !resolved.fromRandomPool;
 }
 
 static bool TickElapsed(DWORD tick) {
@@ -398,6 +411,16 @@ static void FillNativeStateFromSkin(PedNativeSkinState& state, CPed* ped, int ke
     state.txdSlot = skin.txdSlot;
 }
 
+static void FillNativeStateFromSkin(PedNativeSkinState& state,
+    CPed* ped,
+    int key,
+    int baseModelId,
+    const CustomSkinCfg& skin,
+    bool lateSetModelAllowed) {
+    FillNativeStateFromSkin(state, ped, key, baseModelId, skin);
+    state.lateSetModelAllowed = lateSetModelAllowed;
+}
+
 static void StoreAppliedNativeState(PedNativeSkinState&& state, RpClump* clump) {
     state.appliedClump = clump;
     ReplaceNativeState(state.pedRef, std::move(state));
@@ -408,9 +431,10 @@ static void MarkNativeFailure(CPed* ped,
     int baseModelId,
     const CustomSkinCfg& skin,
     const char* reason,
-    bool overlayFallback) {
+    bool overlayFallback,
+    bool lateSetModelAllowed) {
     PedNativeSkinState state;
-    FillNativeStateFromSkin(state, ped, key, baseModelId, skin);
+    FillNativeStateFromSkin(state, ped, key, baseModelId, skin, lateSetModelAllowed);
     state.failed = true;
     state.overlayFallback = overlayFallback && g_skinNativeFallback == SKIN_NATIVE_FALLBACK_OVERLAY;
     state.lastLogMs = GetTickCount();
@@ -433,7 +457,7 @@ static void DeferNativeApply(CPed* ped, int key, int baseModelId, const CustomSk
         EraseNativeState(existing);
     }
 
-    FillNativeStateFromSkin(state, ped, key, baseModelId, skin);
+    FillNativeStateFromSkin(state, ped, key, baseModelId, skin, true);
     state.appliedClump = nullptr;
     state.failed = false;
     state.applyDeferred = true;
@@ -478,35 +502,27 @@ static bool RestoreNativeState(int key, PedNativeSkinState& state) {
     return true;
 }
 
-static bool RestoreIfActive(CPed* ped) {
-    const int key = NativePedKey(ped);
-    auto it = g_nativeSkinStates.find(key);
-    if (it == g_nativeSkinStates.end())
-        return true;
-    return RestoreNativeState(key, it->second);
-}
-
 static bool ApplyNativeSkin(CPed* ped, int key, int baseModelId, CustomSkinCfg& skin) {
     if (!ped || baseModelId < 0) {
-        MarkNativeFailure(ped, key, baseModelId, skin, "invalid ped/base", false);
+        MarkNativeFailure(ped, key, baseModelId, skin, "invalid ped/base", false, true);
         return false;
     }
     if (!OrcIsValidStandardSkinModel(baseModelId)) {
-        MarkNativeFailure(ped, key, baseModelId, skin, "invalid base ped model", false);
+        MarkNativeFailure(ped, key, baseModelId, skin, "invalid base ped model", false, true);
         return false;
     }
     if (!LoadBaseModelForSetModel(baseModelId)) {
-        MarkNativeFailure(ped, key, baseModelId, skin, "base model not loaded", false);
+        MarkNativeFailure(ped, key, baseModelId, skin, "base model not loaded", false, true);
         return false;
     }
     if (!OrcEnsureCustomSkinLoaded(skin) || !skin.rwObject || skin.rwObject->type != rpCLUMP) {
-        MarkNativeFailure(ped, key, baseModelId, skin, "custom DFF/TXD load failed", false);
+        MarkNativeFailure(ped, key, baseModelId, skin, "custom DFF/TXD load failed", false, true);
         return false;
     }
 
     CBaseModelInfo* baseMi = CModelInfo::GetModelInfo(baseModelId);
     if (!baseMi || baseMi->GetModelType() != MODEL_INFO_PED) {
-        MarkNativeFailure(ped, key, baseModelId, skin, "base model info is not ped", false);
+        MarkNativeFailure(ped, key, baseModelId, skin, "base model info is not ped", false, true);
         return false;
     }
 
@@ -520,9 +536,9 @@ static bool ApplyNativeSkin(CPed* ped, int key, int baseModelId, CustomSkinCfg& 
     }
 
     PedNativeSkinState pendingState;
-    FillNativeStateFromSkin(pendingState, ped, key, baseModelId, skin);
+    FillNativeStateFromSkin(pendingState, ped, key, baseModelId, skin, true);
     if (!AcquireNativeBaseTxdRef(pendingState, baseMi, baseModelId)) {
-        MarkNativeFailure(ped, key, baseModelId, skin, "base TXD dictionary unavailable", true);
+        MarkNativeFailure(ped, key, baseModelId, skin, "base TXD dictionary unavailable", true, true);
         return false;
     }
 
@@ -544,7 +560,7 @@ static bool ApplyNativeSkin(CPed* ped, int key, int baseModelId, CustomSkinCfg& 
     RpClump* newClump = ped->m_pRwClump;
     if (!setOk || !newClump || newClump == oldClump) {
         ReleaseNativeBaseTxdRef(pendingState);
-        MarkNativeFailure(ped, key, baseModelId, skin, setOk ? "SetModelIndex did not create custom clump" : "SetModelIndex failed", true);
+        MarkNativeFailure(ped, key, baseModelId, skin, setOk ? "SetModelIndex did not create custom clump" : "SetModelIndex failed", true, true);
         return false;
     }
 
@@ -570,27 +586,48 @@ static void UpdateNativePed(CPed* ped, CPlayerPed* localPlayer) {
     if (!key)
         return;
 
+    auto it = g_nativeSkinStates.find(key);
     OrcResolvedPedSkin resolved = OrcResolveSkinForPed(ped, localPlayer);
     if (!resolved.custom) {
-        RestoreIfActive(ped);
+        if (it == g_nativeSkinStates.end())
+            return;
+        if (resolved.isLocalPed) {
+            RestoreNativeState(key, it->second);
+            return;
+        }
+        if (NativeStateOwnsCurrentClump(it->second, ped))
+            return;
+        EraseNativeState(it);
         return;
     }
 
-    auto it = g_nativeSkinStates.find(key);
     int baseModelId = (int)ped->m_nModelIndex;
     if (it != g_nativeSkinStates.end() && it->second.ped == ped && it->second.baseModelId >= 0) {
-        const bool stillOwnsClump =
-            !it->second.failed && it->second.appliedClump && ped->m_pRwClump == it->second.appliedClump;
+        const bool stillOwnsClump = NativeStateOwnsCurrentClump(it->second, ped);
         const bool sameBaseModel = (int)ped->m_nModelIndex == it->second.baseModelId;
         if (stillOwnsClump || sameBaseModel)
             baseModelId = it->second.baseModelId;
+    }
+
+    if (!ShouldAllowLateNativeSetModel(resolved)) {
+        if (it == g_nativeSkinStates.end())
+            return;
+        PedNativeSkinState& state = it->second;
+        if (NativeStateOwnsCurrentClump(state, ped)) {
+            state.applyDeferred = false;
+            state.restoreDeferred = false;
+            return;
+        }
+        if (state.ped == ped)
+            EraseNativeState(it);
+        return;
     }
 
     if (it != g_nativeSkinStates.end() && NativeStateTargetMatches(it->second, ped, *resolved.custom, baseModelId)) {
         PedNativeSkinState& state = it->second;
         if (state.failed)
             return;
-        if (state.appliedClump && ped->m_pRwClump == state.appliedClump) {
+        if (NativeStateOwnsCurrentClump(state, ped)) {
             state.applyDeferred = false;
             state.restoreDeferred = false;
             return;
@@ -631,12 +668,13 @@ static void __fastcall CPedSetModelIndex_Detour(CPed* ped, void*, unsigned int m
     if (resolved.custom) {
         CustomSkinCfg& skin = *resolved.custom;
         const int key = NativePedKey(ped);
+        const bool lateSetModelAllowed = ShouldAllowLateNativeSetModel(resolved);
         CBaseModelInfo* baseMi = CModelInfo::GetModelInfo((int)modelId);
         if (!key || !baseMi || baseMi->GetModelType() != MODEL_INFO_PED) {
             g_CPedSetModelIndex_Orig(ped, modelId);
             handled = true;
         } else if (!OrcEnsureCustomSkinLoaded(skin) || !skin.rwObject || skin.rwObject->type != rpCLUMP) {
-            MarkNativeFailure(ped, key, (int)modelId, skin, "custom DFF/TXD load failed in SetModelIndex hook", false);
+            MarkNativeFailure(ped, key, (int)modelId, skin, "custom DFF/TXD load failed in SetModelIndex hook", false, lateSetModelAllowed);
             g_nativeSetModelInProgress = true;
             __try {
                 g_CPedSetModelIndex_Orig(ped, modelId);
@@ -652,10 +690,10 @@ static void __fastcall CPedSetModelIndex_Detour(CPed* ped, void*, unsigned int m
             PreparePedClump(templateClump, clumpMi);
 
             PedNativeSkinState pendingState;
-            FillNativeStateFromSkin(pendingState, ped, key, (int)modelId, skin);
+            FillNativeStateFromSkin(pendingState, ped, key, (int)modelId, skin, lateSetModelAllowed);
             if (!AcquireNativeBaseTxdRef(pendingState, baseMi, (int)modelId)) {
                 ReleaseNativeBaseTxdRef(pendingState);
-                MarkNativeFailure(ped, key, (int)modelId, skin, "base TXD dictionary unavailable in SetModelIndex hook", true);
+                MarkNativeFailure(ped, key, (int)modelId, skin, "base TXD dictionary unavailable in SetModelIndex hook", true, lateSetModelAllowed);
 
                 g_nativeSetModelInProgress = true;
                 __try {
@@ -688,7 +726,7 @@ static void __fastcall CPedSetModelIndex_Detour(CPed* ped, void*, unsigned int m
                         ped, modelId, skin.name.c_str(), skin.txdSlot, newClump, samp_bridge::GetVersionName());
                 } else {
                     ReleaseNativeBaseTxdRef(pendingState);
-                    MarkNativeFailure(ped, key, (int)modelId, skin, setOk ? "SetModelIndex hook produced no clump" : "SetModelIndex hook failed", true);
+                    MarkNativeFailure(ped, key, (int)modelId, skin, setOk ? "SetModelIndex hook produced no clump" : "SetModelIndex hook failed", true, lateSetModelAllowed);
                 }
             }
             handled = true;
@@ -773,7 +811,16 @@ void OrcSkinNativeClearRuntimeState() {
         return;
     }
 
+    PruneNativeStates();
     for (auto it = g_nativeSkinStates.begin(); it != g_nativeSkinStates.end();) {
+        if (!it->second.lateSetModelAllowed) {
+            if (NativeStateOwnsCurrentClump(it->second, it->second.ped))
+                ++it;
+            else
+                it = EraseNativeState(it);
+            continue;
+        }
+
         const int key = it->first;
         if (RestoreNativeState(key, it->second))
             it = g_nativeSkinStates.begin();

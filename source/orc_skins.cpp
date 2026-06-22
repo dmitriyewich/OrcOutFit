@@ -933,6 +933,7 @@ OrcResolvedPedSkin OrcResolveSkinForPedModel(CPed* ped, CPlayerPed* localPlayer,
     if (CustomSkinCfg* randomSkin = ResolveRandomSkinForPedModel(ped, baseModelId)) {
         result.custom = randomSkin;
         result.standard = nullptr;
+        result.fromRandomPool = true;
     }
     return result;
 }

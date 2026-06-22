@@ -169,6 +169,14 @@
     X(SelectedSkinSource, "Источник выбранного overlay-скина", "Selected overlay skin source") \
     X(SelectedCustomSkin, "Кастомный скин", "Custom skin") \
     X(SelectedStandardSkin, "Стандартный скин", "Standard skin") \
+    X(SkinSearch, "Поиск", "Search") \
+    X(SkinSearchCustomHint, "часть имени DFF", "DFF name part") \
+    X(SkinSearchStandardHint, "DFF или ID", "DFF or ID") \
+    X(SelectedSkinFormat, "Выбран: %s", "Selected: %s") \
+    X(ShowSelectedSkin, "Показать выбранный", "Show selected") \
+    X(SavedSkinMissingFormat, "Сохранённый скин не найден: %s", "Saved skin not found: %s") \
+    X(SavedStandardSkinMissingFormat, "Сохранённый стандартный скин не найден: ID %d", "Saved standard skin not found: ID %d") \
+    X(NoSkinsMatchSearch, "По фильтру ничего не найдено.", "No skins match the filter.") \
     X(NoDffSkinsFolder, "В папке Skins нет *.dff.", "No *.dff in Skins folder.") \
     X(Skin, "Скин", "Skin") \
     X(BindSkinToNicks, "Привязать этот скин к никам", "Bind this skin to nick(s)") \
