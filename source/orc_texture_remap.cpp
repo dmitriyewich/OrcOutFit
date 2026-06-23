@@ -189,6 +189,8 @@ static std::unordered_map<int, PedTextureRemapState> g_pedTextureRemaps;
 static std::unordered_map<std::string, PedTextureRemapState> g_clumpTextureRemaps;
 static std::unordered_map<std::string, OrcSequentialPickState> g_textureRemapSequentialStates;
 static std::unordered_map<std::string, int> g_textureRemapSequentialAssignments;
+static std::unordered_map<std::string, OrcRandomNoRepeatPickState> g_textureRemapNoRepeatStates;
+static std::unordered_map<std::string, int> g_textureRemapNoRepeatAssignments;
 static std::vector<TextureRemapRestoreEntry> g_textureRemapRestoreEntries;
 static std::unordered_map<std::string, std::vector<TextureRemapNickBinding>> g_textureRemapNickBindingsByDff;
 
@@ -514,13 +516,28 @@ static std::vector<int> TextureRemapIndexPool(int total) {
     return pool;
 }
 
+static bool TextureRemapPickModeTracksActiveChoices() {
+    return g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL ||
+        g_skinTextureRemapPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT;
+}
+
 static void EraseTextureRemapSequentialChoiceFromStates(const std::string& choiceKey) {
     for (auto& kv : g_textureRemapSequentialStates)
         kv.second.activeChoiceKeys.erase(choiceKey);
 }
 
-static void PruneTextureRemapSequentialAssignments() {
-    for (auto it = g_textureRemapSequentialAssignments.begin(); it != g_textureRemapSequentialAssignments.end();) {
+static void ReleaseTextureRemapNoRepeatChoiceFromStates(
+    const std::string& choiceKey,
+    const std::unordered_map<std::string, int>& assignments,
+    bool recycle) {
+    for (auto& kv : g_textureRemapNoRepeatStates)
+        OrcRandomNoRepeatReleaseChoice(kv.second, assignments, choiceKey, recycle);
+}
+
+static void PruneTextureRemapAssignments(
+    std::unordered_map<std::string, int>& assignments,
+    bool noRepeatAssignments) {
+    for (auto it = assignments.begin(); it != assignments.end();) {
         bool erase = false;
         if (it->first.rfind("r:", 0) == 0) {
             const size_t sep = it->first.find('|');
@@ -529,15 +546,23 @@ static void PruneTextureRemapSequentialAssignments() {
         }
 
         if (erase) {
-            EraseTextureRemapSequentialChoiceFromStates(it->first);
-            it = g_textureRemapSequentialAssignments.erase(it);
+            if (noRepeatAssignments)
+                ReleaseTextureRemapNoRepeatChoiceFromStates(it->first, assignments, true);
+            else
+                EraseTextureRemapSequentialChoiceFromStates(it->first);
+            it = assignments.erase(it);
         } else {
             ++it;
         }
     }
 }
 
-static void ReleaseTextureRemapSequentialAssignmentsForOwner(const std::string& ownerKey) {
+static void PruneTextureRemapTrackedAssignments() {
+    PruneTextureRemapAssignments(g_textureRemapSequentialAssignments, false);
+    PruneTextureRemapAssignments(g_textureRemapNoRepeatAssignments, true);
+}
+
+static void ReleaseTextureRemapTrackedAssignmentsForOwner(const std::string& ownerKey) {
     if (ownerKey.empty())
         return;
     const std::string prefix = ownerKey + "|";
@@ -545,6 +570,14 @@ static void ReleaseTextureRemapSequentialAssignmentsForOwner(const std::string& 
         if (it->first.rfind(prefix, 0) == 0) {
             EraseTextureRemapSequentialChoiceFromStates(it->first);
             it = g_textureRemapSequentialAssignments.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = g_textureRemapNoRepeatAssignments.begin(); it != g_textureRemapNoRepeatAssignments.end();) {
+        if (it->first.rfind(prefix, 0) == 0) {
+            ReleaseTextureRemapNoRepeatChoiceFromStates(it->first, g_textureRemapNoRepeatAssignments, true);
+            it = g_textureRemapNoRepeatAssignments.erase(it);
         } else {
             ++it;
         }
@@ -579,12 +612,12 @@ static bool TextureRemapOwnerIsDead(const std::string& ownerKey) {
 }
 
 static void PruneTextureRemapStateMaps() {
-    if (g_skinTextureRemapPickMode != ORC_RANDOM_PICK_SEQUENTIAL)
+    if (!TextureRemapPickModeTracksActiveChoices())
         return;
 
     for (auto it = g_pedTextureRemaps.begin(); it != g_pedTextureRemaps.end();) {
         if (TextureRemapOwnerIsDead(it->second.sequentialOwnerKey)) {
-            ReleaseTextureRemapSequentialAssignmentsForOwner(it->second.sequentialOwnerKey);
+            ReleaseTextureRemapTrackedAssignmentsForOwner(it->second.sequentialOwnerKey);
             it = g_pedTextureRemaps.erase(it);
         } else {
             ++it;
@@ -593,31 +626,40 @@ static void PruneTextureRemapStateMaps() {
 
     for (auto it = g_clumpTextureRemaps.begin(); it != g_clumpTextureRemaps.end();) {
         if (TextureRemapOwnerIsDead(it->second.sequentialOwnerKey)) {
-            ReleaseTextureRemapSequentialAssignmentsForOwner(it->second.sequentialOwnerKey);
+            ReleaseTextureRemapTrackedAssignmentsForOwner(it->second.sequentialOwnerKey);
             it = g_clumpTextureRemaps.erase(it);
         } else {
             ++it;
         }
     }
 
-    PruneTextureRemapSequentialAssignments();
+    PruneTextureRemapTrackedAssignments();
 }
 
-static int PickSequentialTextureRemapIndex(PedTextureRemapState& state, const std::string& poolKey, int total) {
+static int PickTrackedTextureRemapIndex(PedTextureRemapState& state, const std::string& poolKey, int total) {
     const std::vector<int> pool = TextureRemapIndexPool(total);
     if (pool.empty() || state.sequentialOwnerKey.empty())
         return -1;
-    PruneTextureRemapSequentialAssignments();
+    PruneTextureRemapTrackedAssignments();
+    const std::string choiceKey = TextureRemapSequentialChoiceKey(state, poolKey);
+    if (g_skinTextureRemapPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT) {
+        return OrcRandomNoRepeatPickSticky(
+            g_textureRemapNoRepeatStates[poolKey],
+            g_textureRemapNoRepeatAssignments,
+            choiceKey,
+            pool,
+            -1);
+    }
     return OrcSequentialPickSticky(
         g_textureRemapSequentialStates[poolKey],
         g_textureRemapSequentialAssignments,
-        TextureRemapSequentialChoiceKey(state, poolKey),
+        choiceKey,
         pool,
         -1);
 }
 
 static void SelectRandomTextureRemapsPerTexture(PedTextureRemapState& state) {
-    const bool sequential = g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL &&
+    const bool trackedPick = TextureRemapPickModeTracksActiveChoices() &&
         !state.sequentialOwnerKey.empty();
     for (int i = 0; i < state.slotCount; ++i) {
         TextureRemapSlotState& slot = state.slots[(size_t)i];
@@ -626,8 +668,8 @@ static void SelectRandomTextureRemapsPerTexture(PedTextureRemapState& state) {
             slot.selected = -1;
             continue;
         }
-        if (sequential) {
-            const int picked = PickSequentialTextureRemapIndex(state, TextureRemapSequentialSlotPoolKey(state, slot), total);
+        if (trackedPick) {
+            const int picked = PickTrackedTextureRemapIndex(state, TextureRemapSequentialSlotPoolKey(state, slot), total);
             slot.selected = (picked >= 0 && picked < total) ? picked : RandomInclusive(0, total - 1);
         } else {
             slot.selected = RandomInclusive(0, total - 1);
@@ -648,11 +690,11 @@ static void SelectRandomTextureRemapsLinkedVariant(PedTextureRemapState& state) 
         return;
     }
 
-    const bool sequential = g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL &&
+    const bool trackedPick = TextureRemapPickModeTracksActiveChoices() &&
         !state.sequentialOwnerKey.empty();
     int linkedVariant = -1;
-    if (sequential)
-        linkedVariant = PickSequentialTextureRemapIndex(state, TextureRemapSequentialLinkedPoolKey(state), maxVariants);
+    if (trackedPick)
+        linkedVariant = PickTrackedTextureRemapIndex(state, TextureRemapSequentialLinkedPoolKey(state), maxVariants);
     if (linkedVariant < 0 || linkedVariant >= maxVariants)
         linkedVariant = RandomInclusive(0, maxVariants - 1);
     for (int i = 0; i < state.slotCount; ++i) {
@@ -662,8 +704,8 @@ static void SelectRandomTextureRemapsLinkedVariant(PedTextureRemapState& state) 
             slot.selected = -1;
         } else if (linkedVariant < total) {
             slot.selected = linkedVariant;
-        } else if (sequential) {
-            const int picked = PickSequentialTextureRemapIndex(state, TextureRemapSequentialSlotPoolKey(state, slot), total);
+        } else if (trackedPick) {
+            const int picked = PickTrackedTextureRemapIndex(state, TextureRemapSequentialSlotPoolKey(state, slot), total);
             slot.selected = (picked >= 0 && picked < total) ? picked : RandomInclusive(0, total - 1);
         } else {
             slot.selected = RandomInclusive(0, total - 1);
@@ -1396,16 +1438,16 @@ bool OrcSetLocalPedTextureRemap(int slot, int remap) {
     if (!state || slot < 0 || slot >= state->slotCount)
         return false;
     TextureRemapSlotState& s = state->slots[(size_t)slot];
-    if (g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL)
-        ReleaseTextureRemapSequentialAssignmentsForOwner(state->sequentialOwnerKey);
+    if (TextureRemapPickModeTracksActiveChoices())
+        ReleaseTextureRemapTrackedAssignmentsForOwner(state->sequentialOwnerKey);
     return SetRealRemapSelection(s, remap);
 }
 
 bool OrcRandomizeLocalPedTextureRemaps() {
     CPlayerPed* ped = FindPlayerPed(0);
-    if (g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL) {
+    if (TextureRemapPickModeTracksActiveChoices()) {
         if (PedTextureRemapState* oldState = EnsureActiveTextureRemapState(ped, false))
-            ReleaseTextureRemapSequentialAssignmentsForOwner(oldState->sequentialOwnerKey);
+            ReleaseTextureRemapTrackedAssignmentsForOwner(oldState->sequentialOwnerKey);
         PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, true);
         return state && state->totalRemapTextures > 0;
     }
@@ -1422,8 +1464,8 @@ bool OrcSetAllLocalPedTextureRemaps(int remap) {
     PedTextureRemapState* state = EnsureActiveTextureRemapState(ped, false);
     if (!state)
         return false;
-    if (g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL)
-        ReleaseTextureRemapSequentialAssignmentsForOwner(state->sequentialOwnerKey);
+    if (TextureRemapPickModeTracksActiveChoices())
+        ReleaseTextureRemapTrackedAssignmentsForOwner(state->sequentialOwnerKey);
     bool ok = true;
     for (int i = 0; i < state->slotCount; ++i) {
         TextureRemapSlotState& s = state->slots[(size_t)i];
@@ -1610,6 +1652,8 @@ void OrcTextureRemapClearRuntimeState() {
     g_clumpTextureRemaps.clear();
     g_textureRemapSequentialStates.clear();
     g_textureRemapSequentialAssignments.clear();
+    g_textureRemapNoRepeatStates.clear();
+    g_textureRemapNoRepeatAssignments.clear();
     if (OrcIsRuntimeShuttingDown())
         ReleaseAdditionalTextureRemapTxds();
 }
@@ -1650,13 +1694,13 @@ void OrcTextureRemapOnPedSetModel(CPed* ped, int) {
     if (key) {
         auto old = g_pedTextureRemaps.find(key);
         if (old != g_pedTextureRemaps.end())
-            ReleaseTextureRemapSequentialAssignmentsForOwner(old->second.sequentialOwnerKey);
+            ReleaseTextureRemapTrackedAssignmentsForOwner(old->second.sequentialOwnerKey);
         g_pedTextureRemaps.erase(key);
     }
     for (auto it = g_clumpTextureRemaps.begin(); it != g_clumpTextureRemaps.end();) {
         const std::string prefix = std::to_string(key) + "|";
         if (key && it->first.rfind(prefix, 0) == 0) {
-            ReleaseTextureRemapSequentialAssignmentsForOwner(it->second.sequentialOwnerKey);
+            ReleaseTextureRemapTrackedAssignmentsForOwner(it->second.sequentialOwnerKey);
             it = g_clumpTextureRemaps.erase(it);
         } else {
             ++it;

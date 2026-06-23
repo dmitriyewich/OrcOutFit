@@ -168,6 +168,7 @@
     X(RandomPickMode, "Режим выбора", "Pick mode") \
     X(RandomPickModeRandom, "Случайный", "Random") \
     X(RandomPickModeSequential, "Последовательный", "Sequential") \
+    X(RandomPickModeNoRepeat, "Случайный без повтора", "Random no repeat") \
     X(SelectedSkinSource, "Источник выбранного overlay-скина", "Selected overlay skin source") \
     X(SelectedCustomSkin, "Кастомный скин", "Custom skin") \
     X(SelectedStandardSkin, "Стандартный скин", "Standard skin") \

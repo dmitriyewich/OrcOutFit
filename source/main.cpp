@@ -814,12 +814,16 @@ static int ParseSkinNativeFallback(const char* text) {
 
 static int ParseRandomPickMode(const char* text) {
     const std::string value = OrcToLowerAscii(std::string(text ? text : ""));
+    if (value == "random_no_repeat" || value == "no_repeat" || value == "unique_random" || value == "2")
+        return ORC_RANDOM_PICK_RANDOM_NO_REPEAT;
     if (value == "sequential" || value == "sequence" || value == "seq" || value == "1")
         return ORC_RANDOM_PICK_SEQUENTIAL;
     return ORC_RANDOM_PICK_RANDOM;
 }
 
 static const char* RandomPickModeToIni(int mode) {
+    if (mode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT)
+        return "random_no_repeat";
     return mode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random";
 }
 

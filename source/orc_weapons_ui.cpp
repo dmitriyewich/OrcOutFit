@@ -46,15 +46,19 @@ static const char* WT(OrcTextId id) {
 }
 
 static bool OrcWeaponUiComboRandomPickMode(const char* rowId, int* value) {
-    const OrcTextId optIds[] = { OrcTextId::RandomPickModeRandom, OrcTextId::RandomPickModeSequential };
+    const OrcTextId optIds[] = {
+        OrcTextId::RandomPickModeRandom,
+        OrcTextId::RandomPickModeSequential,
+        OrcTextId::RandomPickModeNoRepeat
+    };
     int v = *value;
-    if (v != ORC_RANDOM_PICK_SEQUENTIAL)
+    if (v < ORC_RANDOM_PICK_RANDOM || v > ORC_RANDOM_PICK_RANDOM_NO_REPEAT)
         v = ORC_RANDOM_PICK_RANDOM;
     if (!OrcUiBeginControlRow(rowId, WT(OrcTextId::RandomPickMode)))
         return false;
     bool changed = false;
     if (ImGui::BeginCombo("##value", WT(optIds[v]))) {
-        for (int i = ORC_RANDOM_PICK_RANDOM; i <= ORC_RANDOM_PICK_SEQUENTIAL; ++i) {
+        for (int i = ORC_RANDOM_PICK_RANDOM; i <= ORC_RANDOM_PICK_RANDOM_NO_REPEAT; ++i) {
             if (ImGui::Selectable(WT(optIds[i]), v == i)) {
                 if (v != i) {
                     v = i;

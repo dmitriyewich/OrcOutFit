@@ -129,6 +129,10 @@ struct SkinRandomPool {
     bool sequentialPoolIncludesVanilla = false;
     OrcSequentialPickState sequentialState;
     std::unordered_map<std::string, int> sequentialAssignments;
+    std::vector<int> noRepeatPool;
+    bool noRepeatPoolIncludesVanilla = false;
+    OrcRandomNoRepeatPickState noRepeatState;
+    std::unordered_map<std::string, int> noRepeatAssignments;
 };
 
 static constexpr int kSkinRandomVanillaChoice = -1;
@@ -138,7 +142,8 @@ static std::vector<SkinRandomPool> g_skinRandomPools;
 struct PedRandomSkinState {
     int modelId = -1;
     int variant = -1;
-    std::string sequentialChoiceKey;
+    int pickMode = ORC_RANDOM_PICK_RANDOM;
+    std::string trackedChoiceKey;
 };
 static std::unordered_map<CPed*, PedRandomSkinState> g_pedRandomSkinIdx;
 
@@ -154,13 +159,25 @@ static std::string SkinRandomChoiceKeyForPed(CPed* ped) {
     return "p:" + std::to_string(reinterpret_cast<uintptr_t>(ped));
 }
 
-static void ReleasePedRandomSkinSequentialChoice(const PedRandomSkinState& state) {
-    if (state.sequentialChoiceKey.empty())
+static const char* SkinRandomPickModeToIni(int mode) {
+    if (mode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT)
+        return "random_no_repeat";
+    return mode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random";
+}
+
+static bool SkinRandomPickModeTracksActiveChoices() {
+    return g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL ||
+        g_skinRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT;
+}
+
+static void ReleasePedRandomSkinTrackedChoice(const PedRandomSkinState& state) {
+    if (state.trackedChoiceKey.empty())
         return;
     SkinRandomPool* pool = FindRandomPoolForModelId(state.modelId);
     if (!pool)
         return;
-    OrcSequentialEraseChoice(pool->sequentialState, pool->sequentialAssignments, state.sequentialChoiceKey);
+    OrcSequentialEraseChoice(pool->sequentialState, pool->sequentialAssignments, state.trackedChoiceKey);
+    OrcRandomNoRepeatEraseChoice(pool->noRepeatState, pool->noRepeatAssignments, state.trackedChoiceKey);
 }
 
 static void PrunePedRandomSkinMap() {
@@ -173,7 +190,7 @@ static void PrunePedRandomSkinMap() {
     }
     for (auto it = g_pedRandomSkinIdx.begin(); it != g_pedRandomSkinIdx.end();) {
         if (alive.find(it->first) == alive.end()) {
-            ReleasePedRandomSkinSequentialChoice(it->second);
+            ReleasePedRandomSkinTrackedChoice(it->second);
             it = g_pedRandomSkinIdx.erase(it);
         } else {
             ++it;
@@ -250,6 +267,23 @@ static int PickSequentialPoolVariant(SkinRandomPool& pool, CPed* ped) {
         kSkinRandomInvalidChoice);
 }
 
+static int PickRandomNoRepeatPoolVariant(SkinRandomPool& pool, CPed* ped) {
+    if (pool.variants.empty())
+        return kSkinRandomInvalidChoice;
+    if (pool.noRepeatPool.empty() || pool.noRepeatPoolIncludesVanilla != g_skinRandomIncludeVanilla) {
+        BuildSkinRandomChoicePool(pool, pool.noRepeatPool);
+        pool.noRepeatPoolIncludesVanilla = g_skinRandomIncludeVanilla;
+    }
+
+    const std::string choiceKey = SkinRandomChoiceKeyForPed(ped);
+    return OrcRandomNoRepeatPickSticky(
+        pool.noRepeatState,
+        pool.noRepeatAssignments,
+        choiceKey,
+        pool.noRepeatPool,
+        kSkinRandomInvalidChoice);
+}
+
 static bool ResolveRandomSkinForPedModel(CPed* ped, int modelId, CustomSkinCfg** outSkin) {
     if (outSkin) *outSkin = nullptr;
     if (!g_skinRandomFromPools || !ped)
@@ -259,26 +293,32 @@ static bool ResolveRandomSkinForPedModel(CPed* ped, int modelId, CustomSkinCfg**
         return false;
     auto it = g_pedRandomSkinIdx.find(ped);
     if (it != g_pedRandomSkinIdx.end() &&
-        (it->second.modelId != modelId || !IsValidSkinRandomChoice(*pool, it->second.variant))) {
-        ReleasePedRandomSkinSequentialChoice(it->second);
+        (it->second.modelId != modelId ||
+         it->second.pickMode != g_skinRandomPickMode ||
+         !IsValidSkinRandomChoice(*pool, it->second.variant))) {
+        ReleasePedRandomSkinTrackedChoice(it->second);
         g_pedRandomSkinIdx.erase(it);
         it = g_pedRandomSkinIdx.end();
     }
     if (it != g_pedRandomSkinIdx.end() &&
-        g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL &&
-        it->second.sequentialChoiceKey.empty()) {
+        SkinRandomPickModeTracksActiveChoices() &&
+        it->second.trackedChoiceKey.empty()) {
         g_pedRandomSkinIdx.erase(it);
         it = g_pedRandomSkinIdx.end();
     }
     if (it == g_pedRandomSkinIdx.end()) {
         const bool sequential = g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL;
-        const int pick = sequential ? PickSequentialPoolVariant(*pool, ped) : PopRandomPoolVariant(*pool);
+        const bool noRepeat = g_skinRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT;
+        const int pick = sequential
+            ? PickSequentialPoolVariant(*pool, ped)
+            : (noRepeat ? PickRandomNoRepeatPoolVariant(*pool, ped) : PopRandomPoolVariant(*pool));
         if (pick == kSkinRandomInvalidChoice) return false;
         PedRandomSkinState state;
         state.modelId = modelId;
         state.variant = pick;
-        if (sequential)
-            state.sequentialChoiceKey = SkinRandomChoiceKeyForPed(ped);
+        state.pickMode = g_skinRandomPickMode;
+        if (sequential || noRepeat)
+            state.trackedChoiceKey = SkinRandomChoiceKeyForPed(ped);
         g_pedRandomSkinIdx[ped] = std::move(state);
         it = g_pedRandomSkinIdx.find(ped);
     }
@@ -651,8 +691,7 @@ void OrcAppendSkinFeatureIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "Features", "SkinTextureRemapNickMode", g_skinTextureRemapNickMode ? 1 : 0);
     AddIniInt(values, "Features", "SkinTextureRemapAutoNickMode", g_skinTextureRemapAutoNickMode ? 1 : 0);
     AddIniInt(values, "Features", "SkinTextureRemapRandomMode", g_skinTextureRemapRandomMode);
-    AddIniValue(values, "Features", "SkinTextureRemapPickMode",
-        g_skinTextureRemapPickMode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random");
+    AddIniValue(values, "Features", "SkinTextureRemapPickMode", SkinRandomPickModeToIni(g_skinTextureRemapPickMode));
 }
 
 void OrcAppendSkinModeIniValues(std::vector<OrcIniValue>& values) {
@@ -661,8 +700,7 @@ void OrcAppendSkinModeIniValues(std::vector<OrcIniValue>& values) {
     AddIniInt(values, "SkinMode", "StandardSelected", g_standardSkinSelectedModelId);
     AddIniInt(values, "SkinMode", "RandomFromPools", g_skinRandomFromPools ? 1 : 0);
     AddIniInt(values, "SkinMode", "SkinRandomIncludeVanilla", g_skinRandomIncludeVanilla ? 1 : 0);
-    AddIniValue(values, "SkinMode", "RandomPickMode",
-        g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random");
+    AddIniValue(values, "SkinMode", "RandomPickMode", SkinRandomPickModeToIni(g_skinRandomPickMode));
 }
 
 void SaveSkinModeIni() {
