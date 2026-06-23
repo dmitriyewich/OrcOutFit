@@ -1327,8 +1327,10 @@ void OrcUiDraw() {
 
                 if (ImGui::BeginTabItem(T(OrcTextId::TabRandomSkins))) {
                     OrcUiCheckbox("enable_random_skins", T(OrcTextId::EnableRandomSkins), &g_skinRandomFromPools);
+                    OrcUiCheckbox("skin_random_include_vanilla", T(OrcTextId::SkinRandomIncludeVanilla), &g_skinRandomIncludeVanilla);
                     OrcUiComboRandomPickMode("random_skin_pick_mode", &g_skinRandomPickMode);
                     ImGui::TextWrapped("%s", T(OrcTextId::RandomSkinsHint));
+                    ImGui::TextWrapped("%s", T(OrcTextId::SkinRandomIncludeVanillaHint));
                     ImGui::Text("%s", OrcFormat(OrcTextId::RandomSkinPoolsFormat, g_skinRandomPoolModels, g_skinRandomPoolVariants).c_str());
 
                     std::vector<SkinRandomPoolInfo> pools;

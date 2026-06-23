@@ -503,6 +503,7 @@ bool g_skinTextureRemapAutoNickMode = true;
 int g_skinTextureRemapRandomMode = TEXTURE_REMAP_RANDOM_LINKED_VARIANT;
 int g_skinTextureRemapPickMode = ORC_RANDOM_PICK_RANDOM;
 bool g_skinRandomFromPools = false;
+bool g_skinRandomIncludeVanilla = false;
 int g_skinRandomPickMode = ORC_RANDOM_PICK_RANDOM;
 int g_skinRandomPoolModels = 0;
 int g_skinRandomPoolVariants = 0;
@@ -945,6 +946,7 @@ void LoadConfig() {
     }
 
     const bool v_skinRandomFromPools = ini.GetInt("SkinMode", "RandomFromPools", 0) != 0;
+    const bool v_skinRandomIncludeVanilla = ini.GetInt("SkinMode", "SkinRandomIncludeVanilla", 0) != 0;
     const int v_skinRandomPickMode =
         ParseRandomPickMode(ini.GetString("SkinMode", "RandomPickMode", "random").c_str());
     std::string v_skinSelectedName = ini.GetString("SkinMode", "Selected", "");
@@ -1006,6 +1008,7 @@ void LoadConfig() {
     g_heldWeaponTrace = v_heldWeaponTrace;
     g_heldWeaponStatusIntervalMs = v_heldWeaponStatusIntervalMs;
     g_skinRandomFromPools = v_skinRandomFromPools;
+    g_skinRandomIncludeVanilla = v_skinRandomIncludeVanilla;
     g_skinRandomPickMode = v_skinRandomPickMode;
     g_skinSelectedName = std::move(v_skinSelectedName);
     g_skinSelectedSource = v_skinSelectedSource;
@@ -1180,6 +1183,7 @@ static void SaveDefaultConfig() {
           "SelectedSource=custom\n"
           "StandardSelected=-1\n"
           "RandomFromPools=0\n"
+          "SkinRandomIncludeVanilla=0\n"
           "RandomPickMode=random\n\n", f);
     fclose(f);
 }
@@ -1972,6 +1976,7 @@ static void AppendMainIniText(std::string& out) {
     AppendFormat(out, "SelectedSource=%s\n", g_skinSelectedSource == SKIN_SELECTED_STANDARD ? "standard" : "custom");
     AppendFormat(out, "StandardSelected=%d\n", g_standardSkinSelectedModelId);
     AppendFormat(out, "RandomFromPools=%d\n", g_skinRandomFromPools ? 1 : 0);
+    AppendFormat(out, "SkinRandomIncludeVanilla=%d\n", g_skinRandomIncludeVanilla ? 1 : 0);
     AppendFormat(out, "RandomPickMode=%s\n\n", RandomPickModeToIni(g_skinRandomPickMode));
 }
 

@@ -129,6 +129,7 @@ extern int g_skinTextureRemapRandomMode;
 extern int g_skinTextureRemapPickMode;
 // SKINS/random/<dffBaseName>/*.dff — случайный вариант на каждого педа с этим model id.
 extern bool g_skinRandomFromPools;
+extern bool g_skinRandomIncludeVanilla;
 extern int g_skinRandomPickMode;
 extern int g_skinRandomPoolModels;
 extern int g_skinRandomPoolVariants;

@@ -161,6 +161,8 @@
     X(StandardSkinsHint, "Стандартные скины используют модели ped из игры: overlay поверх ped или примерка через SetModelIndex.", "Standard skins use game ped models: overlay on ped or preview via SetModelIndex.") \
     X(RandomSkinsHint, "Пулы берутся из OrcOutFit\\Skins\\Random\\<dff>\\*.dff и выбираются для ped с тем же DFF из ped.dat.", "Pools are read from OrcOutFit\\Skins\\Random\\<dff>\\*.dff and selected for peds with the same ped.dat DFF.") \
     X(EnableRandomSkins, "Включить рандомные скины", "Enable random skins") \
+    X(SkinRandomIncludeVanilla, "Добавлять стандартный скин в random-пул", "Include vanilla skin in random pools") \
+    X(SkinRandomIncludeVanillaHint, "При random-выборе одним вариантом может быть исходный ped без кастомного DFF.", "When random picks a skin, one outcome can be the original ped without a custom DFF.") \
     X(RandomSkinPoolsFormat, "Пулов: %d, вариантов: %d", "Pools: %d, variants: %d") \
     X(RandomSkinPoolRowFormat, "%s: %d вариант(ов)", "%s: %d variant(s)") \
     X(RandomPickMode, "Режим выбора", "Pick mode") \

@@ -124,10 +124,15 @@ struct SkinRandomPool {
     std::string folderName;
     std::vector<CustomSkinCfg> variants;
     std::vector<int> shuffleBag;
+    bool shuffleBagIncludesVanilla = false;
     std::vector<int> sequentialPool;
+    bool sequentialPoolIncludesVanilla = false;
     OrcSequentialPickState sequentialState;
     std::unordered_map<std::string, int> sequentialAssignments;
 };
+
+static constexpr int kSkinRandomVanillaChoice = -1;
+static constexpr int kSkinRandomInvalidChoice = -2;
 
 static std::vector<SkinRandomPool> g_skinRandomPools;
 struct PedRandomSkinState {
@@ -196,49 +201,65 @@ static int FindPedModelIdByDffName(const std::string& dffName) {
     return -1;
 }
 
+static void BuildSkinRandomChoicePool(const SkinRandomPool& pool, std::vector<int>& out) {
+    out.clear();
+    out.reserve(pool.variants.size() + (g_skinRandomIncludeVanilla ? 1u : 0u));
+    if (g_skinRandomIncludeVanilla)
+        out.push_back(kSkinRandomVanillaChoice);
+    for (int i = 0; i < (int)pool.variants.size(); ++i)
+        out.push_back(i);
+}
+
+static bool IsValidSkinRandomChoice(const SkinRandomPool& pool, int choice) {
+    if (choice == kSkinRandomVanillaChoice)
+        return g_skinRandomIncludeVanilla;
+    return choice >= 0 && choice < (int)pool.variants.size();
+}
+
 static int PopRandomPoolVariant(SkinRandomPool& pool) {
-    const int n = (int)pool.variants.size();
-    if (n <= 0) return -1;
-    if (pool.shuffleBag.empty()) {
-        pool.shuffleBag.reserve((size_t)n);
-        for (int i = 0; i < n; ++i)
-            pool.shuffleBag.push_back(i);
+    if (pool.variants.empty()) return kSkinRandomInvalidChoice;
+    if (pool.shuffleBag.empty() || pool.shuffleBagIncludesVanilla != g_skinRandomIncludeVanilla) {
+        BuildSkinRandomChoicePool(pool, pool.shuffleBag);
+        pool.shuffleBagIncludesVanilla = g_skinRandomIncludeVanilla;
+        const int n = (int)pool.shuffleBag.size();
         for (int i = n - 1; i > 0; --i) {
             const int j = rand() % (i + 1);
             std::swap(pool.shuffleBag[(size_t)i], pool.shuffleBag[(size_t)j]);
         }
     }
+    if (pool.shuffleBag.empty()) return kSkinRandomInvalidChoice;
     const int pick = pool.shuffleBag.back();
     pool.shuffleBag.pop_back();
     return pick;
 }
 
 static int PickSequentialPoolVariant(SkinRandomPool& pool, CPed* ped) {
-    if (pool.sequentialPool.empty()) {
-        const int n = (int)pool.variants.size();
-        if (n <= 0)
-            return -1;
-        pool.sequentialPool.reserve((size_t)n);
-        for (int i = 0; i < n; ++i)
-            pool.sequentialPool.push_back(i);
+    if (pool.variants.empty())
+        return kSkinRandomInvalidChoice;
+    if (pool.sequentialPool.empty() || pool.sequentialPoolIncludesVanilla != g_skinRandomIncludeVanilla) {
+        BuildSkinRandomChoicePool(pool, pool.sequentialPool);
+        pool.sequentialPoolIncludesVanilla = g_skinRandomIncludeVanilla;
     }
 
     const std::string choiceKey = SkinRandomChoiceKeyForPed(ped);
-    return OrcSequentialPickSticky(pool.sequentialState, pool.sequentialAssignments, choiceKey, pool.sequentialPool, -1);
+    return OrcSequentialPickSticky(
+        pool.sequentialState,
+        pool.sequentialAssignments,
+        choiceKey,
+        pool.sequentialPool,
+        kSkinRandomInvalidChoice);
 }
 
-static CustomSkinCfg* ResolveRandomSkinForPedModel(CPed* ped, int modelId) {
+static bool ResolveRandomSkinForPedModel(CPed* ped, int modelId, CustomSkinCfg** outSkin) {
+    if (outSkin) *outSkin = nullptr;
     if (!g_skinRandomFromPools || !ped)
-        return nullptr;
+        return false;
     SkinRandomPool* pool = FindRandomPoolForModelId(modelId);
     if (!pool)
-        return nullptr;
-    const int n = (int)pool->variants.size();
-    if (n <= 0)
-        return nullptr;
+        return false;
     auto it = g_pedRandomSkinIdx.find(ped);
     if (it != g_pedRandomSkinIdx.end() &&
-        (it->second.modelId != modelId || it->second.variant < 0 || it->second.variant >= n)) {
+        (it->second.modelId != modelId || !IsValidSkinRandomChoice(*pool, it->second.variant))) {
         ReleasePedRandomSkinSequentialChoice(it->second);
         g_pedRandomSkinIdx.erase(it);
         it = g_pedRandomSkinIdx.end();
@@ -252,7 +273,7 @@ static CustomSkinCfg* ResolveRandomSkinForPedModel(CPed* ped, int modelId) {
     if (it == g_pedRandomSkinIdx.end()) {
         const bool sequential = g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL;
         const int pick = sequential ? PickSequentialPoolVariant(*pool, ped) : PopRandomPoolVariant(*pool);
-        if (pick < 0) return nullptr;
+        if (pick == kSkinRandomInvalidChoice) return false;
         PedRandomSkinState state;
         state.modelId = modelId;
         state.variant = pick;
@@ -261,7 +282,14 @@ static CustomSkinCfg* ResolveRandomSkinForPedModel(CPed* ped, int modelId) {
         g_pedRandomSkinIdx[ped] = std::move(state);
         it = g_pedRandomSkinIdx.find(ped);
     }
-    return &pool->variants[(size_t)it->second.variant];
+    if (it == g_pedRandomSkinIdx.end())
+        return false;
+    if (it->second.variant == kSkinRandomVanillaChoice)
+        return true;
+    if (!IsValidSkinRandomChoice(*pool, it->second.variant))
+        return false;
+    if (outSkin) *outSkin = &pool->variants[(size_t)it->second.variant];
+    return true;
 }
 
 static void EnsureCustomSkinNickLookup() {
@@ -632,6 +660,7 @@ void OrcAppendSkinModeIniValues(std::vector<OrcIniValue>& values) {
     AddIniValue(values, "SkinMode", "SelectedSource", g_skinSelectedSource == SKIN_SELECTED_STANDARD ? "standard" : "custom");
     AddIniInt(values, "SkinMode", "StandardSelected", g_standardSkinSelectedModelId);
     AddIniInt(values, "SkinMode", "RandomFromPools", g_skinRandomFromPools ? 1 : 0);
+    AddIniInt(values, "SkinMode", "SkinRandomIncludeVanilla", g_skinRandomIncludeVanilla ? 1 : 0);
     AddIniValue(values, "SkinMode", "RandomPickMode",
         g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random");
 }
@@ -930,7 +959,8 @@ OrcResolvedPedSkin OrcResolveSkinForPedModel(CPed* ped, CPlayerPed* localPlayer,
     }
 
     if (isLocalByPtr) result.isLocalPed = true;
-    if (CustomSkinCfg* randomSkin = ResolveRandomSkinForPedModel(ped, baseModelId)) {
+    CustomSkinCfg* randomSkin = nullptr;
+    if (ResolveRandomSkinForPedModel(ped, baseModelId, &randomSkin)) {
         result.custom = randomSkin;
         result.standard = nullptr;
         result.fromRandomPool = true;
