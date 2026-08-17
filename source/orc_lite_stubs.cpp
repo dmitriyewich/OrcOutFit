@@ -70,6 +70,8 @@ void OrcRestoreHeldWeaponReplacementAfter(CPed*) {}
 void OrcFlushDeferredHeldWeaponSlotRestore() {}
 void OrcHeldPoseBeginSimFrame() {}
 void OrcHeldWeaponTraceGameProcessTick() {}
+void OrcHeldOnVanillaWeaponBatchBefore() {}
+void OrcHeldOnVanillaWeaponBatchAfter() {}
 void OrcWeaponSuppressBodyForHeldVisualWeapon(CPed*, std::vector<char>*) {}
 int  OrcResolveWeaponHeldVisualWeaponType(CPed*) { return -1; }
 int  OrcResolveActiveHeldWeaponTypeForBodySuppression(CPed*) { return 0; }

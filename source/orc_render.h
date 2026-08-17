@@ -8,7 +8,8 @@ class CPed;
 RwMatrix* OrcGetBoneMatrix(CPed* ped, int boneNodeId);
 void OrcApplyAttachmentLightingForPed(CPed* ped, const CVector& sampleWorldPos, float colourScale = 0.5f);
 bool OrcTryPedSetupLighting(CPed* ped);
-void OrcTryPedRemoveLighting(CPed* ped);
+/// GTA SA vtable slot 20 is `RemoveLighting(bool)` even though the bundled plugin-sdk wrapper omits the argument.
+void OrcTryPedRemoveLighting(CPed* ped, bool lightingWasSetup);
 void OrcTryRpClumpRender(RpClump* clump);
 RwFrame* OrcGetRwFrameParentSafe(RwFrame* frame);
 

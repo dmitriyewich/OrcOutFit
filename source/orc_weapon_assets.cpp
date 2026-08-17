@@ -1,8 +1,10 @@
-﻿#include "plugin.h"
+#include "plugin.h"
 
 #include "CPed.h"
 #include "CPlayerPed.h"
 #include "CPools.h"
+#include "CClumpModelInfo.h"
+#include "CVisibilityPlugins.h"
 #include "CWeaponInfo.h"
 #include "CModelInfo.h"
 #include "CTxdStore.h"
@@ -28,8 +30,11 @@
 #include "orc_log.h"
 #include "orc_path.h"
 #include "orc_random_pick.h"
+#include "orc_render.h"
 #include "orc_types.h"
 #include "orc_weapon_assets.h"
+#include "orc_weapon_gunflash_state.h"
+#include "orc_weapon_render_policy.h"
 #include "orc_weapon_runtime.h"
 #include "orc_weapons.h"
 
@@ -280,6 +285,7 @@ static void DestroyWeaponReplacementAssets() {
     g_weaponReplacementStats = {};
 }
 
+
 static bool EnsureWeaponReplacementAssetLoaded(WeaponReplacementAsset& asset) {
     if (asset.rwObject)
         return true;
@@ -341,7 +347,7 @@ static bool EnsureWeaponReplacementAssetLoaded(WeaponReplacementAsset& asset) {
         RpClump* c = RpClumpStreamRead(stream);
         if (c) {
             asset.rwObject = reinterpret_cast<RwObject*>(c);
-            RpClumpForAllAtomics(c, OrcInitAttachmentAtomicCB, nullptr);
+            RpClumpForAllAtomics(c, OrcInitAtomicCB, nullptr);
             ok = true;
         }
     }
@@ -357,7 +363,7 @@ static bool EnsureWeaponReplacementAssetLoaded(WeaponReplacementAsset& asset) {
                         RwFrame* frame = RwFrameCreate();
                         if (frame) RpAtomicSetFrame(a, frame);
                     }
-                    OrcInitAttachmentAtomicCB(a, nullptr);
+                    OrcInitAtomicCB(a, nullptr);
                     asset.rwObject = reinterpret_cast<RwObject*>(a);
                     ok = true;
                 }
@@ -377,13 +383,54 @@ static bool EnsureWeaponReplacementAssetLoaded(WeaponReplacementAsset& asset) {
     return true;
 }
 
+static bool OrcWeaponFrameIsDescendantOf(RwFrame* frame, RwFrame* ancestor) {
+    constexpr int kMaxAncestors = 64;
+    for (int i = 0; frame && i < kMaxAncestors; ++i, frame = OrcGetRwFrameParentSafe(frame)) {
+        if (frame == ancestor)
+            return true;
+    }
+    return false;
+}
+
+struct OrcInitialGunflashVisibilityCtx {
+    RwFrame* gunflashRoot = nullptr;
+};
+
+static RpAtomic* OrcInitializeGunflashAtomicHiddenCb(RpAtomic* atomic, void* data) {
+    auto* ctx = reinterpret_cast<OrcInitialGunflashVisibilityCtx*>(data);
+    if (!atomic || !ctx || !ctx->gunflashRoot)
+        return atomic;
+    RwFrame* frame = RpAtomicGetFrame(atomic);
+    if (!frame || !OrcWeaponFrameIsDescendantOf(frame, ctx->gunflashRoot))
+        return atomic;
+    const RwUInt32 flags = RpAtomicGetFlags(atomic);
+    const RwUInt32 hiddenFlags =
+        static_cast<RwUInt32>(OrcInitialGunflashAtomicFlags(static_cast<std::uint32_t>(flags)));
+    if (hiddenFlags != flags)
+        RpAtomicSetFlags(atomic, hiddenFlags);
+    return atomic;
+}
+
+static void OrcInitializeReplacementGunflashHidden(RpClump* clump) {
+    if (!clump)
+        return;
+    OrcInitialGunflashVisibilityCtx ctx{};
+    ctx.gunflashRoot = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+    if (ctx.gunflashRoot)
+        RpClumpForAllAtomics(clump, OrcInitializeGunflashAtomicHiddenCb, &ctx);
+}
+
 RwObject* OrcCloneWeaponReplacementObject(WeaponReplacementAsset& asset) {
     if (!EnsureWeaponReplacementAssetLoaded(asset) || !asset.rwObject)
         return nullptr;
     if (asset.rwObject->type == rpCLUMP) {
         RpClump* clone = RpClumpClone(reinterpret_cast<RpClump*>(asset.rwObject));
         if (!clone) return nullptr;
-        RpClumpForAllAtomics(clone, OrcInitAttachmentAtomicCB, nullptr);
+        RpClumpForAllAtomics(clone, OrcInitAtomicCB, nullptr);
+        // A DFF may ship with its gunflash atomic visible. A fresh clone can be rendered before GTA's
+        // end-of-batch ClearGunFlash, producing a one-frame muzzle flash while selecting the weapon.
+        // Start hidden; vanilla SetGunFlashAlpha enables the same atomic on an actual shot.
+        OrcInitializeReplacementGunflashHidden(clone);
         return reinterpret_cast<RwObject*>(clone);
     }
     if (asset.rwObject->type == rpATOMIC) {
@@ -391,7 +438,7 @@ RwObject* OrcCloneWeaponReplacementObject(WeaponReplacementAsset& asset) {
         if (!clone) return nullptr;
         RwFrame* frame = RwFrameCreate();
         if (frame) RpAtomicSetFrame(clone, frame);
-        OrcInitAttachmentAtomicCB(clone, nullptr);
+        OrcInitAtomicCB(clone, nullptr);
         return reinterpret_cast<RwObject*>(clone);
     }
     return nullptr;

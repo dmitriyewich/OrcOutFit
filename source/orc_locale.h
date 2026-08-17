@@ -86,8 +86,8 @@
     X(ConsiderWeaponSkills, "Учитывать навыки оружия (dual wield)", "Consider weapon skills (dual wield)") \
     X(RenderCustomObjects, "Показывать кастомные объекты (папка Objects)", "Render custom objects (Objects folder)") \
     X(RenderStandardObjects, "Показывать стандартные объекты (ID игры)", "Render standard objects (game IDs)") \
-    X(SkinMode, "Режим overlay-скинов", "Overlay skin mode") \
-    X(SkinCustomMode, "Кастомные скины: режим", "Custom skins: mode") \
+    X(SkinMode, "Режим скинов", "Skin mode") \
+    X(SkinCustomMode, "Скины: режим", "Skins: mode") \
     X(SkinCustomModeNative, "Native replacement", "Native replacement") \
     X(SkinCustomModeOverlay, "Overlay legacy", "Overlay legacy") \
     X(SkinNativeFallback, "Native fallback", "Native fallback") \

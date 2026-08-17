@@ -12,6 +12,13 @@
 #include <cstring>
 #include <cstdint>
 
+namespace {
+
+constexpr size_t kEntityRemoveLightingVtableSlot = 20u;
+using EntityRemoveLightingFn = void(__thiscall*)(CPed*, bool);
+
+} // namespace
+
 static bool OrcRwPointerLooksReadable(const void* ptr) {
     return reinterpret_cast<uintptr_t>(ptr) >= 0x10000u;
 }
@@ -48,10 +55,22 @@ bool OrcTryPedSetupLighting(CPed* ped) {
     }
 }
 
-void OrcTryPedRemoveLighting(CPed* ped) {
+void OrcTryPedRemoveLighting(CPed* ped, bool lightingWasSetup) {
     if (!ped) return;
     __try {
-        ped->RemoveLighting();
+        void** vtable = *reinterpret_cast<void***>(ped);
+        auto removeLighting = vtable
+            ? reinterpret_cast<EntityRemoveLightingFn>(vtable[kEntityRemoveLightingVtableSlot])
+            : nullptr;
+        if (!removeLighting) {
+            static bool missingLogged = false;
+            if (!missingLogged) {
+                missingLogged = true;
+                OrcLogError("CPed::RemoveLighting missing ped=%p", ped);
+            }
+            return;
+        }
+        removeLighting(ped, lightingWasSetup);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         OrcLogError("SEH CPed::RemoveLighting ex=0x%08X ped=%p", GetExceptionCode(), ped);
     }

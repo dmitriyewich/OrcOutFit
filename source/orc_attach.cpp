@@ -46,8 +46,8 @@ RpAtomic* OrcInitAtomicCB(RpAtomic* a, void*) {
     return a;
 }
 
-// Replacement weapon meshes: keep `SetAtomicRenderCallback(nullptr)` — `CVisibilityPlugins::RenderWeaponCB`
-// expects visibility-plugin data on stock weapon atomics; clones use the default atomic render path.
+// Generic object attachments neutralize material colour. Stock body weapons use an equivalent transactional
+// contract in `orc_weapon_render.cpp`; replacements preserve their own materials.
 RpAtomic* OrcInitAttachmentAtomicCB(RpAtomic* a, void*) {
     OrcInitAtomicCB(a, nullptr);
     if (a && a->geometry) {

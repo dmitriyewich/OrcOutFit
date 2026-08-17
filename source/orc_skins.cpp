@@ -1052,7 +1052,7 @@ static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
     OrcTryRpClumpRender(clump);
     OrcTextureRemapRestoreAfter();
     if (lit)
-        OrcTryPedRemoveLighting(ped);
+        OrcTryPedRemoveLighting(ped, lit);
 }
 
 static void RenderStandardSkinOnPed(CPed* ped, StandardSkinCfg* sel, bool isLocalPed) {
@@ -1094,7 +1094,7 @@ static void RenderStandardSkinOnPed(CPed* ped, StandardSkinCfg* sel, bool isLoca
     OrcTryRpClumpRender(clump);
     OrcTextureRemapRestoreAfter();
     if (lit)
-        OrcTryPedRemoveLighting(ped);
+        OrcTryPedRemoveLighting(ped, lit);
 }
 
 void OrcSkinsRenderForPeds(CPlayerPed* localPlayer) {
@@ -1112,7 +1112,8 @@ void OrcSkinsRenderForPeds(CPlayerPed* localPlayer) {
         if (skin.custom && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
             OrcSkinNativeShouldOverlayFallback(ped, skin.custom)))
             RenderSkinOnPed(ped, skin.custom, skin.isLocalPed);
-        else if (skin.standard)
+        else if (skin.standard && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
+            OrcSkinNativeShouldOverlayFallback(ped, skin.standard)))
             RenderStandardSkinOnPed(ped, skin.standard, skin.isLocalPed);
         if (skin.isLocalPed) localDone = true;
     }
@@ -1121,7 +1122,8 @@ void OrcSkinsRenderForPeds(CPlayerPed* localPlayer) {
         if (skin.custom && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
             OrcSkinNativeShouldOverlayFallback(localPlayer, skin.custom)))
             RenderSkinOnPed(localPlayer, skin.custom, true);
-        else if (skin.standard)
+        else if (skin.standard && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
+            OrcSkinNativeShouldOverlayFallback(localPlayer, skin.standard)))
             RenderStandardSkinOnPed(localPlayer, skin.standard, true);
     }
 }
@@ -1146,6 +1148,10 @@ void OrcSkinsOnPedRenderBefore(CPed* ped) {
         }
         if (!OrcEnsureCustomSkinLoaded(*skin.custom)) return;
     } else {
+        if (g_skinCustomMode != SKIN_CUSTOM_MODE_OVERLAY &&
+            !OrcSkinNativeShouldOverlayFallback(ped, skin.standard)) {
+            return;
+        }
         if (!EnsureStandardSkinLoaded(*skin.standard)) return;
     }
     g_hiddenPed = ped;

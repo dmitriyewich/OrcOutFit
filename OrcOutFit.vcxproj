@@ -134,10 +134,13 @@
     <ClCompile Include="source\orc_objects.cpp" />
     <ClCompile Include="source\orc_skins.cpp" Condition="'$(OrcEdition)'!='Lite'" />
     <ClCompile Include="source\orc_skin_native.cpp" Condition="'$(OrcEdition)'!='Lite'" />
+    <ClCompile Include="source\orc_silentpatch_compat.cpp" />
     <ClCompile Include="source\orc_attach.cpp" />
     <ClCompile Include="source\orc_path.cpp" />
     <ClCompile Include="source\orc_ped_index.cpp" />
     <ClCompile Include="source\orc_weapon_assets.cpp" />
+    <ClCompile Include="source\orc_weapon_render.cpp" />
+    <ClCompile Include="source\orc_openal_thread_name.cpp" Condition="'$(OrcEdition)'!='Lite'" />
     <ClCompile Include="source\orc_weapon_audio_openal.cpp" Condition="'$(OrcEdition)'!='Lite'" />
     <ClCompile Include="source\orc_weapon_audio_decode.cpp" Condition="'$(OrcEdition)'!='Lite'" />
     <ClCompile Include="source\orc_weapon_audio_config.cpp" Condition="'$(OrcEdition)'!='Lite'" />

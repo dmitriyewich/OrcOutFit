@@ -36,7 +36,6 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <unordered_set>
 #include <cstdlib>
 #include <utility>
 
@@ -54,6 +53,7 @@
 #include "orc_weapons_ui.h"
 #include "orc_texture_remap.h"
 #include "orc_skin_native.h"
+#include "orc_silentpatch_compat.h"
 #include "orc_weapon_audio.h"
 #include "orc_weapon_audio_config.h"
 #include "orc_render.h"
@@ -62,6 +62,8 @@
 #include "orc_log.h"
 #include "orc_attach.h"
 #include "orc_weapon_assets.h"
+#include "orc_weapon_render.h"
+#include "orc_weapon_render_policy.h"
 #include "orc_weapon_runtime.h"
 #include "external/MinHook/include/MinHook.h"
 
@@ -490,6 +492,10 @@ static void InitWeaponTypesAndStorage() {
         g_weaponTypesReady = true;
         OrcLogInfo("weapon types fallback ready: %zu entries", g_availableWeaponTypes.size());
     }
+    const size_t modelCacheEntries = OrcWeaponsRebuildRuntimeModelCache(
+        g_availableWeaponTypes, g_weaponModelId, g_weaponModelId2);
+    OrcLogInfo("weapon model cache ready: entries=%zu source=weaponDat modelResolveGetWeaponInfo=0",
+        modelCacheEntries);
 }
 bool g_skinModeEnabled = false;
 int g_skinCustomMode = SKIN_CUSTOM_MODE_NATIVE;
@@ -2281,133 +2287,233 @@ static void ApplyPendingLocalPlayerModel() {
 
 
 
-static void SyncAndRender() {
-    if (!g_enabled) {
-        OrcWeaponClearLocalRendered();
-        OrcWeaponClearOtherPedsRendered();
-        OrcRestoreWeaponHeldTextureOverrides();
-        OrcDestroyAllHeldWeaponReplacementInstances();
-        OrcRestoreWeaponTextureOverrides();
-        OrcSkinsReleaseAllInstancesAndPreview();
+static void ReleaseRuntimeAttachmentInstances() {
+    OrcWeaponClearLocalRendered();
+    OrcWeaponClearOtherPedsRendered();
+    OrcRestoreWeaponHeldTextureOverrides();
+    OrcDestroyAllHeldWeaponReplacementInstances();
+    OrcRestoreWeaponTextureOverrides();
+    OrcSkinsReleaseAllInstancesAndPreview();
 #ifndef ORC_LITE
-        OrcSkinNativeClearRuntimeState();
+    OrcSkinNativeClearRuntimeState();
 #endif
-        OrcObjectsReleaseAllInstances();
-        OrcTextureRemapClearRuntimeState();
-        return;
-    }
-    CPlayerPed* player = FindPlayerPed(0);
-    if (!player) {
-        OrcWeaponClearLocalRendered();
-        OrcWeaponClearOtherPedsRendered();
-        OrcRestoreWeaponHeldTextureOverrides();
-        OrcDestroyAllHeldWeaponReplacementInstances();
-        OrcRestoreWeaponTextureOverrides();
-        OrcSkinsReleaseAllInstancesAndPreview();
-#ifndef ORC_LITE
-        OrcSkinNativeClearRuntimeState();
-#endif
-        OrcObjectsReleaseAllInstances();
-        OrcTextureRemapClearRuntimeState();
-        return;
-    }
+    OrcObjectsReleaseAllInstances();
+    OrcTextureRemapClearRuntimeState();
+}
+
+static void MaintainHeldWeaponInstances() {
     if (!g_weaponReplacementEnabled || !g_weaponReplacementInHands)
         OrcDestroyAllHeldWeaponReplacementInstances();
     else
         OrcPruneHeldWeaponReplacementInstances();
+}
 
-    std::vector<char> suppress;
+static void CollectNearbyPeds(CPlayerPed* player, std::vector<CPed*>& outPeds) {
+    outPeds.clear();
+    if (!player || (!g_renderAllPedsWeapons && !g_renderAllPedsObjects) || !CPools::ms_pPedPool)
+        return;
+
+    const int poolSize = CPools::ms_pPedPool->m_nSize;
+    if (poolSize > 0 && outPeds.capacity() < static_cast<size_t>(poolSize))
+        outPeds.reserve(static_cast<size_t>(poolSize));
+    const CVector& playerPos = player->GetPosition();
+    const float radiusSquared = g_renderAllPedsRadius * g_renderAllPedsRadius;
+    for (int i = 0; i < poolSize; ++i) {
+        CPed* ped = CPools::ms_pPedPool->GetAt(i);
+        if (!ped || ped == player || !ped->m_pRwClump)
+            continue;
+        const CVector& pedPos = ped->GetPosition();
+        const float dx = pedPos.x - playerPos.x;
+        const float dy = pedPos.y - playerPos.y;
+        const float dz = pedPos.z - playerPos.z;
+        if ((dx * dx + dy * dy + dz * dz) <= radiusSquared)
+            outPeds.push_back(ped);
+    }
+}
+
+static unsigned NextBodyCacheSyncSerial() {
+    static unsigned serial = 0u;
+    ++serial;
+    if (serial == 0u)
+        ++serial;
+    return serial;
+}
+
+static const char* g_weaponBodyCacheSyncPhase = "idle";
+
+static void SyncWeaponBodyCaches(CPlayerPed* player,
+    const std::vector<CPed*>& nearbyPeds,
+    bool attachmentSceneRendererAvailable) {
+    static std::vector<char> suppress;
+    g_weaponBodyCacheSyncPhase = "localInit";
     suppress.assign(g_cfg.size(), 0);
-    OrcObjectsApplyWeaponSuppression(player, &suppress);
+    if (OrcShouldApplyObjectSuppressionToWeaponBody(attachmentSceneRendererAvailable)) {
+        g_weaponBodyCacheSyncPhase = "localObjectSuppress";
+        OrcObjectsApplyWeaponSuppression(player, &suppress);
+    }
+    g_weaponBodyCacheSyncPhase = "localHeldSuppress";
     OrcWeaponSuppressBodyForHeldVisualWeapon(player, &suppress);
+    g_weaponBodyCacheSyncPhase = "localBodySync";
     OrcSyncPedWeapons(player, g_rendered, &suppress);
-    std::vector<char> suppressPed;
-    suppressPed.assign(g_cfg.size(), 0);
-    std::vector<char> objectUsed;
-    objectUsed.assign(g_customObjects.size(), 0);
-#ifndef ORC_LITE
-    OrcSkinNativeUpdateForPeds(player);
-#endif
-    OrcObjectsBeginFrame();
-    int active = 0;
-    for (int i = 0; i < OrcWeaponSlotMax; i++) if (g_rendered[i].active) active++;
-    OrcObjectsPrepassLocalPlayer(player, active, objectUsed);
-    if (OrcSkinsLocalSelectionAddsActiveWork())
-        active++;
-    if (g_skinRandomFromPools && g_skinRandomPoolVariants > 0)
-        active++;
-    if (g_renderStandardObjects && !g_standardObjects.empty())
-        active++;
-    if (g_skinNickMode && samp_bridge::IsSampBuildKnown() && (!g_customSkins.empty() || !g_standardSkins.empty()))
-        active++;
-    if ((g_renderAllPedsWeapons || g_renderAllPedsObjects) && CPools::ms_pPedPool) active++;
-    if (!active) {
-        OrcObjectsWhenSkippingRenderNoActive();
+
+    if (!g_renderAllPedsWeapons) {
+        OrcWeaponClearOtherPedsRendered();
+        g_weaponBodyCacheSyncPhase = "idle";
         return;
     }
 
+    static std::vector<char> remoteSuppress;
+    const unsigned syncSerial = NextBodyCacheSyncSerial();
+    g_weaponBodyCacheSyncPhase = "remoteInit";
+    for (CPed* ped : nearbyPeds) {
+        const int pedRef = CPools::GetPedRef(ped);
+        if (pedRef <= 0)
+            continue;
+        PedWeaponCache& cache = g_otherPedsRendered[pedRef];
+        cache.lastSyncSerial = syncSerial;
+        remoteSuppress.assign(g_cfg.size(), 0);
+        if (OrcShouldApplyObjectSuppressionToWeaponBody(attachmentSceneRendererAvailable)) {
+            g_weaponBodyCacheSyncPhase = "remoteObjectSuppress";
+            OrcObjectsApplyWeaponSuppression(ped, &remoteSuppress);
+        }
+        g_weaponBodyCacheSyncPhase = "remoteHeldSuppress";
+        OrcWeaponSuppressBodyForHeldVisualWeapon(ped, &remoteSuppress);
+        g_weaponBodyCacheSyncPhase = "remoteBodySync";
+        OrcSyncPedWeapons(ped, cache.weapons.data(), &remoteSuppress);
+    }
+    g_weaponBodyCacheSyncPhase = "prune";
+    for (auto it = g_otherPedsRendered.begin(); it != g_otherPedsRendered.end();) {
+        if (it->second.lastSyncSerial != syncSerial) {
+            for (RenderedWeapon& weapon : it->second.weapons)
+                OrcDestroyRenderedWeapon(weapon);
+            it = g_otherPedsRendered.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    g_weaponBodyCacheSyncPhase = "idle";
+}
+
+static const char* g_attachmentScenePhase = "idle";
+
+static void RenderAttachmentScene(CPlayerPed* player,
+    const std::vector<CPed*>& nearbyPeds,
+    bool renderObjectsAndSkins) {
+    static std::vector<char> objectUsed;
+    const bool renderBodyWeapons = OrcShouldRenderWeaponBodyInDrawingEvent(
+        g_enabled,
+        OrcWeaponHasCachedBodyWeapons());
+
+    int active = renderBodyWeapons ? 1 : 0;
+    if (renderObjectsAndSkins) {
+        objectUsed.assign(g_customObjects.size(), 0);
+        g_attachmentScenePhase = "skinNativeUpdate";
+#ifndef ORC_LITE
+        OrcSkinNativeUpdateForPeds(player);
+#endif
+        g_attachmentScenePhase = "objectsPrepass";
+        OrcObjectsBeginFrame();
+        OrcObjectsPrepassLocalPlayer(player, active, objectUsed);
+        if (OrcSkinsLocalSelectionAddsActiveWork())
+            active++;
+        if (g_skinRandomFromPools && g_skinRandomPoolVariants > 0)
+            active++;
+        if (g_renderStandardObjects && !g_standardObjects.empty())
+            active++;
+        if (g_skinNickMode && samp_bridge::IsSampBuildKnown() && (!g_customSkins.empty() || !g_standardSkins.empty()))
+            active++;
+        if (g_renderAllPedsObjects && CPools::ms_pPedPool)
+            active++;
+    }
+    if (!active) {
+        if (renderObjectsAndSkins)
+            OrcObjectsWhenSkippingRenderNoActive();
+        g_attachmentScenePhase = "idle";
+        return;
+    }
+
+    g_attachmentScenePhase = "rwStateCapture";
     int oldCull, oldZT, oldZW, oldShade, oldFog;
+    int oldVertexAlpha, oldSrcBlend, oldDstBlend, oldAlphaRef;
     RwRenderStateGet(rwRENDERSTATECULLMODE,     &oldCull);
     RwRenderStateGet(rwRENDERSTATEZTESTENABLE,  &oldZT);
     RwRenderStateGet(rwRENDERSTATEZWRITEENABLE, &oldZW);
     RwRenderStateGet(rwRENDERSTATESHADEMODE,    &oldShade);
     RwRenderStateGet(rwRENDERSTATEFOGENABLE,    &oldFog);
+    RwRenderStateGet(rwRENDERSTATEVERTEXALPHAENABLE, &oldVertexAlpha);
+    RwRenderStateGet(rwRENDERSTATESRCBLEND,          &oldSrcBlend);
+    RwRenderStateGet(rwRENDERSTATEDESTBLEND,         &oldDstBlend);
+    RwRenderStateGet(rwRENDERSTATEALPHATESTFUNCTIONREF, &oldAlphaRef);
 
     int v;
-    v = rwCULLMODECULLBACK;  RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(v));
-    v = TRUE;                RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(v));
-    v = TRUE;                RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(v));
-    v = rwSHADEMODEGOURAUD;  RwRenderStateSet(rwRENDERSTATESHADEMODE,    reinterpret_cast<void*>(v));
-    v = FALSE;               RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(v));
+    __try {
+        g_attachmentScenePhase = "rwStateSetup";
+        v = rwCULLMODECULLBACK;  RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(v));
+        v = TRUE;                RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(v));
+        v = TRUE;                RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(v));
+        v = rwSHADEMODEGOURAUD;  RwRenderStateSet(rwRENDERSTATESHADEMODE,    reinterpret_cast<void*>(v));
+        v = FALSE;               RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(v));
 
-    OrcRenderPedWeapons(player, g_rendered);
-    OrcObjectsRenderLocalPlayer(player, objectUsed);
-    OrcSkinsRenderForPeds(player);
-    if ((g_renderAllPedsWeapons || g_renderAllPedsObjects) && CPools::ms_pPedPool) {
-        if (!g_renderAllPedsWeapons) {
-            OrcWeaponClearOtherPedsRendered();
-        }
-        std::unordered_set<int> seen;
-        const CVector& pp = player->GetPosition();
-        const float r2 = g_renderAllPedsRadius * g_renderAllPedsRadius;
-        for (int i = 0; i < CPools::ms_pPedPool->m_nSize; i++) {
-            CPed* ped = CPools::ms_pPedPool->GetAt(i);
-            if (!ped || ped == player || !ped->m_pRwClump) continue;
-            const CVector& p = ped->GetPosition();
-            float dx = p.x - pp.x, dy = p.y - pp.y, dz = p.z - pp.z;
-            if ((dx * dx + dy * dy + dz * dz) > r2) continue;
-            int h = CPools::GetPedRef(ped);
-            if (g_renderAllPedsWeapons) {
-                seen.insert(h);
-                auto& cache = g_otherPedsRendered[h];
-                std::fill(suppressPed.begin(), suppressPed.end(), 0);
-                OrcObjectsApplyWeaponSuppression(ped, &suppressPed);
-                OrcWeaponSuppressBodyForHeldVisualWeapon(ped, &suppressPed);
-                OrcSyncPedWeapons(ped, cache.data(), &suppressPed);
-                OrcRenderPedWeapons(ped, cache.data());
-            }
-            OrcObjectsRenderForRemotePed(ped, objectUsed);
-        }
-        if (g_renderAllPedsWeapons) {
-            for (auto it = g_otherPedsRendered.begin(); it != g_otherPedsRendered.end();) {
-                if (seen.find(it->first) == seen.end()) {
-                    for (int i = 0; i < OrcWeaponSlotMax; i++) OrcDestroyRenderedWeapon(it->second[i]);
-                    it = g_otherPedsRendered.erase(it);
-                } else {
-                    ++it;
+        if (renderBodyWeapons) {
+            g_attachmentScenePhase = "weaponBody";
+            int rendered = 0;
+            __try {
+                __try {
+                    rendered = OrcRenderCachedBodyWeaponsForAttachmentScene(player);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    static bool bodySceneSehLogged = false;
+                    if (!bodySceneSehLogged) {
+                        bodySceneSehLogged = true;
+                        OrcLogError("weapon body attachment scene SEH ex=0x%08X; objects continue",
+                            GetExceptionCode());
+                    }
                 }
+            } __finally {
+                // A failed foreign atomic/pipeline must not poison the following object/skin draws.
+                v = rwCULLMODECULLBACK;  RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(v));
+                v = TRUE;                RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(v));
+                v = TRUE;                RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(v));
+                v = rwSHADEMODEGOURAUD;  RwRenderStateSet(rwRENDERSTATESHADEMODE,    reinterpret_cast<void*>(v));
+                v = FALSE;               RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(v));
+                RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, reinterpret_cast<void*>(oldVertexAlpha));
+                RwRenderStateSet(rwRENDERSTATESRCBLEND,          reinterpret_cast<void*>(oldSrcBlend));
+                RwRenderStateSet(rwRENDERSTATEDESTBLEND,         reinterpret_cast<void*>(oldDstBlend));
+                RwRenderStateSet(rwRENDERSTATEALPHATESTFUNCTIONREF, reinterpret_cast<void*>(oldAlphaRef));
             }
+            OrcLogInfoThrottled(496u,
+                5000u,
+                "weapon body pass: path=drawingEventAttachment instances=%d",
+                rendered);
         }
-    } else {
-        OrcWeaponClearOtherPedsRendered();
-    }
-    OrcObjectsFinalizeFrame(objectUsed);
 
-    RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(oldCull));
-    RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(oldZT));
-    RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(oldZW));
-    RwRenderStateSet(rwRENDERSTATESHADEMODE,    reinterpret_cast<void*>(oldShade));
-    RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(oldFog));
+        if (renderObjectsAndSkins) {
+            g_attachmentScenePhase = "objectsLocal";
+            OrcObjectsRenderLocalPlayer(player, objectUsed);
+            g_attachmentScenePhase = "skins";
+            OrcSkinsRenderForPeds(player);
+            if (g_renderAllPedsObjects) {
+                g_attachmentScenePhase = "objectsRemote";
+                for (CPed* ped : nearbyPeds)
+                    OrcObjectsRenderForRemotePed(ped, objectUsed);
+            }
+            g_attachmentScenePhase = "objectsFinalize";
+            OrcObjectsFinalizeFrame(objectUsed);
+        }
+    } __finally {
+        g_attachmentScenePhase = "rwStateRestore";
+        // `OnDrawingEvent` catches SEH outside this function. Restore the states before control reaches that catch;
+        // otherwise one bad DFF or stale RW pointer poisons all later weapon/ped lighting in the frame.
+        RwRenderStateSet(rwRENDERSTATECULLMODE,     reinterpret_cast<void*>(oldCull));
+        RwRenderStateSet(rwRENDERSTATEZTESTENABLE,  reinterpret_cast<void*>(oldZT));
+        RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, reinterpret_cast<void*>(oldZW));
+        RwRenderStateSet(rwRENDERSTATESHADEMODE,    reinterpret_cast<void*>(oldShade));
+        RwRenderStateSet(rwRENDERSTATEFOGENABLE,    reinterpret_cast<void*>(oldFog));
+        RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, reinterpret_cast<void*>(oldVertexAlpha));
+        RwRenderStateSet(rwRENDERSTATESRCBLEND,          reinterpret_cast<void*>(oldSrcBlend));
+        RwRenderStateSet(rwRENDERSTATEDESTBLEND,         reinterpret_cast<void*>(oldDstBlend));
+        RwRenderStateSet(rwRENDERSTATEALPHATESTFUNCTIONREF, reinterpret_cast<void*>(oldAlphaRef));
+    }
+    g_attachmentScenePhase = "idle";
 }
 
 int OrcSafeGetPedRef(CPed* ped) {
@@ -2434,7 +2540,15 @@ bool OrcIsRuntimeShuttingDown() {
     return g_orcRuntimeShuttingDown;
 }
 
-static void OnInitRw() {}
+static void OnInitRw() {
+    // SilentPatch 1.1.34 binds the menu flag through the instruction operand at 0x53E9AD.
+    // Stabilize that binding before a generated inline CALL can be misread as a pointer.
+    (void)OrcSilentPatchCompatPoll();
+    // DllMain других ASI уже завершились: цепляемся после их ранних hooks, а не даём им затереть наш entry.
+#ifndef ORC_LITE
+    OrcWeaponRenderEnsureBatchHookInstalled();
+#endif
+}
 static void OnDrawingEvent();
 static void OnPedRenderBefore(CPed* ped);
 static void OnPedRenderAfter(CPed* ped);
@@ -2453,6 +2567,145 @@ static void OnD3dReset() {
     overlay::OnResetAfter();
 }
 static void OnShutdownRw();
+
+static bool g_attachmentSceneRendererHealthy = true;
+static bool g_localPlayerLookupDisabledAfterSeh = false;
+static bool g_runtimeAttachmentReleaseDisabledAfterSeh = false;
+static DWORD g_remotePedCollectionRetryAfterMs = 0u;
+static unsigned g_remotePedCollectionFailureCount = 0u;
+static DWORD g_remotePedCollectionLastErrorLogMs = 0u;
+static DWORD g_heldMaintenanceRetryAfterMs = 0u;
+static unsigned g_heldMaintenanceFailureCount = 0u;
+static DWORD g_heldMaintenanceLastErrorLogMs = 0u;
+static DWORD g_weaponBodyCacheSyncLastErrorLogMs = 0u;
+static DWORD g_attachmentSceneRetryAfterMs = 0u;
+static unsigned g_attachmentSceneFailureCount = 0u;
+static DWORD g_attachmentSceneLastErrorLogMs = 0u;
+
+static DWORD OrcRuntimeRetryDelayMs(unsigned failureCount) {
+    const unsigned shift = (std::min)(failureCount > 0u ? failureCount - 1u : 0u, 4u);
+    return (std::min)(250u << shift, 4000u);
+}
+
+static bool OrcRuntimeRetryWindowOpen(DWORD retryAfterMs, DWORD nowMs) {
+    return retryAfterMs == 0u || static_cast<LONG>(nowMs - retryAfterMs) >= 0;
+}
+
+static bool OrcRuntimeFailureNeedsLog(DWORD nowMs, DWORD& lastLogMs) {
+    if (lastLogMs != 0u && static_cast<DWORD>(nowMs - lastLogMs) < 10000u)
+        return false;
+    lastLogMs = nowMs;
+    return true;
+}
+
+static int OrcLogRuntimePathSeh(
+    const char* path,
+    const char* phase,
+    const char* action,
+    EXCEPTION_POINTERS* exceptionInfo) {
+    const DWORD code = exceptionInfo && exceptionInfo->ExceptionRecord
+        ? exceptionInfo->ExceptionRecord->ExceptionCode
+        : 0u;
+    void* address = exceptionInfo && exceptionInfo->ExceptionRecord
+        ? exceptionInfo->ExceptionRecord->ExceptionAddress
+        : nullptr;
+    HMODULE module = nullptr;
+    if (address) {
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(address),
+            &module);
+    }
+    const uintptr_t rva = module && address
+        ? reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(module)
+        : 0u;
+    char modulePath[MAX_PATH] = {};
+    if (!module || GetModuleFileNameA(module, modulePath, MAX_PATH) == 0)
+        _snprintf_s(modulePath, _TRUNCATE, "%s", "<unknown>");
+    OrcLogError(
+        "runtime path SEH: path=%s phase=%s action=%s ex=0x%08X address=%p module=%s base=%p rva=0x%08X",
+        path ? path : "unknown",
+        phase ? phase : "unknown",
+        action ? action : "unknown",
+        code,
+        address,
+        modulePath,
+        module,
+        static_cast<unsigned>(rva));
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static int OrcDisableRuntimePathAfterSeh(bool& disabled,
+    const char* path,
+    const char* phase,
+    EXCEPTION_POINTERS* exceptionInfo) {
+    disabled = true;
+    return OrcLogRuntimePathSeh(path, phase, "disabledForSession", exceptionInfo);
+}
+
+static int OrcRemotePedCollectionSehFilter(EXCEPTION_POINTERS* exceptionInfo) {
+    ++g_remotePedCollectionFailureCount;
+    const DWORD nowMs = GetTickCount();
+    g_remotePedCollectionRetryAfterMs = nowMs + OrcRuntimeRetryDelayMs(g_remotePedCollectionFailureCount);
+    if (OrcRuntimeFailureNeedsLog(nowMs, g_remotePedCollectionLastErrorLogMs)) {
+        return OrcLogRuntimePathSeh("remotePedCollection",
+            "poolScan",
+            "retryWithBackoff",
+            exceptionInfo);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static int OrcWeaponBodyCacheSyncSehFilter(EXCEPTION_POINTERS* exceptionInfo) {
+    const DWORD nowMs = GetTickCount();
+    if (OrcRuntimeFailureNeedsLog(nowMs, g_weaponBodyCacheSyncLastErrorLogMs)) {
+        return OrcLogRuntimePathSeh("weaponBodyCacheSync",
+            g_weaponBodyCacheSyncPhase,
+            "retryNextFrame",
+            exceptionInfo);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static int OrcHeldMaintenanceSehFilter(EXCEPTION_POINTERS* exceptionInfo) {
+    ++g_heldMaintenanceFailureCount;
+    const DWORD nowMs = GetTickCount();
+    g_heldMaintenanceRetryAfterMs = nowMs + OrcRuntimeRetryDelayMs(g_heldMaintenanceFailureCount);
+    if (OrcRuntimeFailureNeedsLog(nowMs, g_heldMaintenanceLastErrorLogMs)) {
+        return OrcLogRuntimePathSeh("heldMaintenance",
+            "pruneInstances",
+            "retryWithBackoff",
+            exceptionInfo);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static int OrcAttachmentSceneRenderSehFilter(EXCEPTION_POINTERS* exceptionInfo) {
+    g_attachmentSceneRendererHealthy = false;
+    ++g_attachmentSceneFailureCount;
+    const DWORD nowMs = GetTickCount();
+    g_attachmentSceneRetryAfterMs = nowMs + OrcRuntimeRetryDelayMs(g_attachmentSceneFailureCount);
+    if (OrcRuntimeFailureNeedsLog(nowMs, g_attachmentSceneLastErrorLogMs)) {
+        return OrcLogRuntimePathSeh("attachmentSceneRender",
+            g_attachmentScenePhase,
+            "retryWithBackoff",
+            exceptionInfo);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static int OrcLocalPlayerLookupSehFilter(EXCEPTION_POINTERS* exceptionInfo) {
+    return OrcDisableRuntimePathAfterSeh(g_localPlayerLookupDisabledAfterSeh,
+        "localPlayerLookup",
+        "FindPlayerPed",
+        exceptionInfo);
+}
+
+static int OrcRuntimeAttachmentReleaseSehFilter(EXCEPTION_POINTERS* exceptionInfo) {
+    return OrcDisableRuntimePathAfterSeh(g_runtimeAttachmentReleaseDisabledAfterSeh,
+        "runtimeAttachmentRelease",
+        "destroyInstances",
+        exceptionInfo);
+}
 
 static void OnDrawingEvent() {
     if (g_orcRuntimeShuttingDown)
@@ -2493,9 +2746,73 @@ static void OnDrawingEvent() {
     ApplyPendingLocalPlayerModel();
     // После смены модели педа (Invalidate) — финальный DFF/имя для `ResolveWeaponsPresetIniForPed`.
     OrcWeaponSkinRuntimeCachesPrewarmOnIdle();
-    __try { SyncAndRender(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogError("SyncAndRender: SEH ex=0x%08X", GetExceptionCode());
+
+    static std::vector<CPed*> nearbyPeds;
+    CPlayerPed* player = nullptr;
+    if (g_enabled && !g_localPlayerLookupDisabledAfterSeh) {
+        __try {
+            player = FindPlayerPed(0);
+        } __except (OrcLocalPlayerLookupSehFilter(GetExceptionInformation())) {}
+    }
+    if (!g_enabled || (!player && !g_localPlayerLookupDisabledAfterSeh)) {
+        nearbyPeds.clear();
+        if (!g_runtimeAttachmentReleaseDisabledAfterSeh) {
+            __try {
+                ReleaseRuntimeAttachmentInstances();
+            } __except (OrcRuntimeAttachmentReleaseSehFilter(GetExceptionInformation())) {}
+        }
+    } else if (player) {
+        const DWORD collectionNowMs = GetTickCount();
+        const bool remoteCollectionRetryWindowOpen =
+            OrcRuntimeRetryWindowOpen(g_remotePedCollectionRetryAfterMs, collectionNowMs);
+        if (remoteCollectionRetryWindowOpen) {
+            __try {
+                CollectNearbyPeds(player, nearbyPeds);
+                g_remotePedCollectionRetryAfterMs = 0u;
+                g_remotePedCollectionFailureCount = 0u;
+            } __except (OrcRemotePedCollectionSehFilter(GetExceptionInformation())) {
+                nearbyPeds.clear();
+            }
+        } else {
+            nearbyPeds.clear();
+        }
+
+        const DWORD nowMs = GetTickCount();
+        if (OrcRuntimeRetryWindowOpen(g_heldMaintenanceRetryAfterMs, nowMs)) {
+            __try {
+                MaintainHeldWeaponInstances();
+                g_heldMaintenanceRetryAfterMs = 0u;
+                g_heldMaintenanceFailureCount = 0u;
+            } __except (OrcHeldMaintenanceSehFilter(GetExceptionInformation())) {}
+        }
+
+        if (OrcShouldRunWeaponBodyCacheSync(g_enabled, player != nullptr)) {
+            __try {
+                SyncWeaponBodyCaches(player,
+                    nearbyPeds,
+                    g_attachmentSceneRendererHealthy);
+            } __except (OrcWeaponBodyCacheSyncSehFilter(GetExceptionInformation())) {}
+        }
+
+        const bool renderObjectsAndSkins =
+            OrcRuntimeRetryWindowOpen(g_attachmentSceneRetryAfterMs, nowMs);
+        if (OrcShouldEnterAttachmentScene(
+                OrcWeaponHasCachedBodyWeapons(),
+                renderObjectsAndSkins)) {
+            __try {
+                RenderAttachmentScene(player, nearbyPeds, renderObjectsAndSkins);
+                if (renderObjectsAndSkins) {
+                    g_attachmentSceneRendererHealthy = true;
+                    g_attachmentSceneRetryAfterMs = 0u;
+                    g_attachmentSceneFailureCount = 0u;
+                }
+            } __except (OrcAttachmentSceneRenderSehFilter(GetExceptionInformation())) {}
+        }
+
+    } else {
+        // `FindPlayerPed` itself faulted and was isolated. Do not dereference a synthetic/null player or destroy
+        // possibly related instances from the same damaged state.
+        nearbyPeds.clear();
     }
     overlay::DrawFrame();
     FlushPendingMainIniSave();
@@ -2529,6 +2846,9 @@ static void OnGameProcessBegin() {
     if (g_orcRuntimeShuttingDown)
         return;
 
+    static bool pollSilentPatchCompat = true;
+    if (pollSilentPatchCompat)
+        pollSilentPatchCompat = OrcSilentPatchCompatPoll();
     overlay::ReleaseInputCaptureIfClosed();
     OrcFlushDeferredHeldWeaponSlotRestore();
     OrcHeldPoseBeginSimFrame();

@@ -5,6 +5,7 @@
 #include "eWeaponType.h"
 
 #include "orc_log.h"
+#include "orc_weapon_metadata_cache.h"
 
 #include "external/MinHook/include/MinHook.h"
 
@@ -14,6 +15,7 @@
 std::vector<int> g_weaponDatModelId;
 std::vector<std::string> g_weaponDatIdeName;
 static std::vector<std::string> g_weaponObjectDffByModelId;
+static OrcWeaponModelTypeCache g_weaponModelTypeCache;
 
 namespace {
 
@@ -123,6 +125,17 @@ void OrcWeaponsMapLoadedModelIdToType(int wt, int modelId) {
 
     if (const char* dff = OrcTryGetWeaponObjectDffNameByModelId(modelId))
         g_weaponDatIdeName[(size_t)wt] = dff;
+}
+
+std::size_t OrcWeaponsRebuildRuntimeModelCache(const std::vector<int>& availableTypes,
+    const std::vector<int>& primaryModelIds,
+    const std::vector<int>& secondaryModelIds) {
+    g_weaponModelTypeCache.Rebuild(availableTypes, primaryModelIds, secondaryModelIds);
+    return g_weaponModelTypeCache.Size();
+}
+
+int OrcWeaponsFindCachedTypeByModelId(int modelId) {
+    return g_weaponModelTypeCache.FindType(modelId);
 }
 
 void OrcWeaponsEnsureWeaponDatHookInstalled() {

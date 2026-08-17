@@ -22,3 +22,4 @@ void OrcSkinNativeOnSkinAssetsReleased();
 void OrcSkinNativeShutdown();
 bool OrcSkinNativeGetActiveInfo(CPed* ped, OrcNativeSkinActiveInfo& out);
 bool OrcSkinNativeShouldOverlayFallback(CPed* ped, const CustomSkinCfg* skin);
+bool OrcSkinNativeShouldOverlayFallback(CPed* ped, const StandardSkinCfg* skin);

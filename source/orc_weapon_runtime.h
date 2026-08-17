@@ -8,6 +8,7 @@
 #include <vector>
 
 class CPed;
+class CPlayerPed;
 
 constexpr int OrcWeaponSlotMax = 20;
 
@@ -18,11 +19,20 @@ struct RenderedWeapon {
     int modelId = 0;
     int slot = 0;
     RwObject* rwObject = nullptr;
+    bool usesReplacementMesh = false;
+    /// Selected replacement key remains set for a stock fallback, preventing per-frame destroy/retry churn.
     std::string replacementKey;
+    /// Exact stock-material pins owned by this body instance; duplicates are intentional and ref-balanced.
+    std::vector<RpMaterial*> pinnedMaterials;
+};
+
+struct PedWeaponCache {
+    std::array<RenderedWeapon, OrcWeaponSlotMax> weapons{};
+    unsigned lastSyncSerial = 0u;
 };
 
 extern RenderedWeapon g_rendered[OrcWeaponSlotMax];
-extern std::unordered_map<int, std::array<RenderedWeapon, OrcWeaponSlotMax>> g_otherPedsRendered;
+extern std::unordered_map<int, PedWeaponCache> g_otherPedsRendered;
 
 void OrcDestroyRenderedWeapon(RenderedWeapon& r);
 
@@ -35,7 +45,14 @@ void OrcPruneHeldWeaponReplacementInstances();
 void OrcDestroyAllHeldWeaponReplacementInstances();
 
 void OrcSyncPedWeapons(CPed* ped, RenderedWeapon* arr, const std::vector<char>* suppress = nullptr);
+bool OrcWeaponHasCachedBodyWeapons();
 int OrcRenderPedWeapons(CPed* ped, RenderedWeapon* arr);
+/// Draw cached local/remote body weapons as ordinary attachment objects from `drawingEvent`.
+/// The caller owns the scoped RenderWare states; this function balances lighting once per owner ped.
+int OrcRenderCachedBodyWeaponsForAttachmentScene(CPlayerPed* player);
+/// Full held module resets pose/dual state around each shared GTA weapon batch; Lite stubs are no-op.
+void OrcHeldOnVanillaWeaponBatchBefore();
+void OrcHeldOnVanillaWeaponBatchAfter();
 
 void OrcWeaponEnsurePedModelHooksInstalled();
 /// Хуки `CWeapon::Fire` / `FireInstantHit`: смещение `muzzlePosn` по Held-позе; синхронизация `m_pGunflashObject` в `orc_weapon_runtime_held_fx.cpp`.
