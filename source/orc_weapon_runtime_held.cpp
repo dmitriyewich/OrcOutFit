@@ -702,21 +702,6 @@ int OrcResolveActiveHeldWeaponTypeForBodySuppression(CPed* ped) {
     return currentWt;
 }
 
-int OrcWeaponHudGetHeldReplacementWeaponTypeIfAny(CPed* ped) {
-    if (!ped)
-        return 0;
-    const int pref = CPools::GetPedRef(ped);
-    if (pref <= 0)
-        return 0;
-    auto it = g_heldWeaponReplacements.find(pref);
-    if (it == g_heldWeaponReplacements.end())
-        return 0;
-    const HeldWeaponReplacementState& st = it->second;
-    if (st.weaponType > 0 && st.rwObject)
-        return st.weaponType;
-    return 0;
-}
-
 bool OrcGetHeldReplacementKeyForPed(CPed* ped, int wt, std::string& outKeyLower) {
     outKeyLower.clear();
     if (!ped || wt <= 0)

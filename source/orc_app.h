@@ -50,7 +50,7 @@ extern bool g_weaponTextureRandomMode;
 extern int g_weaponTextureRandomPickMode;
 /// Use `*_remap` pairs inside the game's loaded weapon model TXD (PedFuncs-style per slot).
 extern bool g_weaponTextureStandardRemap;
-/// HUD `DrawWeaponIcon`: if Guns/replacement dictionary has `<weapon>icon`, use as current TXD for the call (local player).
+/// Native weapon HUD can use the selected Guns/replacement icon for the local player.
 extern bool g_weaponHudIconFromGunsTxd;
 /// Кастомные звуки выстрел/перезарядка рядом с DFF замены (`<stem>_shoot.*`, …), форматы WAV/MP3/FLAC/OGG.
 extern bool g_weaponCustomSounds;

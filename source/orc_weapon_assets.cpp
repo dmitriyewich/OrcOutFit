@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -269,7 +270,10 @@ static std::vector<std::string> KnownWeaponModelNamesLower() {
 
 
 
+static void ClearWeaponHudIconCache(int txdSlot = -1);
+
 static void DestroyWeaponReplacementAssets() {
+    ClearWeaponHudIconCache();
     for (auto& asset : g_weaponReplacementAssets) {
         OrcDestroyRwObjectInstance(asset.rwObject);
         asset.txdSlot = -1;
@@ -324,6 +328,7 @@ static bool EnsureWeaponReplacementAssetLoaded(WeaponReplacementAsset& asset) {
     bool txdOk = false;
     RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.txdPath.c_str());
     if (txdStream) {
+        ClearWeaponHudIconCache(txdSlot);
         txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
         RwStreamClose(txdStream, nullptr);
     }
@@ -661,11 +666,11 @@ static void WeaponTextureRecordMaterialRestore(RpMaterial* material, RwTexture* 
 }
 
 static RwTexDictionary* GetTxdDictionaryByIndexMain(int txdIndex) {
-    if (txdIndex < 0 || !CTxdStore::ms_pTxdPool || !CTxdStore::ms_pTxdPool->m_pObjects)
+    auto* pool = CTxdStore::ms_pTxdPool;
+    if (!pool || !pool->m_pObjects || !pool->m_byteMap || txdIndex < 0 || txdIndex >= pool->m_nSize)
         return nullptr;
-    if (txdIndex >= CTxdStore::ms_pTxdPool->m_nSize)
-        return nullptr;
-    return CTxdStore::ms_pTxdPool->m_pObjects[txdIndex].m_pRwDictionary;
+    const TxdDef* slot = pool->GetAt(txdIndex);
+    return slot ? slot->m_pRwDictionary : nullptr;
 }
 
 static constexpr size_t kWeaponStockRemapMaxSlots = 8;
@@ -1007,6 +1012,7 @@ void OrcWeaponHeldTextureDeferEnd() {
 }
 
 static void DestroyWeaponTextureAssets() {
+    ClearWeaponHudIconCache();
     OrcRestoreWeaponTextureOverrides();
     OrcRestoreWeaponHeldTextureOverrides();
     g_weaponTextureHeldDeferDepth = 0;
@@ -1064,6 +1070,7 @@ static bool EnsureWeaponTextureAssetLoaded(WeaponTextureAsset& asset) {
     bool txdOk = false;
     RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.txdPath.c_str());
     if (txdStream) {
+        ClearWeaponHudIconCache(txdSlot);
         txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
         RwStreamClose(txdStream, nullptr);
     }
@@ -1467,887 +1474,141 @@ WeaponTextureAsset* OrcResolveUsableWeaponTextureAssetForPed(CPed* ped,
     return nullptr;
 }
 
-struct HudIconFindInsensitiveCtx {
-    const char* want = nullptr;
-    RwTexture* found = nullptr;
+namespace {
+struct WeaponHudIconCacheEntry {
+    const void* asset = nullptr;
+    const std::string* replacementKey = nullptr;
+    RwTexDictionary* dict = nullptr;
+    unsigned int stockHash = 0;
+    int txdSlot = -1;
+    int weaponType = 0;
+    RwTexture* texture = nullptr;
 };
 
-static RwTexture* HudIconFindInsensitiveCb(RwTexture* texture, void* data) {
-    if (!texture || !texture->name[0] || !data)
+WeaponHudIconCacheEntry g_textureHudIcon;
+WeaponHudIconCacheEntry g_replacementHudIcon;
+
+struct HudIconCandidates {
+    std::string vanillaIcon;
+    std::string folderIcon;
+    std::string matchIcon;
+    std::string_view replacementBasename;
+    std::string_view folder;
+    std::string_view match;
+    RwTexture* best = nullptr;
+    int bestScore = -1;
+    size_t bestNameLength = 0;
+    RwTexture* lone = nullptr;
+    unsigned int count = 0;
+};
+
+std::string_view HudReplacementBasename(std::string_view key) {
+    if (key.compare(0, 7, "wprand:") != 0)
+        return {};
+    const size_t separator = key.rfind(':');
+    return separator > 6 ? key.substr(separator + 1) : std::string_view{};
+}
+
+RwTexture* CollectHudIconCandidate(RwTexture* texture, void* data) {
+    if (!texture || !texture->raster)
         return texture;
-    HudIconFindInsensitiveCtx* ctx = reinterpret_cast<HudIconFindInsensitiveCtx*>(data);
-    if (!ctx->want || ctx->found)
+    const size_t length = strnlen_s(texture->name, sizeof(texture->name));
+    if (length < 4 || length == sizeof(texture->name) || _stricmp(texture->name + length - 4, "icon") != 0 ||
+        _stricmp(texture->name, "skipicon") == 0) {
         return texture;
-    if (_stricmp(texture->name, ctx->want) == 0)
-        ctx->found = texture;
+    }
+
+    auto& candidates = *static_cast<HudIconCandidates*>(data);
+    const std::string name = OrcToLowerAscii(std::string(texture->name, length));
+    candidates.lone = texture;
+    ++candidates.count;
+
+    int score = -1;
+    if (!candidates.vanillaIcon.empty() && name == candidates.vanillaIcon)
+        score = 6;
+    else if (!candidates.folderIcon.empty() && name == candidates.folderIcon)
+        score = 5;
+    else if (!candidates.matchIcon.empty() && name == candidates.matchIcon)
+        score = 4;
+    else if (!candidates.replacementBasename.empty() && name.find(candidates.replacementBasename) != std::string::npos)
+        score = 3;
+    else if (!candidates.match.empty() && candidates.match != candidates.folder && name.find(candidates.match) != std::string::npos)
+        score = 2;
+    else if (!candidates.folder.empty() && name.find(candidates.folder) != std::string::npos)
+        score = 1;
+
+    if (score >= 0 && (score > candidates.bestScore ||
+        (score == candidates.bestScore && length > candidates.bestNameLength))) {
+        candidates.best = texture;
+        candidates.bestScore = score;
+        candidates.bestNameLength = length;
+    }
     return texture;
 }
 
-RwTexture* OrcWeaponHudResolveSpriteTexture(RwTexDictionary* dict, const char* name) {
-    if (!dict || !name || !name[0])
-        return nullptr;
-    __try {
-        if (RwTexture* hit = RwTexDictionaryFindNamedTexture(dict, name))
-            return hit;
-        HudIconFindInsensitiveCtx ctx;
-        ctx.want = name;
-        ctx.found = nullptr;
-        RwTexDictionaryForAllTextures(dict, HudIconFindInsensitiveCb, &ctx);
-        return ctx.found;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
+template <typename Asset>
+RwTexture* FindHudIconForAsset(WeaponHudIconCacheEntry& cache, const Asset& asset,
+    int weaponType, unsigned int stockHash, const std::string& replacementKey) {
+    // Only reuse the borrowed texture while its slot still owns the same dictionary.
+    // Our loaders invalidate this slot before replacing the dictionary, including address reuse.
+    RwTexDictionary* dict = GetTxdDictionaryByIndexMain(asset.txdSlot);
+    if (cache.asset == &asset && cache.txdSlot == asset.txdSlot && cache.dict == dict && cache.stockHash == stockHash &&
+        cache.weaponType == weaponType && cache.replacementKey == &replacementKey) {
+        return cache.texture;
     }
-}
 
-static bool HudIconDictHasNamedTexture(int txdSlot, const char* textureName) {
-    if (txdSlot < 0 || !textureName || !textureName[0])
-        return false;
-    RwTexDictionary* dict = GetTxdDictionaryByIndexMain(txdSlot);
+    cache = { &asset, &replacementKey, dict, stockHash, asset.txdSlot, weaponType, nullptr };
     if (!dict)
-        return false;
-    return OrcWeaponHudResolveSpriteTexture(dict, textureName) != nullptr;
-}
-
-// GTA asks `CHud::DrawWeaponIcon` sprites by **weapon.dat / Ide** basename (e.g. colt45icon). Guns packs often ship
-// `<dff_basename>icon` (e.g. desert_eagleicon) only — remap in `CSprite2d::SetTexture` when both are known.
-static char g_hudWeaponIconRemapFrom[64] = {};
-static char g_hudWeaponIconRemapTo[64] = {};
-
-const char* OrcWeaponHudGetIconSpriteRemapFrom() {
-    return g_hudWeaponIconRemapFrom[0] ? g_hudWeaponIconRemapFrom : nullptr;
-}
-
-const char* OrcWeaponHudGetIconSpriteRemapTo() {
-    return g_hudWeaponIconRemapTo[0] ? g_hudWeaponIconRemapTo : nullptr;
-}
-
-static void HudIconClearSpriteRemap() {
-    g_hudWeaponIconRemapFrom[0] = 0;
-    g_hudWeaponIconRemapTo[0] = 0;
-}
-
-static void HudIconSetSpriteRemap(const char* from, const char* to) {
-    HudIconClearSpriteRemap();
-    if (!from || !to || !from[0] || !to[0])
-        return;
-    if (_stricmp(from, to) == 0)
-        return;
-    strncpy_s(g_hudWeaponIconRemapFrom, sizeof(g_hudWeaponIconRemapFrom), from, _TRUNCATE);
-    strncpy_s(g_hudWeaponIconRemapTo, sizeof(g_hudWeaponIconRemapTo), to, _TRUNCATE);
-}
-
-// Raster-borrow heuristic below calls `HudIconPickBestAmongSuffixIcons` (defined later in this TU).
-static void HudIconPickBestAmongSuffixIcons(const std::vector<std::string>& names,
-    const std::string& vanillaIcon,
-    const std::string& weaponCatLower,
-    const std::string& matchLower,
-    const std::string& replKeyHint,
-    std::string* outChosenCustom,
-    bool allowLoneArbitraryIconIfUnmatched);
-
-// SA:MP (and similar): HUD may never call `CSprite2d::SetTexture` for `*icon`. Subclassing `FindNamedTexture` on
-// `hud.txd` matches how ped `*_remap` resolves alternate art — any code path that looks up the icon by name gets Orc.
-struct HudIconRwFindState {
-    bool active = false;
-    RwTexDictionary* hudDict = nullptr;
-    /// Active Orc Guns/GunsNick TXD slot — exclude from RwFind hijack so 3D materials keep their dictionary.
-    int orcTxdSlot = -1;
-    std::string lookupName;
-    RwTexture* orcTex = nullptr;
-    /// Names the game may use for `RwTexDictionaryFindNamedTexture` on `hud.txd` (e.g. `colt45icon` while weapon.dat
-    /// uses `desert_eagleicon`).
-    std::vector<std::string> matchNames;
-};
-
-static HudIconRwFindState g_hudIconRwFind;
-
-// Clients may cache sprites at load and never hit `RwTexDictionaryFindNamedTexture` again; patch the **raster** on
-// every `RwTexture` that matches `matchNames` (often `colt45icon` and `desert_eagleicon` live in different TXDs for
-// SA:MP). Single-texture borrow leaves other pointers sampling vanilla pixels.
-struct HudIconBorrowEntry {
-    RwTexture* tex = nullptr;
-    RwRaster* savedRaster = nullptr;
-};
-static std::vector<HudIconBorrowEntry> g_hudIconBorrowTracks;
-
-struct HudManualNamedTexCtx {
-    const char* want = nullptr;
-    RwTexture* found = nullptr;
-};
-
-static RwTexture* HudManualFindNamedTextureInsensitiveCb(RwTexture* tex, void* vd) {
-    HudManualNamedTexCtx* c = reinterpret_cast<HudManualNamedTexCtx*>(vd);
-    if (!tex || !c || !c->want || !tex->name[0] || c->found)
-        return tex;
-    if (_stricmp(tex->name, c->want) == 0)
-        c->found = tex;
-    return tex;
-}
-
-static void HudIconPushUniqueMatchName(std::vector<std::string>& v, const char* s) {
-    if (!s || !s[0])
-        return;
-    for (const std::string& e : v) {
-        if (_stricmp(e.c_str(), s) == 0)
-            return;
-    }
-    v.emplace_back(s);
-}
-
-// Weapon HUD sprites end with `icon` — allow mixed case (`Colt45Icon`, etc.).
-// Exclude SA:MP `SkipIcon` / `skipicon` via HudIconIsExcludedNonWeaponHudIconName (don't use `_stricmp` suffix alone).
-static bool HudIconNameEndsWithIconSuffixInsensitive(const char* nm) {
-    if (!nm || !nm[0])
-        return false;
-    const size_t n = std::strlen(nm);
-    if (n < 4)
-        return false;
-    const char* s = nm + n - 4;
-    static const char ref[] = "icon";
-    for (int i = 0; i < 4; ++i) {
-        const unsigned char a = static_cast<unsigned char>(s[i]);
-        const unsigned char b = static_cast<unsigned char>(ref[i]);
-        if (std::tolower(a) != b)
-            return false;
-    }
-    return true;
-}
-
-static bool HudIconIsExcludedNonWeaponHudIconName(const char* nm) {
-    if (!nm || !nm[0])
-        return true;
-    if (_stricmp(nm, "skipicon") == 0)
-        return true;
-    return false;
-}
-
-bool OrcWeaponHudSpriteNamePassesSetTextureConvention(const char* name) {
-    return name != nullptr &&
-        HudIconNameEndsWithIconSuffixInsensitive(name) &&
-        !HudIconIsExcludedNonWeaponHudIconName(name);
-}
-
-static bool HudIconCollectSuffixIconNamesFromRwDict(RwTexDictionary* dict, std::vector<std::string>& out) {
-    out.clear();
-    if (!dict)
-        return false;
-    struct Ctx {
-        std::vector<std::string>* o = nullptr;
-    };
-    Ctx ctx{};
-    ctx.o = &out;
-    auto cb = [](RwTexture* tex, void* vd) -> RwTexture* {
-        Ctx* c = reinterpret_cast<Ctx*>(vd);
-        if (!tex || !tex->name[0] || !c || !c->o)
-            return tex;
-        if (HudIconNameEndsWithIconSuffixInsensitive(tex->name) &&
-            !HudIconIsExcludedNonWeaponHudIconName(tex->name))
-            c->o->push_back(tex->name);
-        return tex;
-    };
-    __try {
-        RwTexDictionaryForAllTextures(dict, cb, &ctx);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        out.clear();
-        return false;
-    }
-    return true;
-}
-
-static RwTexture* HudTryFindHudTextureByInsensitiveName(RwTexDictionary* hudDict, const char* want) {
-    if (!hudDict || !want || !want[0])
-        return nullptr;
-    HudManualNamedTexCtx c{};
-    c.want = want;
-    c.found = nullptr;
-    __try {
-        RwTexDictionaryForAllTextures(hudDict, HudManualFindNamedTextureInsensitiveCb, &c);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-    return c.found;
-}
-
-/// Pick vanilla `hud.txd` RwTexture whose raster we borrow (ammo icon slot). Prefer entries with raster; some clients
-/// keep icon textures unresolved until draw — second pass accepts `raster=null`.
-/// When `strictBorrowPool` is true (full TXD store scan): never pick the lone `*icon` in an unrelated dictionary — that
-/// produced bogus targets like `cellphoneicon` before the real pistol slot dictionary was reached.
-static RwTexture* HudIconBorrowResolveHudWeaponTexEx(RwTexDictionary* hudDict, bool requireRaster, bool strictBorrowPool) {
-    if (!hudDict || !g_hudIconRwFind.active)
         return nullptr;
 
-    auto check = [&](RwTexture* t) -> RwTexture* {
-        if (!t || HudIconIsExcludedNonWeaponHudIconName(t->name))
-            return nullptr;
-        if (requireRaster) {
-            if (t->raster)
-                return t;
-            return nullptr;
-        }
-        return t;
-    };
-
-    for (const std::string& cand : g_hudIconRwFind.matchNames) {
-        if (RwTexture* t = check(HudTryFindHudTextureByInsensitiveName(hudDict, cand.c_str())))
-            return t;
-    }
-
-    std::vector<std::string> iconNames;
-    if (!HudIconCollectSuffixIconNamesFromRwDict(hudDict, iconNames))
-        return nullptr;
-
-    std::string weaponCat = OrcToLowerAscii(g_hudIconRwFind.lookupName);
-    if (weaponCat.size() >= 4) {
-        const char* suf = weaponCat.c_str() + weaponCat.size() - 4;
-        if (_stricmp(suf, "icon") == 0)
-            weaponCat.erase(weaponCat.size() - 4);
-    }
-
-    std::string chosen;
-    HudIconPickBestAmongSuffixIcons(iconNames,
-        g_hudIconRwFind.lookupName,
-        weaponCat,
-        "",
-        "",
-        &chosen,
-        !strictBorrowPool);
-    if (!chosen.empty() && HudIconIsExcludedNonWeaponHudIconName(chosen.c_str()))
-        chosen.clear();
-
-    if (!chosen.empty())
-        return check(HudTryFindHudTextureByInsensitiveName(hudDict, chosen.c_str()));
-    return nullptr;
-}
-
-static RwTexture* HudIconBorrowResolveHudWeaponTex(RwTexDictionary* hudDict) {
-    if (RwTexture* t = HudIconBorrowResolveHudWeaponTexEx(hudDict, true, false))
-        return t;
-    return HudIconBorrowResolveHudWeaponTexEx(hudDict, false, false);
-}
-
-static RwTexture* HudIconBorrowResolveHudWeaponTexStrictPool(RwTexDictionary* hudDict) {
-    if (RwTexture* t = HudIconBorrowResolveHudWeaponTexEx(hudDict, true, true))
-        return t;
-    return HudIconBorrowResolveHudWeaponTexEx(hudDict, false, true);
-}
-
-static void HudIconRasterBorrowRestore() {
-    for (HudIconBorrowEntry& e : g_hudIconBorrowTracks) {
-        if (!e.tex)
-            continue;
-        __try {
-            e.tex->raster = e.savedRaster;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    g_hudIconBorrowTracks.clear();
-}
-
-static bool HudIconBorrowAlreadyTracks(RwTexture* t) {
-    if (!t)
-        return false;
-    for (const HudIconBorrowEntry& e : g_hudIconBorrowTracks) {
-        if (e.tex == t)
-            return true;
-    }
-    return false;
-}
-
-/// Point a vanilla/SAMP `RwTexture*` at Orc pixels (one of possibly many per `matchNames`). Idempotent per pointer.
-static void HudIconRasterBorrowOntoHudTexture(RwTexture* hudTex, RwTexDictionary* hudDictForLog) {
-    if (!g_hudIconRwFind.active || !g_hudIconRwFind.orcTex || !hudTex)
-        return;
-    RwRaster* srcRaster = g_hudIconRwFind.orcTex->raster;
-    if (!srcRaster)
-        return;
-    if (HudIconIsExcludedNonWeaponHudIconName(hudTex->name))
-        return;
-    if (hudTex->raster == srcRaster)
-        return;
-    if (HudIconBorrowAlreadyTracks(hudTex))
-        return;
-    if (!hudTex->raster) {
-        OrcLogInfoThrottled(
-            451,
-            12000u,
-            "hud icon: raster borrow onto hudTex=%s (was raster=null)",
-            hudTex->name);
-    }
-    HudIconBorrowEntry ent;
-    ent.tex = hudTex;
-    __try {
-        ent.savedRaster = hudTex->raster;
-        hudTex->raster = srcRaster;
-        HudIconPushUniqueMatchName(g_hudIconRwFind.matchNames, hudTex->name);
-        OrcLogInfoThrottled(
-            448,
-            30000u,
-            "hud icon: raster borrow hudTex=%s=%p hudDict=%p orcRaster=%p matchNames=%zu",
-            hudTex->name,
-            hudTex,
-            hudDictForLog,
-            srcRaster,
-            g_hudIconRwFind.matchNames.size());
-        g_hudIconBorrowTracks.push_back(ent);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        (void)hudDictForLog;
-    }
-}
-
-static void HudIconRasterBorrowApply() {
-    if (!g_hudIconRwFind.active || !g_hudIconRwFind.orcTex)
-        return;
-    RwRaster* srcRaster = g_hudIconRwFind.orcTex->raster;
-    if (!srcRaster)
-        return;
-
-    struct Pick {
-        RwTexDictionary* dict = nullptr;
-        RwTexture* tex = nullptr;
-        int txdSlot = -1;
-    } pick{};
-
-    const int hudSlotNamed = CTxdStore::FindTxdSlot("hud");
-    if (hudSlotNamed >= 0) {
-        if (RwTexDictionary* hd = GetTxdDictionaryByIndexMain(hudSlotNamed)) {
-            if (RwTexture* t = HudIconBorrowResolveHudWeaponTex(hd)) {
-                pick.dict = hd;
-                pick.tex = t;
-                pick.txdSlot = hudSlotNamed;
-            }
-        }
-    }
-
-    if (!pick.tex && CTxdStore::ms_pTxdPool && CTxdStore::ms_pTxdPool->m_pObjects &&
-        g_hudIconRwFind.orcTxdSlot >= 0) {
-        // SA:MP R1 often keeps ammo-slot art outside `hud.txd`; scan streaming TXDs once per commit.
-        const int n = CTxdStore::ms_pTxdPool->m_nSize;
-        for (int si = 0; si < n; ++si) {
-            if (si == g_hudIconRwFind.orcTxdSlot)
-                continue;
-            RwTexDictionary* d = GetTxdDictionaryByIndexMain(si);
-            if (!d)
-                continue;
-            RwTexture* t = HudIconBorrowResolveHudWeaponTexStrictPool(d);
-            if (!t)
-                continue;
-            pick.dict = d;
-            pick.tex = t;
-            pick.txdSlot = si;
-            break;
-        }
-    }
-
-    if (!pick.tex || !pick.dict) {
-        OrcLogInfoThrottled(
-            449,
-            25000u,
-            "hud icon: raster borrow miss (no *icon RwTexture in hud or scanned TXDs; matchNames tried=%zu lookup=\"%s\")",
-            g_hudIconRwFind.matchNames.size(),
-            g_hudIconRwFind.lookupName.c_str());
-        return;
-    }
-
-    HudIconPushUniqueMatchName(g_hudIconRwFind.matchNames, pick.tex->name);
-
-    if (pick.txdSlot >= 0) {
-        const int hudOnly = CTxdStore::FindTxdSlot("hud");
-        if (pick.txdSlot != hudOnly) {
-            OrcLogInfoThrottled(
-                450,
-                25000u,
-                "hud icon: raster borrow via non-hud txd slot=%d dict=%p tex=\"%s\" (SA:MP icon pool)",
-                pick.txdSlot,
-                pick.dict,
-                pick.tex->name);
-        }
-    }
-
-    RwTexDictionary* hudMainDict =
-        (hudSlotNamed >= 0) ? GetTxdDictionaryByIndexMain(hudSlotNamed) : nullptr;
-
-    auto patchMatchNamesIntoDict = [&](RwTexDictionary* d) {
-        if (!d)
-            return;
-        for (const std::string& cand : g_hudIconRwFind.matchNames) {
-            RwTexture* t = HudTryFindHudTextureByInsensitiveName(d, cand.c_str());
-            if (t)
-                HudIconRasterBorrowOntoHudTexture(t, d);
-        }
-    };
-
-    patchMatchNamesIntoDict(hudMainDict);
-    patchMatchNamesIntoDict(pick.dict);
-
-    if (CTxdStore::ms_pTxdPool && CTxdStore::ms_pTxdPool->m_pObjects && g_hudIconRwFind.orcTxdSlot >= 0) {
-        const int nPool = CTxdStore::ms_pTxdPool->m_nSize;
-        for (int si = 0; si < nPool; ++si) {
-            if (si == g_hudIconRwFind.orcTxdSlot)
-                continue;
-            RwTexDictionary* d = GetTxdDictionaryByIndexMain(si);
-            if (!d || d == hudMainDict || d == pick.dict)
-                continue;
-            bool hit = false;
-            for (const std::string& cand : g_hudIconRwFind.matchNames) {
-                if (HudTryFindHudTextureByInsensitiveName(d, cand.c_str())) {
-                    hit = true;
-                    break;
-                }
-            }
-            if (hit)
-                patchMatchNamesIntoDict(d);
-        }
-    }
-
-    OrcLogInfoThrottled(
-        471,
-        35000u,
-        "hud icon: raster borrow summary tracks=%zu lookup=\"%s\"",
-        g_hudIconBorrowTracks.size(),
-        g_hudIconRwFind.lookupName.c_str());
-}
-
-static void HudIconRwFindDeactivate() {
-    HudIconRasterBorrowRestore();
-    g_hudIconRwFind = {};
-}
-
-static void HudIconRwFindCommit(int orcTxdSlot, const std::string& vanillaIcon, int weaponTypeForHud) {
-    HudIconRwFindDeactivate();
-    if (!g_enabled || !g_weaponHudIconFromGunsTxd || orcTxdSlot < 0 || vanillaIcon.empty())
-        return;
-    RwTexDictionary* orcDict = GetTxdDictionaryByIndexMain(orcTxdSlot);
-    if (!orcDict)
-        return;
-    RwTexture* t = nullptr;
-    const char* rf = OrcWeaponHudGetIconSpriteRemapFrom();
-    const char* rt = OrcWeaponHudGetIconSpriteRemapTo();
-    if (rf && rt && rf[0] && rt[0])
-        t = OrcWeaponHudResolveSpriteTexture(orcDict, rt);
-    if (!t)
-        t = OrcWeaponHudResolveSpriteTexture(orcDict, vanillaIcon.c_str());
-    if (!t)
-        return;
-    const int hudSlot = CTxdStore::FindTxdSlot("hud");
-    if (hudSlot < 0)
-        return;
-    RwTexDictionary* hudDict = GetTxdDictionaryByIndexMain(hudSlot);
-    if (!hudDict)
-        return;
-    g_hudIconRwFind.matchNames.clear();
-    HudIconPushUniqueMatchName(g_hudIconRwFind.matchNames, vanillaIcon.c_str());
-    if (rf && rf[0])
-        HudIconPushUniqueMatchName(g_hudIconRwFind.matchNames, rf);
-    if (weaponTypeForHud > 0) {
-        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(weaponTypeForHud), 1);
-        // SA handgun slot (~2): stock `hud.txd` still uses `colt45icon` for pistol ammo HUD on many installs.
-        if (wi && wi->m_nSlot == 2)
-            HudIconPushUniqueMatchName(g_hudIconRwFind.matchNames, "colt45icon");
-    }
-
-    g_hudIconRwFind.active = true;
-    g_hudIconRwFind.hudDict = hudDict;
-    g_hudIconRwFind.orcTxdSlot = orcTxdSlot;
-    g_hudIconRwFind.lookupName = vanillaIcon;
-    g_hudIconRwFind.orcTex = t;
-    OrcLogInfoThrottled(
-        447,
-        30000u,
-        "hud icon: RwFindNamedTexture override hud=%p lookup=\"%s\" orcTex=%p slot=%d",
-        hudDict,
-        vanillaIcon.c_str(),
-        t,
-        orcTxdSlot);
-    HudIconRasterBorrowApply();
-}
-
-RwTexture* OrcWeaponHudTryRwTexDictionaryFindOverride(RwTexDictionary* dict, const char* name, RwTexture* foundInDict) {
-    if (!g_enabled || !g_weaponHudIconFromGunsTxd || !dict || !name || !name[0])
-        return nullptr;
-    if (!g_hudIconRwFind.active || !g_hudIconRwFind.orcTex)
-        return nullptr;
-    if (g_hudIconRwFind.orcTxdSlot >= 0) {
-        RwTexDictionary* orcDict = GetTxdDictionaryByIndexMain(g_hudIconRwFind.orcTxdSlot);
-        if (orcDict && dict == orcDict)
-            return nullptr;
-    }
-    const int hudSlot = CTxdStore::FindTxdSlot("hud");
-    RwTexDictionary* curHudDict =
-        (hudSlot >= 0) ? GetTxdDictionaryByIndexMain(hudSlot) : nullptr;
-    for (const std::string& n : g_hudIconRwFind.matchNames) {
-        if (_stricmp(name, n.c_str()) != 0)
-            continue;
-        if (dict != curHudDict) {
-            OrcLogInfoThrottled(
-                454,
-                12000u,
-                "hud icon: RwFind override dict=%p (curHud=%p stored=%p) name=\"%s\" foundInDict=%p",
-                dict,
-                curHudDict,
-                g_hudIconRwFind.hudDict,
-                name,
-                foundInDict);
-        }
-        OrcLogInfoThrottled(
-            452,
-            9000u,
-            "hud icon: RwFind override hit name=\"%s\" foundInDict=%p dict=%p",
-            name,
-            foundInDict,
-            dict);
-        // Lazy raster-borrow any hit (multi-dictionary commit pass also walks the pool).
-        if (foundInDict)
-            HudIconRasterBorrowOntoHudTexture(foundInDict, dict);
-        return g_hudIconRwFind.orcTex;
-    }
-    return nullptr;
-}
-
-static RwTexDictionary* g_sampSpriteInterceptOrcDict = nullptr;
-
-void OrcWeaponHudRefreshSampSpriteInterceptCache() {
-    g_sampSpriteInterceptOrcDict = nullptr;
-    if (!g_enabled || !g_weaponHudIconFromGunsTxd)
-        return;
-    if (!g_weaponReplacementEnabled && !g_weaponTexturesEnabled)
-        return;
-    int slot = -1;
-    if (!OrcWeaponHudTryGetIconOverrideTxdSlot(nullptr, &slot) || slot < 0) {
-        OrcLogInfoThrottled(
-            432,
-            8000u,
-            "hud icon: sprite intercept cache miss (TryGet failed or slot<0; SAMP may still call DrawWeaponIcon later)");
-        return;
-    }
-    g_sampSpriteInterceptOrcDict = OrcWeaponStreamingGetRwTxdDictionary(slot);
-    OrcLogInfoThrottled(
-        406,
-        25000u,
-        "hud icon: sprite intercept cache Orc dict=%p slot=%d",
-        g_sampSpriteInterceptOrcDict,
-        slot);
-}
-
-RwTexDictionary* OrcWeaponHudGetSampSpriteInterceptDict() {
-    return g_sampSpriteInterceptOrcDict;
-}
-
-// SA:MP: ped weapon slots are sometimes cleared/stale during 2D HUD. `CHud::m_LastWeapon` can lag behind a switch
-// (still 55 while Orc already draws desert_eagle clone wt=24). Prefer active held Guns clone before `m_LastWeapon`.
-static int OrcResolveWeaponTypeForHudIcon(CPed* ped) {
-    int wt = OrcResolveWeaponHeldVisualWeaponType(ped);
-    if (wt > 0)
-        return wt;
-    if (ped) {
-        const int heldWt = OrcWeaponHudGetHeldReplacementWeaponTypeIfAny(ped);
-        if (heldWt > 0)
-            return heldWt;
-    }
-    __try {
-        volatile const int* pLast = reinterpret_cast<const volatile int*>(0xBAA410);
-        const int hudWt = *pLast;
-        if (hudWt > (int)WEAPONTYPE_UNARMED && hudWt < 96)
-            return hudWt;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    return 0;
-}
-
-struct HudIconCollectSuffixCtx {
-    std::vector<std::string>* out = nullptr;
-};
-
-static RwTexture* HudIconCollectSuffixCb(RwTexture* tex, void* vd) {
-    HudIconCollectSuffixCtx* c = reinterpret_cast<HudIconCollectSuffixCtx*>(vd);
-    if (!tex || !tex->name[0] || !c || !c->out)
-        return tex;
-    const size_t n = std::strlen(tex->name);
-    if (n < 4 || _stricmp(tex->name + n - 4, "icon") != 0)
-        return tex;
-    c->out->push_back(tex->name);
-    return tex;
-}
-
-static bool HudIconCollectSuffixIconNames(int txdSlot, std::vector<std::string>& out) {
-    out.clear();
-    if (txdSlot < 0)
-        return false;
-    RwTexDictionary* dict = GetTxdDictionaryByIndexMain(txdSlot);
-    if (!dict)
-        return false;
-    HudIconCollectSuffixCtx ctx{};
-    ctx.out = &out;
-    __try {
-        RwTexDictionaryForAllTextures(dict, HudIconCollectSuffixCb, &ctx);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        out.clear();
-        return false;
-    }
-    return true;
-}
-
-static std::string OrcHudExtractWprandBasenameLower(const std::string& key) {
-    if (_strnicmp(key.c_str(), "wprand:", 7) != 0)
-        return {};
-    const size_t c2 = key.find(':', 7);
-    if (c2 == std::string::npos || c2 + 2 > key.size())
-        return {};
-    const size_t c3 = key.find(':', c2 + 1);
-    if (c3 == std::string::npos || c3 + 1 >= key.size())
-        return {};
-    return OrcToLowerAscii(key.substr(c3 + 1));
-}
-
-// Many Guns TXDs contain multiple *HUD-unrelated* *icon leftovers; prioritize names matching Orc replacement key basename.
-static void HudIconPickBestAmongSuffixIcons(const std::vector<std::string>& names,
-                                            const std::string& vanillaIcon,
-                                            const std::string& weaponCatLower,
-                                            const std::string& matchLower,
-                                            const std::string& replKeyHint,
-                                            std::string* outChosenCustom,
-                                            bool allowLoneArbitraryIconIfUnmatched) {
-    if (!outChosenCustom || !outChosenCustom->empty())
-        return;
-    if (names.empty())
-        return;
-
-    const std::string vanL = OrcToLowerAscii(vanillaIcon);
-    const std::string wcl = OrcToLowerAscii(weaponCatLower);
-    const std::string ml = OrcToLowerAscii(matchLower);
-    const std::string wcIcon = weaponCatLower.empty() ? std::string{} : OrcToLowerAscii(weaponCatLower + "icon");
-    const std::string mIcon = matchLower.empty() ? std::string{} : OrcToLowerAscii(matchLower + "icon");
-    const std::string baseHint = OrcHudExtractWprandBasenameLower(replKeyHint);
-
-    std::string bestNm;
-    int bestS = -1;
-    for (const std::string& nm : names) {
-        const std::string nml = OrcToLowerAscii(nm);
-        int s = -1;
-        if (nml == vanL)
-            s = 100000;
-        else if (!wcIcon.empty() && nml == wcIcon)
-            s = 90000;
-        else if (!mIcon.empty() && nml == mIcon)
-            s = 85000;
-        else if (!baseHint.empty() && nml.find(baseHint) != std::string::npos)
-            s = 70000 + static_cast<int>(baseHint.size());
-        else if (!ml.empty() && ml != wcl && nml.find(ml) != std::string::npos)
-            s = 50000 + static_cast<int>(ml.size());
-        else if (!wcl.empty() && nml.find(wcl) != std::string::npos)
-            s = 30000 + static_cast<int>(wcl.size());
-        if (s > bestS) {
-            bestS = s;
-            bestNm = nm;
-        } else if (s == bestS && s >= 0 && !bestNm.empty()) {
-            if (nm.size() > bestNm.size())
-                bestNm = nm;
-        }
-    }
-    if (bestS >= 0)
-        *outChosenCustom = bestNm;
-    else if (allowLoneArbitraryIconIfUnmatched && names.size() == 1u)
-        *outChosenCustom = names.front();
-}
-
-bool OrcWeaponHudTryGetIconOverrideTxdSlot(CPed* ped, int* outTxdSlot) {
-    if (!outTxdSlot)
-        return false;
-    *outTxdSlot = -1;
-    HudIconClearSpriteRemap();
-    HudIconRwFindDeactivate();
-    if (!g_enabled || !g_weaponHudIconFromGunsTxd)
-        return false;
-    if (!g_weaponReplacementEnabled && !g_weaponTexturesEnabled)
-        return false;
-
-    CPlayerPed* localPlayer = FindPlayerPed(0);
-    if (!localPlayer)
-        return false;
-
-    // SA:MP: `DrawWeaponIcon` ped can differ by pointer identity from `FindPlayerPed(0)`; compare pool refs.
-    CPed* resolvePed = ped ? ped : static_cast<CPed*>(localPlayer);
-    const int lr = CPools::GetPedRef(localPlayer);
-    const int rr = CPools::GetPedRef(resolvePed);
-    if (lr <= 0 || rr <= 0 || lr != rr) {
-        OrcLogInfoThrottled(
-            425,
-            8000u,
-            "hud icon: TryGet abort pedRef mismatch lr=%d rr=%d pedIn=%p resolve=%p",
-            lr,
-            rr,
-            ped,
-            resolvePed);
-        return false;
-    }
-
-    int hudLastWt = 0;
-    __try {
-        volatile const int* pLast = reinterpret_cast<const volatile int*>(0xBAA410);
-        hudLastWt = *pLast;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-    const int wt = OrcResolveWeaponTypeForHudIcon(resolvePed);
-    if (wt <= 0) {
-        OrcLogInfoThrottled(
-            424,
-            6000u,
-            "hud icon: TryGet abort wt<=0 ref=%d visual=%d heldRepl=%d hudLastWt=%d",
-            rr,
-            OrcResolveWeaponHeldVisualWeaponType(resolvePed),
-            OrcWeaponHudGetHeldReplacementWeaponTypeIfAny(resolvePed),
-            hudLastWt);
-        return false;
-    }
-
-    const std::string weaponLower = OrcGetWeaponModelBaseNameLower(wt);
-    if (weaponLower.empty()) {
-        OrcLogInfoThrottled(426, 12000u, "hud icon: TryGet abort empty weapon basename wt=%d", wt);
-        return false;
-    }
-
-    const std::string vanillaIcon = weaponLower + "icon";
-
-    std::string replKeyBuf;
-    const std::string* hintPtr = nullptr;
-    if (g_weaponReplacementEnabled) {
-        replKeyBuf = OrcResolveUsableWeaponReplacementKeyForPed(resolvePed, wt, true);
-        if (!replKeyBuf.empty())
-            hintPtr = &replKeyBuf;
-    }
-
-    // Custom HUD icon convention: **`Guns\<weapon_folder>\*` TXDs usually use `<weapon_folder>icon`** (desert_eagleicon)
-    // for every variant basename (malorianarms3516.dff / .txd) — Orc tries folder name before `matchNameLower` (+icon).
-    auto pickFromSlot = [&](int txdSlot,
-                            const std::string& weaponCatLower,
-                            const std::string& matchLower,
-                            const std::string& replKeyHint) -> bool {
-        if (txdSlot < 0)
-            return false;
-        const bool hasVanilla = HudIconDictHasNamedTexture(txdSlot, vanillaIcon.c_str());
-        std::string chosenCustom;
-        auto considerBase = [&](const std::string& base) {
-            if (base.empty())
-                return;
-            const std::string c = base + "icon";
-            if (c == vanillaIcon || !chosenCustom.empty())
-                return;
-            if (HudIconDictHasNamedTexture(txdSlot, c.c_str()))
-                chosenCustom = c;
+    RwTexture* texture = RwTexDictionaryFindHashNamedTexture(dict, stockHash);
+    if (!texture || !texture->raster) {
+        const std::string vanilla = OrcGetWeaponModelBaseNameLower(weaponType);
+        HudIconCandidates candidates{
+            vanilla.empty() ? std::string{} : vanilla + "icon",
+            asset.weaponNameLower.empty() ? std::string{} : asset.weaponNameLower + "icon",
+            asset.matchNameLower.empty() ? std::string{} : asset.matchNameLower + "icon",
+            HudReplacementBasename(replacementKey), asset.weaponNameLower, asset.matchNameLower
         };
-        considerBase(weaponCatLower);
-        considerBase(matchLower);
-        if (chosenCustom.empty()) {
-            std::vector<std::string> iconNames;
-            if (HudIconCollectSuffixIconNames(txdSlot, iconNames))
-                HudIconPickBestAmongSuffixIcons(
-                    iconNames, vanillaIcon, weaponCatLower, matchLower, replKeyHint, &chosenCustom, true);
-        }
-        const bool hasCustom = !chosenCustom.empty();
-        if (!hasVanilla && !hasCustom) {
-            std::vector<std::string> iconNamesDiag;
-            int suffixIconCount = -1;
-            if (HudIconCollectSuffixIconNames(txdSlot, iconNamesDiag))
-                suffixIconCount = (int)iconNamesDiag.size();
-            RwTexDictionary* dictDiag = GetTxdDictionaryByIndexMain(txdSlot);
-            OrcLogInfoThrottled(
-                429,
-                20000u,
-                "hud icon: pick miss txd=%d rwDict=%p vanillaTex=%s cat=%s match=%s suffix*icon=%d",
-                txdSlot,
-                dictDiag,
-                vanillaIcon.c_str(),
-                weaponCatLower.c_str(),
-                matchLower.c_str(),
-                suffixIconCount);
-            return false;
-        }
-        *outTxdSlot = txdSlot;
-        if (!hasVanilla && hasCustom)
-            HudIconSetSpriteRemap(vanillaIcon.c_str(), chosenCustom.c_str());
-        return true;
-    };
-
-    if (g_weaponTexturesEnabled) {
-        WeaponTextureAsset* texAsset =
-            OrcResolveUsableWeaponTextureAssetForPed(resolvePed, wt, true, hintPtr);
-        if (!texAsset) {
-            OrcLogInfoThrottled(
-                427,
-                15000u,
-                "hud icon: texture asset null wt=%d vanilla=%s replKeyHint=%s",
-                wt,
-                vanillaIcon.c_str(),
-                replKeyBuf.c_str());
-        } else if (!EnsureWeaponTextureAssetLoaded(*texAsset)) {
-            OrcLogInfoThrottled(
-                428,
-                12000u,
-                "hud icon: texture load fail display=%s txdSlot=%d wt=%d",
-                texAsset->displayName.c_str(),
-                texAsset->txdSlot,
-                wt);
-        } else {
-            const std::string texHint =
-                !replKeyBuf.empty() ? replKeyBuf : texAsset->key;
-            if (pickFromSlot(texAsset->txdSlot, texAsset->weaponNameLower, texAsset->matchNameLower, texHint)) {
-                HudIconRwFindCommit(*outTxdSlot, vanillaIcon, wt);
-                OrcLogInfoThrottled(
-                    430,
-                    25000u,
-                    "hud icon: TryGet ok via=texture wt=%d slot=%d vanilla=%s remap=%s->%s",
-                    wt,
-                    *outTxdSlot,
-                    vanillaIcon.c_str(),
-                    OrcWeaponHudGetIconSpriteRemapFrom() ? OrcWeaponHudGetIconSpriteRemapFrom() : "-",
-                    OrcWeaponHudGetIconSpriteRemapTo() ? OrcWeaponHudGetIconSpriteRemapTo() : "-");
-                return true;
-            }
-        }
+        RwTexDictionaryForAllTextures(dict, &CollectHudIconCandidate, &candidates);
+        texture = candidates.best;
+        if (!texture && candidates.count == 1)
+            texture = candidates.lone;
     }
 
-    if (g_weaponReplacementEnabled) {
-        WeaponReplacementAsset* repl =
-            OrcResolveUsableWeaponReplacementAssetForPed(resolvePed, wt, true);
-        if (!repl) {
-            OrcLogInfoThrottled(
-                440,
-                15000u,
-                "hud icon: replacement asset null wt=%d vanilla=%s", wt, vanillaIcon.c_str());
-        } else if (!EnsureWeaponReplacementAssetLoaded(*repl)) {
-            OrcLogInfoThrottled(
-                441,
-                12000u,
-                "hud icon: replacement load fail display=%s txdSlot=%d wt=%d",
-                repl->displayName.c_str(),
-                repl->txdSlot,
-                wt);
-        } else {
-            const std::string replHint = !replKeyBuf.empty() ? replKeyBuf : repl->key;
-            if (pickFromSlot(repl->txdSlot, repl->weaponNameLower, repl->matchNameLower, replHint)) {
-                HudIconRwFindCommit(*outTxdSlot, vanillaIcon, wt);
-                OrcLogInfoThrottled(
-                    439,
-                    25000u,
-                    "hud icon: TryGet ok via=replacement wt=%d slot=%d vanilla=%s remap=%s->%s",
-                    wt,
-                    *outTxdSlot,
-                    vanillaIcon.c_str(),
-                    OrcWeaponHudGetIconSpriteRemapFrom() ? OrcWeaponHudGetIconSpriteRemapFrom() : "-",
-                    OrcWeaponHudGetIconSpriteRemapTo() ? OrcWeaponHudGetIconSpriteRemapTo() : "-");
-                return true;
-            }
-        }
-    }
+    cache.texture = texture;
+    OrcLogInfoThrottled(430, 4000u, "hud icon: wt=%d hash=%08X txd=%d asset=%s texture=%s", weaponType, stockHash,
+        asset.txdSlot, asset.displayName.c_str(), texture ? texture->name : "-");
+    return texture;
+}
+}  // namespace
 
-    OrcLogInfoThrottled(
-        408,
-        45000u,
-        "hud icon: no overlay for wt=%d vanilla=%s (no usable *icon in Orc TXD: exact names, or match wprand basename/substring)",
-        wt,
-        vanillaIcon.c_str());
-    return false;
+static void ClearWeaponHudIconCache(int txdSlot) {
+    if (txdSlot < 0 || g_textureHudIcon.txdSlot == txdSlot)
+        g_textureHudIcon = {};
+    if (txdSlot < 0 || g_replacementHudIcon.txdSlot == txdSlot)
+        g_replacementHudIcon = {};
 }
 
-RwTexDictionary* OrcWeaponStreamingGetRwTxdDictionary(int txdSlot) {
-    return GetTxdDictionaryByIndexMain(txdSlot);
+RwTexture* OrcWeaponHudResolveIconTexture(CPed* ped, int weaponType, unsigned int stockHash) {
+    if (!ped || weaponType <= 0)
+        return nullptr;
+
+    WeaponReplacementAsset* replacement = g_weaponReplacementEnabled
+        ? OrcResolveUsableWeaponReplacementAssetForPed(ped, weaponType, true)
+        : nullptr;
+    if (g_weaponTexturesEnabled) {
+        const std::string* hint = replacement ? &replacement->key : nullptr;
+        if (WeaponTextureAsset* asset = OrcResolveUsableWeaponTextureAssetForPed(ped, weaponType, true, hint)) {
+            if (RwTexture* texture = FindHudIconForAsset(g_textureHudIcon, *asset, weaponType, stockHash,
+                    replacement ? replacement->key : asset->key)) {
+                return texture;
+            }
+        }
+    }
+    return replacement
+        ? FindHudIconForAsset(g_replacementHudIcon, *replacement, weaponType, stockHash, replacement->key)
+        : nullptr;
 }
 
 struct WeaponTextureApplyCtx {
@@ -2658,9 +1919,6 @@ void OrcCollectWeaponReplacementVariantKeys(int wt, std::vector<std::string>& ou
 
 
 void OrcWeaponAssetsShutdown() {
-    g_sampSpriteInterceptOrcDict = nullptr;
-    HudIconClearSpriteRemap();
-    HudIconRwFindDeactivate();
     ClearWeaponStockRemapRuntime();
     DestroyWeaponReplacementAssets();
     DestroyWeaponTextureAssets();

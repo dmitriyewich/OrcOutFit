@@ -34,7 +34,6 @@
 #include "orc_log.h"
 #include "orc_random_pick.h"
 #include "orc_skin_native.h"
-#include "orc_weapon_assets.h"
 #include "samp_bridge.h"
 #include "external/MinHook/include/MinHook.h"
 
@@ -352,8 +351,6 @@ static void __cdecl CustomAssignRemapTxd(const char* txdName, uint16_t txdId) {
 
 static RwTexture* __cdecl CustomRwTexDictionaryFindNamedTexture(RwTexDictionary* dict, const char* name) {
     RwTexture* texture = FindTextureInDictOnly(dict, name);
-    if (RwTexture* hudIcon = OrcWeaponHudTryRwTexDictionaryFindOverride(dict, name, texture))
-        return hudIcon;
     if (texture)
         return texture;
 

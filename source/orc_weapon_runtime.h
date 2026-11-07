@@ -77,8 +77,6 @@ int OrcResolveWeaponHeldVisualWeaponType(CPed* ped);
 int OrcResolveActiveHeldWeaponTypeForBodySuppression(CPed* ped);
 /// Не рисовать body-attachment для wt, который сейчас в руках (SA:MP: visWt может != curSlot).
 void OrcWeaponSuppressBodyForHeldVisualWeapon(CPed* ped, std::vector<char>* suppress);
-/// If ped slots read empty but Guns held clone exists (SA:MP), reuse its weapon type for HUD icon resolution.
-int OrcWeaponHudGetHeldReplacementWeaponTypeIfAny(CPed* ped);
 /// Active held replacement key currently captured for ped/weapon (stable key from runtime clone state).
 bool OrcGetHeldReplacementKeyForPed(CPed* ped, int wt, std::string& outKeyLower);
 void OrcWeaponHudEnsureDrawWeaponIconHookInstalled();

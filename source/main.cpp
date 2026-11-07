@@ -2728,9 +2728,6 @@ static void OnDrawingEvent() {
     OrcWeaponSkinPresetDrainCompletedLoads();
     OrcWeaponsUiPrewarmOnIdle();
     samp_bridge::Poll(g_toggleCommand.c_str(), &ToggleOverlayFromSamp);
-    // `CHud::DrawAmmo` / `DrawWeaponIcon`: push Orc Guns/replacement TXD for `CSprite2d::SetTexture` during HUD draw.
-    // for `SetTexture` + refresh intercept cache on `drawingEvent`.
-    OrcWeaponHudRefreshSampSpriteInterceptCache();
     RefreshActivationRouting();
     overlay::Init();  // no-op after first time
     ApplyPendingLocalPlayerModel();
