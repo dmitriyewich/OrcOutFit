@@ -1,6 +1,4 @@
 // OrcOutFit — общий индекс ped-моделей (валидность model id + список скинов педов).
-// Выделено из orc_skins.cpp, чтобы picker педов во вкладке «Оружие» работал и в Lite-сборке,
-// где модуль скинов (orc_skins.cpp) не компилируется.
 
 #include "plugin.h"
 #include "common.h"

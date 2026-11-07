@@ -441,7 +441,7 @@ bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s) {
 }
 
 // GetExistingStandardModelInfo / OrcIsValidStandardSkinModel вынесены в orc_ped_index.cpp
-// (общий TU для Full и Lite). Объявление — в orc_app.h.
+// Объявление — в orc_app.h.
 
 static bool EnsureStandardSkinLoaded(StandardSkinCfg& s) {
     if (s.rwObject && !OrcIsValidStandardSkinModel(s.modelId)) {
@@ -842,7 +842,7 @@ void OrcCollectRandomSkinPools(std::vector<SkinRandomPoolInfo>& out) {
     });
 }
 
-// OrcCollectPedSkins вынесена в orc_ped_index.cpp (общий TU для Full и Lite).
+// OrcCollectPedSkins вынесена в orc_ped_index.cpp.
 
 static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed);
 static void RenderStandardSkinOnPed(CPed* ped, StandardSkinCfg* sel, bool isLocalPed);

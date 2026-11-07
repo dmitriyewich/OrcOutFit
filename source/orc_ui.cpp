@@ -588,7 +588,7 @@ void OrcUiMarkObjectEditorsStale() {
     g_uiStdObjParamsLoaded = false;
 }
 
-// Переключатель языка ru/en. В Full живёт во вкладке «Настройки», в Lite — в Main.
+// Переключатель языка ru/en во вкладке «Настройки».
 static void OrcUiLanguageSelector(const char* id) {
     const OrcUiLanguage languages[] = { OrcUiLanguage::Russian, OrcUiLanguage::English };
     if (OrcUiBeginControlRow(id, T(OrcTextId::Language))) {
@@ -689,7 +689,6 @@ void OrcUiDraw() {
             OrcUiCheckbox("consider_weapon_skills", T(OrcTextId::ConsiderWeaponSkills), &g_considerWeaponSkills);
             OrcUiCheckbox("render_custom_objects", T(OrcTextId::RenderCustomObjects), &g_renderCustomObjects);
             OrcUiCheckbox("render_standard_objects", T(OrcTextId::RenderStandardObjects), &g_renderStandardObjects);
-#ifndef ORC_LITE
             OrcUiCheckbox("skin_mode", T(OrcTextId::SkinMode), &g_skinModeEnabled);
             const OrcTextId skinModeLabels[] = { OrcTextId::SkinCustomModeNative, OrcTextId::SkinCustomModeOverlay };
             if (g_skinCustomMode < SKIN_CUSTOM_MODE_NATIVE || g_skinCustomMode > SKIN_CUSTOM_MODE_OVERLAY)
@@ -734,7 +733,6 @@ void OrcUiDraw() {
             ImGui::EndDisabled();
             OrcUiCheckbox("skin_always_selected", T(OrcTextId::SkinAlwaysSelectedForMe), &g_skinLocalPreferSelected);
             ImGui::TextWrapped("%s", T(OrcTextId::SkinAlwaysSelectedHint));
-#endif
             int logCombo = static_cast<int>(g_orcLogLevel);
             const OrcTextId logLabels[] = { OrcTextId::LogOff, OrcTextId::LogErrorsOnly, OrcTextId::LogInfoFull };
             if (logCombo < 0) logCombo = 0;
@@ -754,7 +752,6 @@ void OrcUiDraw() {
             }
             ImGui::TextDisabled("%s", OrcLogGetPath());
 
-#ifndef ORC_LITE
             if (ImGui::CollapsingHeader(T(OrcTextId::UiFeaturesDiagnosticsHeader), ImGuiTreeNodeFlags_None)) {
                 ImGui::TextWrapped("%s", T(OrcTextId::UiFeaturesDiagnosticsHint));
                 OrcUiComboTrace012("held_weapon_trace", OrcTextId::HeldWeaponTraceUi, &g_heldWeaponTrace);
@@ -774,7 +771,6 @@ void OrcUiDraw() {
                     OrcUiSaveMainIniDebounced();
                 }
             }
-#endif
 
             ImGui::Separator();
             if (OrcUiButtonFullWidth(T(OrcTextId::SaveMainFeatures))) {
@@ -1061,7 +1057,6 @@ void OrcUiDraw() {
             ImGui::EndTabItem();
         }
 
-#ifndef ORC_LITE
         // ------------------------------------------------------------------
         // Skins
         // ------------------------------------------------------------------
@@ -1493,7 +1488,6 @@ void OrcUiDraw() {
             }
             ImGui::EndTabItem();
         }
-#endif // ORC_LITE
 
         // ------------------------------------------------------------------
         // Settings

@@ -50,7 +50,7 @@ int OrcRenderPedWeapons(CPed* ped, RenderedWeapon* arr);
 /// Draw cached local/remote body weapons as ordinary attachment objects from `drawingEvent`.
 /// The caller owns the scoped RenderWare states; this function balances lighting once per owner ped.
 int OrcRenderCachedBodyWeaponsForAttachmentScene(CPlayerPed* player);
-/// Full held module resets pose/dual state around each shared GTA weapon batch; Lite stubs are no-op.
+/// Held module resets pose/dual state around each shared GTA weapon batch.
 void OrcHeldOnVanillaWeaponBatchBefore();
 void OrcHeldOnVanillaWeaponBatchAfter();
 
