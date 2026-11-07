@@ -286,24 +286,18 @@ static void PreparePedClump(RpClump* clump, CClumpModelInfo* modelInfo) {
 }
 
 struct ScopedModelInfoOverride {
-    CBaseModelInfo* modelInfo = nullptr;
-    RwObject* oldObject = nullptr;
-    short oldTxdIndex = -1;
+    CBaseModelInfo* modelInfo;
+    RwObject* oldObject;
 
-    ScopedModelInfoOverride(CBaseModelInfo* mi, RwObject* object, int txdIndex) : modelInfo(mi) {
-        if (!modelInfo)
-            return;
-        oldObject = modelInfo->m_pRwObject;
-        oldTxdIndex = modelInfo->m_nTxdIndex;
+    ScopedModelInfoOverride(CBaseModelInfo* mi, RwObject* object)
+        : modelInfo(mi), oldObject(mi->m_pRwObject) {
+        // CEntity pairs AddRef/RemoveRef through the base model's TXD index.
+        // The cloned materials keep their textures from the pinned target TXD.
         modelInfo->m_pRwObject = object;
-        modelInfo->m_nTxdIndex = static_cast<short>(txdIndex);
     }
 
     ~ScopedModelInfoOverride() {
-        if (!modelInfo)
-            return;
         modelInfo->m_pRwObject = oldObject;
-        modelInfo->m_nTxdIndex = oldTxdIndex;
     }
 };
 
@@ -361,6 +355,10 @@ static void ReleaseNativeTargetTxdRef(PedNativeSkinState& state) {
 
     const int txdSlot = state.txdSlot;
     state.targetTxdRefAdded = false;
+    if (state.targetKind == NativeSkinTargetKind::Custom) {
+        OrcReleaseCustomSkinTxd(txdSlot);
+        return;
+    }
     if (!GetTxdDefByIndex(txdSlot))
         return;
 
@@ -684,7 +682,7 @@ static bool ApplyNativeSkin(CPed* ped, int key, int baseModelId, const NativeSki
     RpClump* oldClump = ped->m_pRwClump;
     bool setOk = true;
     {
-        ScopedModelInfoOverride scoped(baseMi, target.rwObject, target.txdSlot);
+        ScopedModelInfoOverride scoped(baseMi, target.rwObject);
         g_nativeSetModelInProgress = true;
         __try {
             CallPedSetModelIndexOriginal(ped, (unsigned int)baseModelId);
@@ -871,7 +869,7 @@ static void __fastcall CPedSetModelIndex_Detour(CPed* ped, void*, unsigned int m
             } else {
                 bool setOk = true;
                 {
-                    ScopedModelInfoOverride scoped(baseMi, target.rwObject, target.txdSlot);
+                    ScopedModelInfoOverride scoped(baseMi, target.rwObject);
                     g_nativeSetModelInProgress = true;
                     __try {
                         g_CPedSetModelIndex_Orig(ped, modelId);

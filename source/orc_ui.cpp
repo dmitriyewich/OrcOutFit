@@ -1465,7 +1465,7 @@ void OrcUiDraw() {
                     }
 
                     ImGui::Separator();
-                    std::vector<TextureRemapPedInfo> known;
+                    std::vector<TextureRemapModelStats> known;
                     OrcCollectPedTextureRemapStats(known);
                     ImGui::Text("%s", OrcFormat(OrcTextId::KnownRemapPedModelsFormat, (int)known.size()).c_str());
                     if (!known.empty() && ImGui::BeginChild("##texture_known_models", ImVec2(UiContentWidth(), OrcUiScaled(110.0f)), true)) {
@@ -1476,7 +1476,7 @@ void OrcUiDraw() {
                                 dff,
                                 info.modelId,
                                 info.totalRemapTextures,
-                                (int)info.slots.size()).c_str());
+                                info.slotCount).c_str());
                         }
                         ImGui::EndChild();
                     }

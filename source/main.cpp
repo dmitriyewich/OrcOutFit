@@ -2284,6 +2284,7 @@ static void ApplyPendingLocalPlayerModel() {
 
 
 static void ReleaseRuntimeAttachmentInstances() {
+    OrcTextureRemapClearRuntimeState();
     OrcWeaponClearLocalRendered();
     OrcWeaponClearOtherPedsRendered();
     OrcRestoreWeaponHeldTextureOverrides();
@@ -2292,7 +2293,6 @@ static void ReleaseRuntimeAttachmentInstances() {
     OrcSkinsReleaseAllInstancesAndPreview();
     OrcSkinNativeClearRuntimeState();
     OrcObjectsReleaseAllInstances();
-    OrcTextureRemapClearRuntimeState();
 }
 
 static void MaintainHeldWeaponInstances() {
@@ -2841,6 +2841,7 @@ static void OnGameProcessBegin() {
     OrcHeldPoseBeginSimFrame();
     OrcHeldWeaponTraceGameProcessTick();
     OrcWeaponAudioOnGameProcess();
+    OrcTextureRemapOnGameProcess();
 }
 
 static void OnShutdownRw() {
@@ -2854,9 +2855,9 @@ static void OnShutdownRw() {
     OrcWeaponClearOtherPedsRendered();
     OrcDestroyAllHeldWeaponReplacementInstances();
     OrcWeaponAssetsShutdown();
+    OrcTextureRemapClearRuntimeState();
     OrcSkinsShutdown();
     OrcObjectsShutdown();
-    OrcTextureRemapClearRuntimeState();
     OrcWeaponAudioShutdown();
     // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.
     DWORD oldProt;
@@ -2878,7 +2879,8 @@ public:
         Events::initRwEvent.after += &OnInitRw;
         Events::gameProcessEvent += &OnGameProcessBegin;
         Events::drawingEvent += &OnDrawingEvent;
-        Events::processScriptsEvent += &OrcTextureRemapOnProcessScripts;
+        Events::initGameEvent += &OrcTextureRemapRefreshAdditionalTxds;
+        Events::reInitGameEvent += &OrcTextureRemapRefreshAdditionalTxds;
         Events::pedSetModelEvent += &OrcTextureRemapOnPedSetModel;
         Events::pedSetModelEvent += &OrcSkinNativeOnPedSetModel;
         Events::pedRenderEvent.before += &OnPedRenderBefore;

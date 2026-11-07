@@ -85,7 +85,7 @@ struct CustomSkinCfg {
     std::vector<std::string> nicknames;
     int txdSlot = -1;
     RwObject* rwObject = nullptr;
-    bool txdMissingLogged = false;
+    bool loadFailed = false;
 };
 
 struct StandardObjectSlotCfg {
@@ -130,6 +130,13 @@ struct TextureRemapPedInfo {
     int txdIndex = -1;
     int totalRemapTextures = 0;
     std::vector<TextureRemapSlotInfo> slots;
+};
+
+struct TextureRemapModelStats {
+    std::string dffName;
+    int modelId;
+    int slotCount;
+    int totalRemapTextures;
 };
 
 struct TextureRemapNickBindingInfo {

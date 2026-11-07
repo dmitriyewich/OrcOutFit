@@ -152,6 +152,7 @@ struct OrcResolvedPedSkin {
 OrcResolvedPedSkin OrcResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer);
 OrcResolvedPedSkin OrcResolveSkinForPedModel(CPed* ped, CPlayerPed* localPlayer, int baseModelId);
 bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s);
+void OrcReleaseCustomSkinTxd(int txdSlot);
 void OrcSkinsRenderForPeds(CPlayerPed* localPlayer);
 void OrcSkinsReleaseAllInstancesAndPreview();
 bool OrcSkinsLocalSelectionAddsActiveWork();
@@ -219,7 +220,7 @@ void OrcCollectPedSkins(std::vector<std::pair<std::string, int>>& out);
 void OrcCollectRandomSkinPools(std::vector<SkinRandomPoolInfo>& out);
 WeaponReplacementStats OrcGetWeaponReplacementStats();
 WeaponTextureStats OrcGetWeaponTextureStats();
-void OrcCollectPedTextureRemapStats(std::vector<TextureRemapPedInfo>& out);
+void OrcCollectPedTextureRemapStats(std::vector<TextureRemapModelStats>& out);
 bool OrcGetLocalPedTextureRemaps(TextureRemapPedInfo& out);
 bool OrcSetLocalPedTextureRemap(int slot, int remap);
 bool OrcRandomizeLocalPedTextureRemaps();

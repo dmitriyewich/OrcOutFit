@@ -346,17 +346,36 @@ static void EnsureCustomSkinNickLookup() {
     g_customSkinLookupDirty = false;
 }
 
+void OrcReleaseCustomSkinTxd(int txdSlot) {
+    auto* pool = CTxdStore::ms_pTxdPool;
+    if (!pool || txdSlot < 0 || txdSlot >= pool->m_nSize)
+        return;
+    const TxdDef* txd = pool->GetAt(txdSlot);
+    if (!txd || !txd->m_wRefsCount)
+        return;
+
+    __try {
+        if (CTxdStore::RemoveRefWithoutDelete(txdSlot)->m_wRefsCount == 0) {
+            CTxdStore::RemoveTxd(txdSlot);
+            CTxdStore::RemoveTxdSlot(txdSlot);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("skin: private TXD release SEH ex=0x%08X slot=%d", GetExceptionCode(), txdSlot);
+    }
+}
+
 static void DestroyCustomSkinInstance(CustomSkinCfg& s) {
-    if (!s.rwObject) return;
-    if (s.rwObject->type == rpCLUMP) {
+    if (s.rwObject && s.rwObject->type == rpCLUMP) {
         RpClumpDestroy(reinterpret_cast<RpClump*>(s.rwObject));
-    } else if (s.rwObject->type == rpATOMIC) {
+    } else if (s.rwObject && s.rwObject->type == rpATOMIC) {
         auto* a = reinterpret_cast<RpAtomic*>(s.rwObject);
         RwFrame* f = RpAtomicGetFrame(a);
         RpAtomicDestroy(a);
         if (f) RwFrameDestroy(f);
     }
     s.rwObject = nullptr;
+    OrcReleaseCustomSkinTxd(s.txdSlot);
+    s.txdSlot = -1;
 }
 
 static void DestroyStandardSkinInstance(StandardSkinCfg& s) {
@@ -383,27 +402,33 @@ static void DestroyAllRandomPoolSkins() {
 }
 
 bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s) {
-    if (s.rwObject) return true;
-    if (!OrcFileExistsA(s.dffPath.c_str())) {
-        static std::unordered_set<std::string> s_once;
-        if (s_once.insert(s.name).second)
-            OrcLogError("skin \"%s\": DFF missing %s", s.name.c_str(), s.dffPath.c_str());
+    if (s.rwObject)
+        return true;
+    if (s.loadFailed)
         return false;
-    }
-    if (s.txdPath.empty() || !OrcFileExistsA(s.txdPath.c_str())) {
-        if (!s.txdMissingLogged) {
-            s.txdMissingLogged = true;
-            OrcLogError("skin \"%s\": TXD missing or invalid path", s.name.c_str());
-        }
-        return false;
-    }
 
-    int txdSlot = CTxdStore::FindTxdSlot(s.name.c_str());
-    if (txdSlot == -1) txdSlot = CTxdStore::AddTxdSlot(s.name.c_str());
-    if (txdSlot == -1) {
-        OrcLogError("skin \"%s\": CTxdStore::AddTxdSlot failed", s.name.c_str());
+    const auto fail = [&s](const char* reason, const char* path) {
+        s.loadFailed = true;
+        OrcLogError("skin \"%s\": %s (%s)", s.name.c_str(), reason, path);
         return false;
-    }
+    };
+    if (!OrcFileExistsA(s.dffPath.c_str()))
+        return fail("DFF missing", s.dffPath.c_str());
+    if (s.txdPath.empty() || !OrcFileExistsA(s.txdPath.c_str()))
+        return fail("TXD missing", s.txdPath.c_str());
+
+    auto* pool = CTxdStore::ms_pTxdPool;
+    if (!pool)
+        return false;
+    // The vanilla AddTxdSlot dereferences its allocation even when the pool is full.
+    if (!pool->GetNoOfFreeSpaces())
+        return fail("TXD pool full", s.txdPath.c_str());
+
+    // Never overwrite a game TXD or the previous dictionary still used by a native ped.
+    const int txdSlot = CTxdStore::AddTxdSlot("orcoutfit_skin");
+    if (txdSlot < 0)
+        return fail("AddTxdSlot failed", s.txdPath.c_str());
+
     bool txdOk = false;
     RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)s.txdPath.c_str());
     if (txdStream) {
@@ -411,33 +436,31 @@ bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s) {
         RwStreamClose(txdStream, nullptr);
     }
     if (!txdOk) {
-        OrcLogError("skin \"%s\": LoadTxd failed", s.name.c_str());
-        return false;
+        CTxdStore::RemoveTxdSlot(txdSlot);
+        return fail("LoadTxd failed", s.txdPath.c_str());
     }
+    CTxdStore::AddRef(txdSlot);
     s.txdSlot = txdSlot;
 
     CTxdStore::PushCurrentTxd();
     CTxdStore::SetCurrentTxd(txdSlot);
     RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)s.dffPath.c_str());
-    if (!stream) {
-        CTxdStore::PopCurrentTxd();
-        OrcLogError("skin \"%s\": RwStreamOpen DFF failed", s.name.c_str());
-        return false;
+    RpClump* clump = nullptr;
+    if (stream) {
+        if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr))
+            clump = RpClumpStreamRead(stream);
+        RwStreamClose(stream, nullptr);
     }
-    bool ok = false;
-    if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr)) {
-        RpClump* c = RpClumpStreamRead(stream);
-        if (c) {
-            s.rwObject = reinterpret_cast<RwObject*>(c);
-            RpClumpForAllAtomics(c, OrcInitAtomicCB, nullptr);
-            ok = true;
-            OrcLogInfo("skin \"%s\": clump loaded", s.name.c_str());
-        }
-    } else
-        OrcLogError("skin \"%s\": DFF has no CLUMP chunk", s.name.c_str());
-    RwStreamClose(stream, nullptr);
     CTxdStore::PopCurrentTxd();
-    return ok;
+
+    if (!clump) {
+        DestroyCustomSkinInstance(s);
+        return fail("DFF clump load failed", s.dffPath.c_str());
+    }
+    s.rwObject = reinterpret_cast<RwObject*>(clump);
+    RpClumpForAllAtomics(clump, OrcInitAtomicCB, nullptr);
+    OrcLogInfo("skin \"%s\": clump loaded", s.name.c_str());
+    return true;
 }
 
 // GetExistingStandardModelInfo / OrcIsValidStandardSkinModel вынесены в orc_ped_index.cpp
@@ -779,6 +802,8 @@ static void DiscoverRandomSkinPools() {
 }
 
 void DiscoverCustomSkins() {
+    OrcTextureRemapInvalidateStates();
+    OrcTextureRemapRefreshAdditionalTxds();
     OrcSkinNativeOnSkinAssetsReleased();
     for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
     g_customSkins.clear();
@@ -1010,6 +1035,34 @@ OrcResolvedPedSkin OrcResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
     return OrcResolveSkinForPedModel(ped, localPlayer, ped ? (int)ped->m_nModelIndex : -1);
 }
 
+bool OrcSkinsGetOverlayTextureRemapInfo(CPed* ped, OrcNativeSkinActiveInfo& out) {
+    if (!g_enabled || !ped || !ped->m_pRwClump)
+        return false;
+    const OrcResolvedPedSkin skin = OrcResolveSkinForPed(ped, FindPlayerPed(0));
+    const bool overlay = g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY;
+    if (skin.custom && skin.custom->rwObject && skin.custom->rwObject->type == rpCLUMP &&
+        (overlay || OrcSkinNativeShouldOverlayFallback(ped, skin.custom))) {
+        const CustomSkinCfg& asset = *skin.custom;
+        out.clump = reinterpret_cast<RpClump*>(asset.rwObject);
+        out.dffName = asset.remapKey.empty() ? asset.name.c_str() : asset.remapKey.c_str();
+        out.fallbackDffName = asset.remapFallbackKey.empty() ? nullptr : asset.remapFallbackKey.c_str();
+        out.txdSlot = asset.txdSlot;
+        return true;
+    }
+    if (skin.standard && skin.standard->rwObject && skin.standard->rwObject->type == rpCLUMP &&
+        (overlay || OrcSkinNativeShouldOverlayFallback(ped, skin.standard))) {
+        const auto* mi = CModelInfo::GetModelInfo(skin.standard->modelId);
+        if (mi) {
+            out.clump = reinterpret_cast<RpClump*>(skin.standard->rwObject);
+            out.dffName = skin.standard->dffName.c_str();
+            out.fallbackDffName = nullptr;
+            out.txdSlot = mi->m_nTxdIndex;
+            return true;
+        }
+    }
+    return false;
+}
+
 static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
     if (!ped || !ped->m_pRwClump || !sel) return;
     RpClump* pedClump = ped->m_pRwClump;
@@ -1200,7 +1253,6 @@ void OrcSkinsShutdown() {
     g_hiddenClump = nullptr;
     for (auto& s : g_customSkins) {
         DestroyCustomSkinInstance(s);
-        s.txdSlot = -1;
     }
     for (auto& s : g_standardSkins)
         DestroyStandardSkinInstance(s);
