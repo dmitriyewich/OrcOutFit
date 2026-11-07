@@ -2540,19 +2540,20 @@ WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt
         }
     }
 
-    const std::string skinLower = OrcToLowerAscii(GetPedStdSkinDffName(ped));
-    if (skinLower.empty())
-        return nullptr;
     if (allowRandom) {
+        const std::string skinLower = OrcToLowerAscii(GetPedStdSkinDffName(ped));
         for (const std::string& weaponName : weaponNames) {
-            const std::string skinKey = MakeWeaponReplacementKey(weaponName, skinLower);
-            auto skinIt = g_weaponReplacementRandomBySkin.find(skinKey);
-            if (skinIt != g_weaponReplacementRandomBySkin.end() && !skinIt->second.empty()) {
-                const int pick = PickStickyWeaponReplacementChoice(ped, "sr|" + skinKey, skinKey, skinIt->second);
-                if (pick == kWeaponReplacementVanillaChoice)
-                    return nullptr;
-                if (pick >= 0 && pick < (int)g_weaponReplacementAssets.size())
-                    return &g_weaponReplacementAssets[(size_t)pick];
+            // CJ can have no base skin DFF. The weapon pool only needs the weapon name.
+            if (!skinLower.empty()) {
+                const std::string skinKey = MakeWeaponReplacementKey(weaponName, skinLower);
+                auto skinIt = g_weaponReplacementRandomBySkin.find(skinKey);
+                if (skinIt != g_weaponReplacementRandomBySkin.end() && !skinIt->second.empty()) {
+                    const int pick = PickStickyWeaponReplacementChoice(ped, "sr|" + skinKey, skinKey, skinIt->second);
+                    if (pick == kWeaponReplacementVanillaChoice)
+                        return nullptr;
+                    if (pick >= 0 && pick < (int)g_weaponReplacementAssets.size())
+                        return &g_weaponReplacementAssets[(size_t)pick];
+                }
             }
             auto wIt = g_weaponReplacementRandomByWeapon.find(weaponName);
             if (wIt != g_weaponReplacementRandomByWeapon.end() && !wIt->second.empty()) {
