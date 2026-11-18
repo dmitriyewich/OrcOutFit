@@ -540,7 +540,7 @@ static bool g_uiStdObjParamsLoaded = false;
 static bool g_uiStdObjectAddFailed = false;
 
 static int g_uiStdSkinListIdx = 0;
-static int g_uiStdSkinEditModelId = -1;
+int g_uiStdSkinEditModelId = -1;
 static char g_uiStdSkinNickBuf[512] = {};
 static char g_uiStdSkinSearchBuf[128] = {};
 
@@ -722,7 +722,8 @@ void OrcUiDraw() {
                 OrcUiEndControlRow();
             }
             ImGui::EndDisabled();
-            ImGui::BeginDisabled(g_skinCustomMode == SKIN_CUSTOM_MODE_NATIVE);
+            ImGui::BeginDisabled(g_skinCustomMode == SKIN_CUSTOM_MODE_NATIVE &&
+                g_skinNativeFallback != SKIN_NATIVE_FALLBACK_OVERLAY);
             OrcUiCheckbox("skin_hide_base_ped", T(OrcTextId::SkinHideBasePed), &g_skinHideBasePed);
             ImGui::EndDisabled();
             const bool sampNickUiOff = samp_bridge::IsSampPresent() && !samp_bridge::IsSampBuildKnown();
@@ -1067,10 +1068,15 @@ void OrcUiDraw() {
                     ImGui::Separator();
                     ImGui::TextWrapped("%s", T(OrcTextId::CustomSkinsHint));
 
+                    const bool usingCustom = g_skinSelectedSource == SKIN_SELECTED_CUSTOM;
                     if (g_customSkins.empty()) {
                         ImGui::TextDisabled("%s", T(OrcTextId::NoDffSkinsFolder));
+                        if (usingCustom && !g_skinSelectedName.empty()) {
+                            ImGui::TextDisabled("%s", OrcFormat(
+                                OrcTextId::SavedSkinMissingFormat, g_skinSelectedName.c_str()).c_str());
+                        }
                     } else {
-                        const int savedCustomIdx = (g_skinSelectedSource == SKIN_SELECTED_CUSTOM)
+                        const int savedCustomIdx = usingCustom && !g_skinSelectedName.empty()
                             ? OrcUiFindCustomSkinIndexByName(g_skinSelectedName.c_str())
                             : -1;
                         if (savedCustomIdx >= 0)
@@ -1084,11 +1090,12 @@ void OrcUiDraw() {
                             g_uiCustomSkinSearchBuf,
                             IM_ARRAYSIZE(g_uiCustomSkinSearchBuf));
 
-                        if (g_skinSelectedSource == SKIN_SELECTED_CUSTOM && !g_skinSelectedName.empty()) {
-                            if (savedCustomIdx >= 0) {
+                        if (usingCustom) {
+                            if (g_skinSelectedName.empty() || savedCustomIdx >= 0) {
+                                const int idx = savedCustomIdx >= 0 ? savedCustomIdx : 0;
                                 ImGui::TextWrapped("%s", OrcFormat(
                                     OrcTextId::SelectedSkinFormat,
-                                    g_customSkins[(size_t)savedCustomIdx].name.c_str()).c_str());
+                                    g_customSkins[(size_t)idx].name.c_str()).c_str());
                             } else {
                                 ImGui::TextDisabled("%s", OrcFormat(
                                     OrcTextId::SavedSkinMissingFormat,
@@ -1147,28 +1154,15 @@ void OrcUiDraw() {
                             InvalidateCustomSkinLookupCache();
                         }
                         ImGui::EndDisabled();
-                        if (OrcUiButtonFullWidth(T(OrcTextId::SaveSkinIni))) {
-                            skin.nickListCsv = g_uiSkinNickBuf;
-                            skin.nicknames = ParseNickCsv(skin.nickListCsv);
-                            InvalidateCustomSkinLookupCache();
+                        if (OrcUiButtonFullWidth(T(OrcTextId::SaveSkinIni)))
                             SaveSkinCfgToIni(skin);
-                        }
                     }
 
                     ImGui::Separator();
                     bool sm = false, rs = false;
                     OrcUiButtonPair(T(OrcTextId::SaveSkinModeSelection), T(OrcTextId::RescanSkins), &sm, &rs);
                     if (sm) SaveSkinModeIni();
-                    if (rs) {
-                        DiscoverCustomSkins();
-                        const int savedIdx = OrcUiFindCustomSkinIndexByName(g_skinSelectedName.c_str());
-                        if (savedIdx >= 0) {
-                            g_uiSkinIdx = savedIdx;
-                        } else if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) {
-                            g_uiSkinIdx = 0;
-                        }
-                        g_uiSkinEditIdx = -1;
-                    }
+                    if (rs) DiscoverCustomSkins();
                     ImGui::EndTabItem();
                 }
 
@@ -1196,14 +1190,15 @@ void OrcUiDraw() {
                             g_uiStdSkinSearchBuf,
                             IM_ARRAYSIZE(g_uiStdSkinSearchBuf));
 
-                        if (g_skinSelectedSource == SKIN_SELECTED_STANDARD && g_standardSkinSelectedModelId >= 0) {
-                            if (savedStdIdx >= 0) {
+                        if (g_skinSelectedSource == SKIN_SELECTED_STANDARD) {
+                            if (g_standardSkinSelectedModelId < 0 || savedStdIdx >= 0) {
+                                const int idx = savedStdIdx >= 0 ? savedStdIdx : 0;
                                 char savedLbl[192];
                                 OrcUiPedSkinListLabel(
                                     savedLbl,
                                     sizeof(savedLbl),
-                                    pedSkins[(size_t)savedStdIdx].first.c_str(),
-                                    pedSkins[(size_t)savedStdIdx].second);
+                                    pedSkins[(size_t)idx].first.c_str(),
+                                    pedSkins[(size_t)idx].second);
                                 ImGui::TextWrapped("%s", OrcFormat(OrcTextId::SelectedSkinFormat, savedLbl).c_str());
                             } else {
                                 ImGui::TextDisabled("%s", OrcFormat(
@@ -1305,11 +1300,8 @@ void OrcUiDraw() {
                             if (OrcUiButtonFullWidth(T(OrcTextId::WearThisSkin))) {
                                 OrcApplyLocalPlayerModelById(cur.second);
                             }
-                            if (OrcUiButtonFullWidth(T(OrcTextId::SaveSkinIni))) {
-                                skin->nickListCsv = g_uiStdSkinNickBuf;
-                                skin->nicknames = ParseNickCsv(skin->nickListCsv);
+                            if (OrcUiButtonFullWidth(T(OrcTextId::SaveSkinIni)))
                                 SaveStandardSkinCfgToIni(*skin);
-                            }
                         }
                     }
 
@@ -1317,10 +1309,7 @@ void OrcUiDraw() {
                     bool sm = false, rs = false;
                     OrcUiButtonPair(T(OrcTextId::SaveSkinModeSelection), T(OrcTextId::RescanSkins), &sm, &rs);
                     if (sm) SaveSkinModeIni();
-                    if (rs) {
-                        LoadStandardSkinsFromIni();
-                        g_uiStdSkinEditModelId = -1;
-                    }
+                    if (rs) LoadStandardSkinsFromIni();
                     ImGui::EndTabItem();
                 }
 
@@ -1334,12 +1323,14 @@ void OrcUiDraw() {
 
                     std::vector<SkinRandomPoolInfo> pools;
                     OrcCollectRandomSkinPools(pools);
-                    if (!pools.empty() && ImGui::BeginChild("##random_skin_pools", ImVec2(UiContentWidth(), OrcUiScaled(150.0f)), true)) {
-                        for (const auto& pool : pools) {
-                            ImGui::Text("%s", OrcFormat(
-                                OrcTextId::RandomSkinPoolRowFormat,
-                                pool.dffName.c_str(),
-                                pool.variants).c_str());
+                    if (!pools.empty()) {
+                        if (ImGui::BeginChild("##random_skin_pools", ImVec2(UiContentWidth(), OrcUiScaled(150.0f)), true)) {
+                            for (const auto& pool : pools) {
+                                ImGui::Text("%s", OrcFormat(
+                                    OrcTextId::RandomSkinPoolRowFormat,
+                                    pool.dffName.c_str(),
+                                    pool.variants).c_str());
+                            }
                         }
                         ImGui::EndChild();
                     }

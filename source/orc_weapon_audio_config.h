@@ -16,15 +16,7 @@ void OrcWeaponAudioConfigAppendMainIniValues(std::vector<OrcIniValue>& values);
 /// Сброс кеша sidecar (при `OrcWeaponAudioInvalidateCaches`).
 void OrcWeaponAudioConfigClearStemOverrides();
 
-OrcWeaponAudioAttenuation OrcWeaponAudioConfigBuiltinAttenuation(OrcWeaponSoundClass cls);
-
-/// С merge: sidecar (.audio) > [WeaponAudio] INI > builtin.
-OrcWeaponAudioAttenuation OrcWeaponAudioConfigResolveAttenuation(const OrcWeaponAudioStemContext* ctx, OrcWeaponSoundClass cls);
-
-bool OrcWeaponAudioConfigEfxReverbEnabled();
-bool OrcWeaponAudioConfigEfxInteriorOnly();
-
-/// Построить play params: gainScale, spatial, класс; pitch из игры внутри openal.
+/// Слияние: sidecar (.audio) > [WeaponAudio] INI > встроенные настройки.
 OrcWeaponAudioPlayParams OrcWeaponAudioBuildPlayParams(const OrcWeaponAudioStemContext* ctx, float gainScale,
     OrcWeaponSpatial spatial, OrcWeaponSoundClass cls);
 

@@ -7,7 +7,6 @@
 #include "CBaseModelInfo.h"
 #include "eModelInfoType.h"
 
-#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,7 +43,4 @@ void OrcCollectPedSkins(std::vector<std::pair<std::string, int>>& out) {
         if (!OrcIsValidStandardSkinModel(id)) continue;
         out.push_back({ g_pedModelNameById[id], id });
     }
-    std::sort(out.begin(), out.end(), [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) {
-        return a.second < b.second;
-    });
 }

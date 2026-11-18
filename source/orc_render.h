@@ -10,7 +10,6 @@ void OrcApplyAttachmentLightingForPed(CPed* ped, const CVector& sampleWorldPos, 
 bool OrcTryPedSetupLighting(CPed* ped);
 /// GTA SA vtable slot 20 is `RemoveLighting(bool)` even though the bundled plugin-sdk wrapper omits the argument.
 void OrcTryPedRemoveLighting(CPed* ped, bool lightingWasSetup);
-void OrcTryRpClumpRender(RpClump* clump);
 RwFrame* OrcGetRwFrameParentSafe(RwFrame* frame);
 
 void OrcApplyAttachmentOffset(RwMatrix* m, float ox, float oy, float oz);

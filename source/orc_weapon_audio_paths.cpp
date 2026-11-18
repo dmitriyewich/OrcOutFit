@@ -1,25 +1,25 @@
-// Stem / path resolve, negative cache, suppress helpers.
+// Stem / path resolve and cached audio candidates.
 
 #include "plugin.h"
 
+#include "CCamera.h"
 #include "CGame.h"
 #include "CPlayerPed.h"
 #include "CPed.h"
 #include "CPools.h"
 #include "CPhysical.h"
 #include "CVector.h"
-#include "CWeaponInfo.h"
 #include "eEntityType.h"
 
 #include <algorithm>
-#include <cmath>
-#include <cstdio>
 #include <cstdint>
+#include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
-#include "CAEAudioEntity.h"
 #include "CAEWeaponAudioEntity.h"
 #include "CEntity.h"
 
@@ -29,14 +29,20 @@
 #include "orc_weapon_assets.h"
 #include "orc_weapon_audio_config.h"
 #include "orc_weapon_audio_internal.h"
-#include "orc_weapon_audio_names.h"
 
-enum OrcPathCacheState : uint8_t { kUnknown = 0, kMissing = 1, kPresent = 2 };
+using OrcAudioPathCandidates = std::vector<std::string>;
+struct OrcNumberedAudioVariants {
+    uint16_t mask = 0;
+    int checked = 0;
+};
 
-static std::unordered_map<std::string, OrcPathCacheState> g_pathCache;
-static std::mutex g_pathCacheMutex;
+struct OrcAudioStemPaths {
+    std::map<std::string, OrcAudioPathCandidates, std::less<>> bySuffix;
+    std::map<std::string, OrcNumberedAudioVariants, std::less<>> byPrefix;
+};
 
-static const char* kAudioExts[] = {".wav", ".mp3", ".flac", ".ogg"};
+static std::unordered_map<std::string, OrcAudioStemPaths> g_audioPathsByDff;
+static std::mutex g_audioPathsMutex;
 
 static bool OrcAudioPointerLooksReadable(const void* ptr) {
     return reinterpret_cast<uintptr_t>(ptr) >= 0x10000u;
@@ -76,44 +82,44 @@ static std::string OrcDirNameA(const std::string& p) {
     return p.substr(0, slash);
 }
 
-static bool OrcPathExistsInDir(const std::string& dir, const std::string& baseName, std::string& outPath) {
-    if (dir.empty() || baseName.empty())
-        return false;
-    for (const char* ext : kAudioExts) {
-        const std::string p = OrcJoinPath(dir, baseName + ext);
-        if (OrcWeaponAudioPathExistsCached(p)) {
-            outPath = p;
-            return true;
-        }
+static void OrcAppendExistingAudioPaths(const std::string& dir, const std::string& baseName,
+    OrcAudioPathCandidates& paths) {
+    constexpr const char* extensions[] = {".wav", ".mp3", ".flac", ".ogg"};
+    for (const char* ext : extensions) {
+        std::string path = OrcJoinPath(dir, baseName + ext);
+        if (OrcFileExistsA(path.c_str()))
+            paths.push_back(std::move(path));
     }
-    return false;
+}
+
+// Callers hold g_audioPathsMutex while using the returned candidate list.
+static const OrcAudioPathCandidates& OrcFindAudioPaths(const OrcWeaponAudioStemContext& ctx, const char* suffix) {
+    static const OrcAudioPathCandidates empty;
+    if (!ctx.asset || !suffix || suffix[0] != '_' || !suffix[1] || ctx.stem.empty())
+        return empty;
+
+    auto& bySuffix = g_audioPathsByDff[ctx.asset->dffPath].bySuffix;
+    const auto cached = bySuffix.find(suffix);
+    if (cached != bySuffix.end())
+        return cached->second;
+
+    OrcAudioPathCandidates paths;
+    OrcAppendExistingAudioPaths(ctx.dir, ctx.stem + suffix, paths);
+    OrcAppendExistingAudioPaths(ctx.dir, suffix + 1, paths);
+    if (strcmp(suffix, "_shoot") == 0)
+        OrcAppendExistingAudioPaths(ctx.dir, ctx.stem, paths);
+    return bySuffix.emplace(suffix, std::move(paths)).first->second;
 }
 
 void OrcWeaponAudioInvalidateCaches() {
     OrcWeaponAudioConfigClearStemOverrides();
-    std::lock_guard<std::mutex> lock(g_pathCacheMutex);
-    g_pathCache.clear();
-    OrcWeaponAudioLoopsStopAll();
-    OrcWeaponAudioHooksClearShootThrottleState();
-}
-
-bool OrcWeaponAudioPathExistsCached(const std::string& path) {
-    if (path.empty())
-        return false;
     {
-        std::lock_guard<std::mutex> lock(g_pathCacheMutex);
-        auto it = g_pathCache.find(path);
-        if (it != g_pathCache.end()) {
-            if (it->second == kPresent)
-                return true;
-            if (it->second == kMissing)
-                return false;
-        }
+        std::lock_guard<std::mutex> lock(g_audioPathsMutex);
+        g_audioPathsByDff.clear();
     }
-    const bool exists = OrcFileExistsA(path.c_str());
-    std::lock_guard<std::mutex> lock(g_pathCacheMutex);
-    g_pathCache[path] = exists ? kPresent : kMissing;
-    return exists;
+    OrcWeaponAudioLoopsStopAll();
+    OrcWeaponAudioClearBufferCache();
+    OrcWeaponAudioHooksClearShootThrottleState();
 }
 
 CPed* OrcWeaponAudioPedFromPhysical(CPhysical* physical) {
@@ -123,39 +129,24 @@ CPed* OrcWeaponAudioPedFromPhysical(CPhysical* physical) {
 }
 
 bool OrcWeaponAudioIsLocalPlayerPed(CPed* ped) {
-    if (!ped)
-        return false;
-    CPlayerPed* local = FindPlayerPed(0);
-    if (!local)
-        return false;
-    if (ped == local)
-        return true;
-
-    const int pedRef = OrcSafeGetPedRef(ped);
-    const int localRef = OrcSafeGetPedRef(local);
-    return pedRef > 0 && pedRef == localRef;
+    return ped && ped == FindPlayerPed(0);
 }
 
-float OrcWeaponAudioLocalPedDistance(CPed* ped) {
-    if (!ped || OrcWeaponAudioIsLocalPlayerPed(ped))
+float OrcWeaponAudioCameraDistanceSquared(CPed* ped) {
+    const CVector* camera = TheCamera.GetGameCamPosition();
+    if (!ped || !camera)
         return 0.0f;
 
-    CPlayerPed* local = FindPlayerPed(0);
-    if (!local)
-        return 0.0f;
-
-    const CVector lp = local->GetPosition();
-    const CVector p = ped->GetPosition();
-    const float dx = lp.x - p.x;
-    const float dy = lp.y - p.y;
-    const float dz = lp.z - p.z;
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
+    const CVector& position = ped->GetPosition();
+    const float dx = position.x - camera->x;
+    const float dy = position.y - camera->y;
+    const float dz = position.z - camera->z;
+    return dx * dx + dy * dy + dz * dz;
 }
 
 bool OrcWeaponAudioIsBeyondMaxDistance(CPed* ped, float maxDist) {
-    if (!ped || maxDist <= 0.0f || maxDist >= 999999.0f || OrcWeaponAudioIsLocalPlayerPed(ped))
-        return false;
-    return OrcWeaponAudioLocalPedDistance(ped) > maxDist;
+    return maxDist > 0.0f && maxDist < 999999.0f &&
+        OrcWeaponAudioCameraDistanceSquared(ped) > maxDist * maxDist;
 }
 
 float OrcWeaponAudioApplyDistanceCullGain(CPed* ped, float maxDist, float gain) {
@@ -186,27 +177,9 @@ CPed* OrcWeaponAudioPedFromWeaponAudio(CAEWeaponAudioEntity* self) {
     return OrcWeaponAudioValidatePedCandidate(directPed, "weaponAudio.m_pPed");
 }
 
-CPed* OrcWeaponAudioResolvePedFromSoundBase(CAEAudioEntity* base) {
-    if (!OrcAudioPointerLooksReadable(base))
-        return nullptr;
-
-    CEntity* entity = nullptr;
-    __try {
-        entity = base->m_pEntity;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogInfoThrottled(919, 4000u, "weapon audio: read sound base SEH ex=0x%08X base=%p", GetExceptionCode(), base);
-        return nullptr;
-    }
-
-    if (CPed* ped = OrcWeaponAudioValidatePedCandidate(static_cast<CPed*>(entity), "soundBase.m_pEntity"))
-        return ped;
-
-    return OrcWeaponAudioPedFromWeaponAudio(reinterpret_cast<CAEWeaponAudioEntity*>(base));
-}
-
 bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudioStemContext& out) {
     out = {};
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || weaponType < 0)
+    if (!OrcWeaponAudioCanPlayCustom() || weaponType < 0)
         return false;
     ped = OrcWeaponAudioValidatePedCandidate(ped, "stemContext");
     if (!ped)
@@ -222,148 +195,58 @@ bool OrcWeaponAudioTryBuildStemContext(CPed* ped, int weaponType, OrcWeaponAudio
     return !out.stem.empty();
 }
 
-bool OrcWeaponAudioPedHasReplacementAudio(CPed* ped, int weaponType) {
-    OrcWeaponAudioStemContext ctx;
-    return OrcWeaponAudioTryBuildStemContext(ped, weaponType, ctx);
+uint16_t OrcWeaponAudioNumberedVariants(const OrcWeaponAudioStemContext& ctx, const char* prefix, int maxAlternatives) {
+    const int count = std::clamp(maxAlternatives, 0, 10);
+    if (!ctx.asset || !prefix || count == 0)
+        return 0;
+
+    std::lock_guard<std::mutex> lock(g_audioPathsMutex);
+    auto& byPrefix = g_audioPathsByDff[ctx.asset->dffPath].byPrefix;
+    auto it = byPrefix.find(prefix);
+    if (it == byPrefix.end())
+        it = byPrefix.try_emplace(prefix).first;
+
+    auto& variants = it->second;
+    if (variants.checked < count) {
+        std::string suffix(prefix);
+        suffix.push_back('0');
+        for (int i = variants.checked; i < count; ++i) {
+            suffix.back() = static_cast<char>('0' + i);
+            if (!OrcFindAudioPaths(ctx, suffix.c_str()).empty())
+                variants.mask |= static_cast<uint16_t>(1u << i);
+        }
+        variants.checked = count;
+    }
+    return static_cast<uint16_t>(variants.mask & ((1u << count) - 1u));
 }
 
-bool OrcWeaponAudioResolveFirstExistingAudioPath(const OrcWeaponAudioStemContext& ctx, const char* suffix, std::string& outPath) {
-    outPath.clear();
-    if (!suffix || !suffix[0] || ctx.stem.empty())
-        return false;
-
-    if (OrcPathExistsInDir(ctx.dir, ctx.stem + std::string(suffix), outPath))
-        return true;
-
-    if (const char* bare = OrcWeaponAudioBareAliasForSuffix(suffix)) {
-        if (OrcPathExistsInDir(ctx.dir, bare, outPath))
-            return true;
+ALuint OrcWeaponAudioResolveFirstPlayableAudioBuffer(const OrcWeaponAudioStemContext& ctx, const char* suffix) {
+    std::lock_guard<std::mutex> lock(g_audioPathsMutex);
+    const auto& paths = OrcFindAudioPaths(ctx, suffix);
+    if (paths.empty() || !OrcWeaponAudioOpenAlInit())
+        return 0;
+    for (const std::string& path : paths) {
+        if (const ALuint buffer = OrcGetOrCreateBufferForPath(path))
+            return buffer;
     }
-
-    return false;
+    return 0;
 }
 
 bool OrcWeaponAudioTryPlaySuffix(const OrcWeaponAudioStemContext& ctx, const char* suffix, float gainScale,
-    OrcWeaponSpatial spatial) {
-    std::string path;
-    if (!OrcWeaponAudioResolveFirstExistingAudioPath(ctx, suffix, path) || path.empty())
+    OrcWeaponSpatial spatial, uint32_t delayMs) {
+    const ALuint buffer = OrcWeaponAudioResolveFirstPlayableAudioBuffer(ctx, suffix);
+    if (!buffer)
         return false;
 
     const OrcWeaponSoundClass cls = OrcWeaponInferSoundClassFromSuffix(suffix);
-    OrcWeaponAudioPlayParams params = OrcWeaponAudioBuildPlayParams(&ctx, gainScale, spatial, cls);
-
-    if (params.spatial == OrcWeaponSpatial::WorldAtPed && OrcWeaponAudioIsBeyondMaxDistance(ctx.ped, params.att.maxDist)) {
-        OrcWeaponAudioMarkSuppressVanilla();
-        OrcLogInfoThrottled(409,
-            2000u,
-            "weapon audio: cull one-shot pedRef=%d suffix=%s dist=%.1f max=%.1f",
-            OrcSafeGetPedRef(ctx.ped),
-            suffix,
-            OrcWeaponAudioLocalPedDistance(ctx.ped),
-            params.att.maxDist);
+    const OrcWeaponAudioPlayParams params = OrcWeaponAudioBuildPlayParams(&ctx, gainScale, spatial, cls);
+    if (delayMs == 0 && spatial == OrcWeaponSpatial::WorldAtPed &&
+        OrcWeaponAudioIsBeyondMaxDistance(ctx.ped, params.att.maxDist))
         return true;
-    }
 
-    if (!OrcWeaponAudioTryPlayPath(path.c_str(), params, ctx.ped))
-        return false;
-    OrcWeaponAudioMarkSuppressVanilla();
-    return true;
-}
-
-void OrcWeaponAudioMarkSuppressVanilla() {
-    g_suppressVanillaGunSoundsUntilTick = GetTickCount() + 120;
+    return OrcWeaponAudioPlayBuffer(buffer, params, ctx.ped, delayMs);
 }
 
 bool OrcWeaponAudioIsInterior() {
     return CGame::currArea > 0;
-}
-
-static int OrcWeaponAudioActiveWeaponType(CPed* ped) {
-    if (!ped)
-        return -1;
-    const int slot = ped->m_nSelectedWepSlot;
-    if (slot < 0 || slot >= 13)
-        return -1;
-    return static_cast<int>(ped->m_aWeapons[slot].m_eWeaponType);
-}
-
-static bool OrcWeaponAudioPathExistsForSuffix(const OrcWeaponAudioStemContext& ctx, const char* suffix) {
-    std::string tmp;
-    return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, suffix, tmp);
-}
-
-bool OrcWeaponAudioHasLoopCustomAudio(const OrcWeaponAudioStemContext& ctx) {
-    static const char* kSuffixes[] = {
-        "_flamethrower_fire",
-        "_flamethrower_idlegasloop",
-        "_minigun_fireloop",
-        "_minigun_barrelspinloop",
-        "_chainsaw_idle",
-        "_chainsaw_active",
-        "_chainsaw_cuttingflesh",
-        "_spraycan_sprayloop",
-        "_extinguisher_loop",
-    };
-    for (const char* s : kSuffixes) {
-        if (OrcWeaponAudioPathExistsForSuffix(ctx, s))
-            return true;
-    }
-    return false;
-}
-
-bool OrcWeaponAudioHasFireRelatedCustomAudio(const OrcWeaponAudioStemContext& ctx) {
-    static const char* kBase[] = {"_shoot", "_distant", "_low_ammo", "_dryfire"};
-    for (const char* s : kBase) {
-        if (OrcWeaponAudioPathExistsForSuffix(ctx, s))
-            return true;
-    }
-    const int maxAlt = std::max(1, std::min(10, g_weaponCustomSoundMaxAlternatives));
-    for (int i = 0; i < maxAlt; ++i) {
-        char buf[32];
-        sprintf_s(buf, "_shoot%d", i);
-        if (OrcWeaponAudioPathExistsForSuffix(ctx, buf))
-            return true;
-        sprintf_s(buf, "_distant%d", i);
-        if (OrcWeaponAudioPathExistsForSuffix(ctx, buf))
-            return true;
-    }
-    return false;
-}
-
-bool OrcWeaponAudioShouldSuppressVanillaGun(CAEWeaponAudioEntity* self) {
-    if (!self)
-        return false;
-    CPed* ped = OrcWeaponAudioPedFromWeaponAudio(self);
-    if (!ped)
-        return false;
-    if (GetTickCount() < g_suppressVanillaGunSoundsUntilTick)
-        return true;
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled)
-        return false;
-    const int wt = OrcWeaponAudioActiveWeaponType(ped);
-    if (wt < 0)
-        return false;
-    OrcWeaponAudioStemContext ctx;
-    if (!OrcWeaponAudioTryBuildStemContext(ped, wt, ctx))
-        return false;
-
-    // Loop-оружие: глушим PlayGunSounds только если есть свой loop-файл (не из-за одного _shoot).
-    switch (wt) {
-    case WEAPONTYPE_MINIGUN:
-        if (OrcWeaponAudioPathExistsForSuffix(ctx, "_minigun_fireloop"))
-            return OrcWeaponAudioPedIsMinigunFiring(ped);
-        return OrcWeaponAudioPathExistsForSuffix(ctx, "_shoot");
-    case WEAPONTYPE_FTHROWER:
-        return OrcWeaponAudioPathExistsForSuffix(ctx, "_flamethrower_fire");
-    case WEAPONTYPE_CHAINSAW:
-        return OrcWeaponAudioPathExistsForSuffix(ctx, "_chainsaw_idle") ||
-            OrcWeaponAudioPathExistsForSuffix(ctx, "_chainsaw_active") ||
-            OrcWeaponAudioPathExistsForSuffix(ctx, "_chainsaw_cuttingflesh");
-    case WEAPONTYPE_SPRAYCAN:
-        return OrcWeaponAudioPathExistsForSuffix(ctx, "_spraycan_sprayloop");
-    case WEAPONTYPE_EXTINGUISHER:
-        return OrcWeaponAudioPathExistsForSuffix(ctx, "_extinguisher_loop");
-    default:
-        return OrcWeaponAudioHasFireRelatedCustomAudio(ctx);
-    }
 }

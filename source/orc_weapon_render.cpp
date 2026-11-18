@@ -6,8 +6,6 @@
 #include "CVisibilityPlugins.h"
 #include "NodeName.h"
 
-#include "external/MinHook/include/MinHook.h"
-
 #include "orc_app.h"
 #include "orc_log.h"
 #include "orc_weapon_assets.h"
@@ -20,45 +18,10 @@
 
 namespace {
 
-constexpr uintptr_t kRenderWeaponPedsForPcAddress = 0x732F30u;
-using RenderWeaponPedsForPcFn = void(__cdecl*)();
-
 unsigned g_vanillaCustomWeaponDrawDepth = 0;
 unsigned g_bodyAttachmentDrawDepth = 0;
-bool g_weaponBatchHookAttempted = false;
-bool g_heldBatchBeforeSehLogged = false;
-bool g_heldBatchAfterSehLogged = false;
 bool g_textureDrawSehLogged = false;
 bool g_bodyTextureDrawSehLogged = false;
-RenderWeaponPedsForPcFn g_renderWeaponPedsForPcOriginal = nullptr;
-
-void __cdecl RenderWeaponPedsForPcDetour() {
-    if (OrcIsRuntimeShuttingDown()) {
-        if (g_renderWeaponPedsForPcOriginal)
-            g_renderWeaponPedsForPcOriginal();
-        return;
-    }
-
-    __try {
-        OrcHeldOnVanillaWeaponBatchBefore();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (!g_heldBatchBeforeSehLogged) {
-            g_heldBatchBeforeSehLogged = true;
-            OrcLogError("weapon batch: held before SEH ex=0x%08X", GetExceptionCode());
-        }
-    }
-    if (g_renderWeaponPedsForPcOriginal) {
-        g_renderWeaponPedsForPcOriginal();
-    }
-    __try {
-        OrcHeldOnVanillaWeaponBatchAfter();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (!g_heldBatchAfterSehLogged) {
-            g_heldBatchAfterSehLogged = true;
-            OrcLogError("weapon batch: held after SEH ex=0x%08X", GetExceptionCode());
-        }
-    }
-}
 
 void LogPreparationErrorOnce(int modelId, unsigned reason, const char* text) {
     static std::unordered_set<std::uint64_t> logged;
@@ -108,6 +71,7 @@ struct PrepareAtomicContext {
     unsigned currentAtomicIndex = 0;
     unsigned currentMaterialIndex = 0;
     unsigned count = 0;
+    unsigned visibleAtomicCount = 0;
     unsigned invalidCount = 0;
     unsigned invalidFrameHierarchyCount = 0;
     unsigned materialCount = 0;
@@ -233,6 +197,10 @@ RpAtomic* PrepareBodyWeaponAtomicCb(RpAtomic* atomic, void* data) {
         if ((RpAtomicGetFlags(atomic) & kOrcRpAtomicRenderFlag) != 0u)
             ++context->gunflashVisibleAfterPrepare;
     }
+    if (context && frameClass == OrcBodyAttachmentFrameClass::Ordinary &&
+        (RpAtomicGetFlags(atomic) & kOrcRpAtomicRenderFlag) != 0u) {
+        ++context->visibleAtomicCount;
+    }
     if (context && context->callbackPolicy == OrcWeaponBodyAtomicCallbackPolicy::ForceDefaultCallback)
         CVisibilityPlugins::SetAtomicRenderCallback(atomic, nullptr);
     if (context && context->traceDetails) {
@@ -274,12 +242,15 @@ RpMaterial* InitStockBodyWeaponMaterialCb(RpMaterial* material, void* data) {
         return material;
     ++material->refCount;
     context->pinnedMaterials->push_back(material);
-    material->color = { 255, 255, 255, 255 };
+    material->color.red = 255;
+    material->color.green = 255;
+    material->color.blue = 255;
     return material;
 }
 
 RpAtomic* InitStockBodyWeaponAtomicCb(RpAtomic* atomic, void* data) {
-    if (atomic && atomic->geometry) {
+    // The first pass hid gunflash. Never modify its shared geometry or material here.
+    if (atomic && atomic->geometry && (RpAtomicGetFlags(atomic) & kOrcRpAtomicRenderFlag) != 0u) {
         atomic->geometry->flags |= rpGEOMETRYMODULATEMATERIALCOLOR;
         RpGeometryForAllMaterials(atomic->geometry, InitStockBodyWeaponMaterialCb, data);
     }
@@ -324,7 +295,7 @@ bool OrcPrepareWeaponObjectForBodyAttachment(RwObject*& object,
     context.callbackPolicy = OrcSelectWeaponBodyAtomicCallbackPolicy(source);
     context.modelId = stockWeaponModelId;
     context.sourceName = BodyWeaponSourceName(source);
-    if (source != OrcWeaponBodyInstanceSource::Replacement) {
+    if (g_orcLogLevel >= OrcLogLevel::Info && source != OrcWeaponBodyInstanceSource::Replacement) {
         static std::unordered_set<std::uint64_t> tracedStockModels;
         const auto traceKey =
             (static_cast<std::uint64_t>(static_cast<std::uint32_t>(stockWeaponModelId)) << 8u) |
@@ -343,6 +314,10 @@ bool OrcPrepareWeaponObjectForBodyAttachment(RwObject*& object,
             context.count == 0u
                 ? "emptyClump"
                 : (context.invalidCount != 0u ? "invalidAtomic" : "invalidFrameHierarchy"));
+        return false;
+    }
+    if (context.visibleAtomicCount == 0u) {
+        LogPreparationErrorOnce(stockWeaponModelId, 10u, "noVisibleWeaponMesh");
         return false;
     }
 
@@ -414,19 +389,30 @@ void OrcReleaseWeaponBodyMaterialPins(std::vector<RpMaterial*>& pinnedMaterials)
     pinnedMaterials.clear();
 }
 
-bool OrcRenderWeaponObjectLikeVanilla(RwObject* object) {
-    if (!object || object->type != rpCLUMP)
-        return false;
-
+static bool OrcRenderWeaponObjectLikeVanilla(
+    RwObject* object, OrcHeldGunflash* gunflash, RwUInt8 flashAlpha, bool drawMesh) {
     bool rendered = false;
     ++g_vanillaCustomWeaponDrawDepth;
     __try {
-        RpClumpRender(reinterpret_cast<RpClump*>(object));
-        rendered = true;
+        if (drawMesh)
+            rendered = RpClumpRender(reinterpret_cast<RpClump*>(object)) != nullptr;
+        if (!drawMesh || rendered) {
+            if (flashAlpha != 0)
+                OrcHeldDrawGunflash(*gunflash, flashAlpha);
+            rendered = true;
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogError("weapon render: RpClumpRender SEH ex=0x%08X object=%p",
-            GetExceptionCode(),
-            object);
+        if (drawMesh && !rendered) {
+            OrcLogError("weapon render: RpClumpRender SEH ex=0x%08X object=%p",
+                GetExceptionCode(), object);
+        } else {
+            static bool gunflashDrawSehLogged = false;
+            if (!gunflashDrawSehLogged) {
+                gunflashDrawSehLogged = true;
+                OrcLogError("weapon render: gunflash draw SEH ex=0x%08X object=%p",
+                    GetExceptionCode(), object);
+            }
+        }
     }
     if (g_vanillaCustomWeaponDrawDepth > 0u)
         --g_vanillaCustomWeaponDrawDepth;
@@ -440,18 +426,28 @@ bool OrcRenderWeaponObjectLikeVanillaWithTextures(CPed* ped,
     RwObject* object,
     WeaponTextureAsset* customAsset,
     bool weaponMeshIsReplacement,
-    bool applyTextureOverrides) {
+    bool applyTextureOverrides,
+    OrcHeldGunflash* gunflash,
+    bool left,
+    bool drawMesh) {
+    if (!object || object->type != rpCLUMP)
+        return false;
+
+    const RwUInt8 flashAlpha = OrcHeldGunflashAlpha(ped, gunflash, left);
+    if (!drawMesh && flashAlpha == 0)
+        return true;
     if (!applyTextureOverrides)
-        return OrcRenderWeaponObjectLikeVanilla(object);
+        return OrcRenderWeaponObjectLikeVanilla(object, gunflash, flashAlpha, drawMesh);
 
     bool rendered = false;
+    const std::size_t textureRestorePoint = OrcWeaponTextureRestorePoint();
     __try {
         __try {
             OrcApplyWeaponTexturesCombined(
                 ped, weaponType, object, customAsset, weaponMeshIsReplacement);
-            rendered = OrcRenderWeaponObjectLikeVanilla(object);
+            rendered = OrcRenderWeaponObjectLikeVanilla(object, gunflash, flashAlpha, drawMesh);
         } __finally {
-            OrcRestoreWeaponTextureOverrides();
+            OrcRestoreWeaponTextureOverrides(textureRestorePoint);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (!g_textureDrawSehLogged) {
@@ -478,22 +474,21 @@ bool OrcRenderBodyWeaponObjectWithTextures(CPed* ped,
     ++g_bodyAttachmentDrawDepth;
     __try {
         if (applyTextureOverrides) {
+            const std::size_t textureRestorePoint = OrcWeaponTextureRestorePoint();
             __try {
                 OrcApplyWeaponTexturesCombined(
                     ped, weaponType, object, customAsset, weaponMeshIsReplacement);
-                RpClumpRender(reinterpret_cast<RpClump*>(object));
-                rendered = true;
+                rendered = RpClumpRender(reinterpret_cast<RpClump*>(object)) != nullptr;
             } __finally {
-                OrcRestoreWeaponTextureOverrides();
+                OrcRestoreWeaponTextureOverrides(textureRestorePoint);
             }
         } else {
-            RpClumpRender(reinterpret_cast<RpClump*>(object));
-            rendered = true;
+            rendered = RpClumpRender(reinterpret_cast<RpClump*>(object)) != nullptr;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (!g_bodyTextureDrawSehLogged) {
             g_bodyTextureDrawSehLogged = true;
-            OrcLogError("weapon body draw SEH ex=0x%08X object=%p; instance retried next frame",
+            OrcLogError("weapon body draw SEH ex=0x%08X object=%p; failed instance disabled",
                 GetExceptionCode(),
                 object);
         }
@@ -512,35 +507,4 @@ bool OrcIsBodyAttachmentDrawActive() {
 
 bool OrcIsVanillaCustomWeaponDrawActive() {
     return g_vanillaCustomWeaponDrawDepth != 0u;
-}
-
-void OrcWeaponRenderEnsureBatchHookInstalled() {
-    if (g_weaponBatchHookAttempted)
-        return;
-    g_weaponBatchHookAttempted = true;
-
-    MH_STATUS status = MH_Initialize();
-    if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) {
-        OrcLogError("weapon batch hook: MH_Initialize -> %s", MH_StatusToString(status));
-        return;
-    }
-    status = MH_CreateHook(reinterpret_cast<void*>(kRenderWeaponPedsForPcAddress),
-        reinterpret_cast<void*>(&RenderWeaponPedsForPcDetour),
-        reinterpret_cast<void**>(&g_renderWeaponPedsForPcOriginal));
-    if (status != MH_OK) {
-        OrcLogError("weapon batch hook: MH_CreateHook 0x%08X -> %s",
-            static_cast<unsigned>(kRenderWeaponPedsForPcAddress),
-            MH_StatusToString(status));
-        return;
-    }
-    status = MH_EnableHook(reinterpret_cast<void*>(kRenderWeaponPedsForPcAddress));
-    if (status != MH_OK) {
-        OrcLogError("weapon batch hook: MH_EnableHook 0x%08X -> %s",
-            static_cast<unsigned>(kRenderWeaponPedsForPcAddress),
-            MH_StatusToString(status));
-        return;
-    }
-
-    OrcLogInfo("weapon batch hook installed: RenderWeaponPedsForPC=0x%08X held=sharedBatch body=drawingEventAttachment",
-        static_cast<unsigned>(kRenderWeaponPedsForPcAddress));
 }

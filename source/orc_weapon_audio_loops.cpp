@@ -1,24 +1,20 @@
-// Loop weapons (flamethrower, minigun, chainsaw, spray, extinguisher) — EarShotOpenAL 1.0 US RVAs.
+// Continuous weapon effects follow the lifetime of the GTA 1.0 US sound that they replace.
 
 #include "plugin.h"
 
-#include "CAEAudioEntity.h"
 #include "CAEWeaponAudioEntity.h"
 #include "CAESound.h"
-#include "CEntity.h"
 #include "CPed.h"
-#include "CPhysical.h"
-#include "CWeapon.h"
-#include "CPools.h"
 #include "CTimer.h"
-#include "eEntityType.h"
+#include "eAudioEvents.h"
 #include "eWeaponType.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <unordered_map>
-
-#include "external/MinHook/include/MinHook.h"
 
 #include "Patch.h"
 
@@ -29,885 +25,392 @@
 
 using namespace plugin;
 
-// GTA SA 1.0 US — EarShotOpenAL Loaders.cpp
-static constexpr uintptr_t kAddr_PlayFlameThrowerSounds = 0x504470;
-static constexpr uintptr_t kAddr_PlayFlameThrowerIdleGasLoop = 0x503870;
-static constexpr uintptr_t kAddr_StopFlameThrowerIdleGasLoop = 0x5034E0;
-static constexpr uintptr_t kAddr_ReportChainsawEvent = 0x5039F0;
-static constexpr uintptr_t kAddr_PlayMiniGunFireSounds = 0x5047C0;
-static constexpr uintptr_t kAddr_PlayMiniGunStopSound = 0x504960;
+static constexpr uintptr_t kRequestSoundAddress = 0x4EFB10;
+static constexpr uintptr_t kCalculateVolumeAddress = 0x4EFA10;
+static constexpr uintptr_t kCalculateVolumeCall = 0x4F041A;
+static constexpr std::array<uint8_t, 9> kRequestBody = {0x33, 0xF6, 0x0F, 0xBF, 0xC6, 0x6B, 0xC0, 0x74, 0x90};
+static constexpr std::array<uint8_t, 8> kCalculateVolumePrologue = {0x83, 0xEC, 0x10, 0x56, 0x8B, 0xF1, 0xF6, 0x46};
 
-static constexpr uintptr_t kCallSite_PlayWeaponLoopSoundA = 0x505196;
-static constexpr uintptr_t kCallSite_PlayWeaponLoopSoundB = 0x5051CB;
-static constexpr uintptr_t kCallSite_StopFlamethrowerFire = 0x504BD4;
-static constexpr uintptr_t kCallSite_StopSpraycan = 0x504C4D;
-static constexpr uintptr_t kCallSite_StopExtinguisher = 0x504C71;
-static constexpr uintptr_t kCallSite_StopMinigunA = 0x504CEC;
-static constexpr uintptr_t kCallSite_StopMinigunB = 0x504D22;
-static constexpr uintptr_t kCallSite_StopChainsaw = 0x504D8F;
-// GTA SA 1.0 US — CAESound::CalculateVolume (plugin-sdk). EarShot RVA 0x4F041A is not a call site on US 1.0.
-static constexpr uintptr_t kAddr_CAESound_CalculateVolume = 0x4EFA10;
+// These calls construct known weapon sounds. Requests for all other game audio stay on their normal path.
+static constexpr std::array<uintptr_t, 9> kRequestCallSites = {
+    0x5038FB, // Flamethrower gas
+    0x503A50, // Chainsaw active / cutting
+    0x503AFA, // Chainsaw idle
+    0x50454C, // Flamethrower ignition
+    0x504600, // Flamethrower fire
+    0x5046DF, // Spraycan / extinguisher
+    0x5048F3, // Minigun spin
+    0x504A84, // Minigun spin end
+    0x504B58, // Chainsaw stop
+};
+static std::array<bool, kRequestCallSites.size()> g_redirected{};
 
-static constexpr int kChainsawStateStopping = 3;
-static constexpr int kChainsawStateStopped = 4;
+using RequestSound = CAESound* (__thiscall*)(void*, CAESound*);
+using CalculateVolume = void (__thiscall*)(CAESound*);
+static bool g_calculateVolumeRedirected = false;
 
-enum OrcLoopSlot : int {
-    OrcLoop_FlameFire = 0,
-    OrcLoop_FlameGasIdle,
-    OrcLoop_MinigunFire,
-    OrcLoop_MinigunBarrelSpin,
-    OrcLoop_ChainsawIdle,
-    OrcLoop_ChainsawActive,
-    OrcLoop_ChainsawCutting,
-    OrcLoop_Spraycan,
-    OrcLoop_Extinguisher,
-    OrcLoop_Count,
+struct OrcSoundEvent {
+    int bank;
+    int sfx;
+    unsigned event;
+    eWeaponType weapon;
+    const char* suffix;
+    bool loop;
+    const char* cuttingSuffix = nullptr;
 };
 
-static constexpr int kChainsawStateIdle = 0;
-static constexpr int kChainsawStateActive = 1;
-static constexpr int kChainsawStateCutting = 2;
+static constexpr OrcSoundEvent kFlameFire{19, 26, 2, WEAPONTYPE_FTHROWER, "_flamethrower_fire", true};
+static constexpr OrcSoundEvent kSpray{5, 28, 3, WEAPONTYPE_SPRAYCAN, "_spraycan_sprayloop", true};
+static constexpr OrcSoundEvent kExtinguisher{5, 9, 4, WEAPONTYPE_EXTINGUISHER, "_extinguisher_loop", true};
+static constexpr unsigned kNoAudioEvent = static_cast<unsigned>(-1);
+static constexpr OrcSoundEvent kEvents[] = {
+    kFlameFire, kSpray, kExtinguisher,
+    {5, 10, kNoAudioEvent, WEAPONTYPE_FTHROWER, "_flamethrower_idlegasloop", true},
+    {5, 83, kNoAudioEvent, WEAPONTYPE_FTHROWER, "_flamethrower_start", false},
+    {5, 14, 5, WEAPONTYPE_MINIGUN, "_minigun_barrelspinloop", true},
+    {5, 63, 8, WEAPONTYPE_MINIGUN, "_minigun_barrelspinend", false},
+    {40, 1, 9, WEAPONTYPE_CHAINSAW, "_chainsaw_idle", true},
+    {40, 0, 10, WEAPONTYPE_CHAINSAW, "_chainsaw_active", true, "_chainsaw_cuttingflesh"},
+    {40, 2, 12, WEAPONTYPE_CHAINSAW, "_chainsaw_stop", false},
+};
 
-using PlayFlameThrowerSounds_t = void(__thiscall*)(CAEWeaponAudioEntity*, CPhysical*, short, short, int, float, float);
-using PlayFlameThrowerIdleGasLoop_t = void(__thiscall*)(CAEWeaponAudioEntity*, CPhysical*);
-using StopFlameThrowerIdleGasLoop_t = void(__thiscall*)(CAEWeaponAudioEntity*);
-using PlayWeaponLoopSound_t = void(__thiscall*)(CAEWeaponAudioEntity*, CPhysical*, short, int, float, float, unsigned);
-using ReportChainsawEvent_t = void(__thiscall*)(CAEWeaponAudioEntity*, CPed*, int);
-using PlayMiniGunFireSounds_t = void(__thiscall*)(CAEWeaponAudioEntity*, CPhysical*, int);
-using PlayMiniGunStopSound_t = void(__thiscall*)(CAEWeaponAudioEntity*, CPhysical*);
-using CAESound_StopSoundAndForget_t = void(__thiscall*)(CAESound*);
+struct OrcManagedSound {
+    const OrcSoundEvent* event = nullptr;
+    CAEAudioEntity* owner = nullptr;
+    CPed* ped = nullptr;
+    int pedRef = 0;
+    ALuint source = 0;
+    ALuint buffer = 0;
+    ALuint cuttingBuffer = 0;
+    ALuint playingBuffer = 0;
+    float classPitch = 1.0f;
+    OrcWeaponAudioPlayParams params{};
+};
 
-static PlayFlameThrowerSounds_t g_PlayFlameThrowerSounds_Orig = nullptr;
-static PlayFlameThrowerIdleGasLoop_t g_PlayFlameIdleGas_Orig = nullptr;
-static StopFlameThrowerIdleGasLoop_t g_StopFlameIdleGas_Orig = nullptr;
-static PlayWeaponLoopSound_t g_PlayWeaponLoopSound_Orig = nullptr;
-static ReportChainsawEvent_t g_ReportChainsaw_Orig = nullptr;
-static PlayMiniGunFireSounds_t g_PlayMiniGunFire_Orig = nullptr;
-static PlayMiniGunStopSound_t g_PlayMiniGunStop_Orig = nullptr;
-static CAESound_StopSoundAndForget_t g_StopSound_Orig = nullptr;
+struct OrcMinigunLoop {
+    int pedRef = 0;
+    ALuint source = 0;
+    bool spin = false;
+    unsigned lastEventTime = 0;
+};
 
-static bool g_loopHooksInstalled = false;
-static bool g_loopRedirectsInstalled = false;
+static std::unordered_map<CAESound*, OrcManagedSound> g_managedSounds;
+static std::unordered_map<CPed*, OrcMinigunLoop> g_minigunLoops;
 
-using PedLoops = std::array<ALuint, OrcLoop_Count>;
-static std::unordered_map<CPed*, PedLoops> g_pedLoops;
-static std::unordered_map<CPed*, DWORD> g_minigunFireHoldUntilTick;
-static constexpr DWORD kMinigunFireHoldMs = 280;
-
-using CAESound_CalculateVolume_t = void(__thiscall*)(CAESound*);
-static CAESound_CalculateVolume_t g_CalculateVolume_Orig = nullptr;
-static bool g_calculateVolumeHookInstalled = false;
-
-static uintptr_t OrcResolveCallTarget(uintptr_t callRva) {
-    if (patch::GetUChar(callRva) != 0xE8)
+static uintptr_t OrcCallTarget(uintptr_t site) {
+    if (patch::GetUChar(site) != 0xE8)
         return 0;
-    const int32_t rel = static_cast<int32_t>(patch::GetUInt(callRva + 1));
-    return static_cast<uintptr_t>(static_cast<ptrdiff_t>(callRva + 5) + rel);
+    return site + 5 + static_cast<int32_t>(patch::GetUInt(site + 1));
 }
 
-static PedLoops& OrcPedLoops(CPed* ped) {
-    return g_pedLoops[ped];
+// AudioRuntime v2.1.2 hotpatches the first two bytes of RequestNewSound. For an OrcOutFit
+// replacement only, replay the displaced prologue so GTA can keep its original sound state.
+static __declspec(naked) CAESound* __fastcall OrcRequestNativeHotpatched(void*, void*, CAESound*) {
+    __asm {
+        push esi
+        push edi
+        push 004EFB12h
+        ret
+    }
 }
 
-static ALuint& OrcLoopRef(CPed* ped, OrcLoopSlot slot) {
-    return OrcPedLoops(ped)[static_cast<size_t>(slot)];
+static bool OrcIsAudioRuntimeDetour(uintptr_t address) {
+    HMODULE owner = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<const wchar_t*>(address), &owner))
+        return false;
+
+    wchar_t module[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(owner, module, _countof(module));
+    if (!length || length >= _countof(module))
+        return false;
+    const wchar_t* name = wcsrchr(module, L'\\');
+    return _wcsicmp(name ? name + 1 : module, L"AudioRuntime.asi") == 0;
+}
+
+static RequestSound OrcNativeRequestSound() {
+    const auto* code = reinterpret_cast<const uint8_t*>(kRequestSoundAddress);
+    if (std::memcmp(code + 2, kRequestBody.data(), kRequestBody.size()) != 0)
+        return nullptr;
+    if (code[0] == 0x56 && code[1] == 0x57)
+        return reinterpret_cast<RequestSound>(kRequestSoundAddress);
+
+    if (code[0] != 0xEB || code[1] != 0xF9 || code[-5] != 0xE9)
+        return nullptr;
+    // The hotpatch uses JMP rel32 in its padding, rather than CALL rel32.
+    int32_t displacement = 0;
+    std::memcpy(&displacement, code - 4, sizeof(displacement));
+    const uintptr_t target = kRequestSoundAddress + displacement;
+    static uintptr_t lastTarget = 0;
+    static bool audioRuntime = false;
+    if (target != lastTarget) {
+        lastTarget = target;
+        audioRuntime = OrcIsAudioRuntimeDetour(target);
+    }
+    return audioRuntime ? reinterpret_cast<RequestSound>(&OrcRequestNativeHotpatched) : nullptr;
+}
+
+static const OrcSoundEvent* OrcFindSoundEvent(const CAESound& sound) {
+    for (const OrcSoundEvent& event : kEvents) {
+        if (sound.m_nBankSlotId == event.bank && sound.m_nSoundIdInSlot == event.sfx && sound.m_nEvent == event.event)
+            return &event;
+    }
+    return nullptr;
+}
+
+static bool OrcSoundStillAlive(const CAESound& sound, const OrcManagedSound& managed) {
+    return sound.m_nIsUsed && sound.m_nPlayingState == 0 && sound.m_pBaseAudio == managed.owner &&
+        sound.m_nBankSlotId == managed.event->bank && sound.m_nSoundIdInSlot == managed.event->sfx &&
+        sound.m_nEvent == managed.event->event;
+}
+
+static bool OrcPedStillEquipped(CPed* ped, int pedRef, eWeaponType weapon) {
+    if (pedRef <= 0 || OrcSafeGetPed(pedRef) != ped)
+        return false;
+    const auto slot = ped->m_nSelectedWepSlot;
+    return slot < 13 && ped->m_aWeapons[slot].m_eWeaponType == weapon;
 }
 
 static float OrcLoopGain() {
     return std::max(0.0f, g_weaponCustomSoundGain);
 }
 
-static void OrcTouchMinigunFireHold(CPed* ped) {
-    if (ped)
-        g_minigunFireHoldUntilTick[ped] = GetTickCount() + kMinigunFireHoldMs;
+static float OrcTimeScale() {
+    const float scale = CTimer::ms_fTimeScale;
+    return std::isfinite(scale) ? std::clamp(scale, 0.01f, 4.0f) : 1.0f;
 }
 
-static void OrcClearMinigunFireHold(CPed* ped) {
-    if (ped)
-        g_minigunFireHoldUntilTick.erase(ped);
+static bool OrcTryStartLoop(const OrcWeaponAudioStemContext& ctx, const char* suffix, ALuint& source) {
+    const ALuint buffer = OrcWeaponAudioResolveFirstPlayableAudioBuffer(ctx, suffix);
+    if (!buffer)
+        return false;
+    const auto params = OrcWeaponAudioBuildPlayParams(&ctx, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed,
+        OrcWeaponInferSoundClassFromSuffix(suffix));
+    return OrcWeaponAudioStartLoopSource(buffer, params, ctx.ped, source);
 }
 
-static bool OrcPedHasMinigunEquipped(CPed* ped) {
-    if (!ped)
-        return false;
-    const int slot = ped->m_nSelectedWepSlot;
-    if (slot < 0 || slot >= 13)
-        return false;
-    return ped->m_aWeapons[slot].m_eWeaponType == WEAPONTYPE_MINIGUN;
-}
+static CAESound* __fastcall OrcRequestSoundDetour(void* manager, void*, CAESound* sound) {
+    const auto original = reinterpret_cast<RequestSound>(kRequestSoundAddress);
+    if (!sound || !OrcWeaponAudioCanPlayCustom())
+        return original(manager, sound);
 
-bool OrcWeaponAudioPedIsMinigunFiring(CPed* ped) {
-    if (!OrcPedHasMinigunEquipped(ped))
-        return false;
-    return ped->m_aWeapons[ped->m_nSelectedWepSlot].m_nState == WEAPONSTATE_FIRING;
-}
+    const OrcSoundEvent* event = OrcFindSoundEvent(*sound);
+    if (!event)
+        return original(manager, sound);
 
-bool OrcWeaponAudioPedHasCustomMinigunFireloop(CPed* ped) {
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || !ped)
-        return false;
+    // These verified request sites all register the emitting entity before the call.
+    CPed* ped = OrcWeaponAudioPedFromPhysical(reinterpret_cast<CPhysical*>(sound->m_pPhysicalEntity));
     OrcWeaponAudioStemContext ctx;
-    if (!OrcWeaponAudioTryBuildStemContext(ped, static_cast<int>(WEAPONTYPE_MINIGUN), ctx))
-        return false;
-    std::string tmp;
-    return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_minigun_fireloop", tmp);
-}
+    if (!ped || !OrcWeaponAudioTryBuildStemContext(ped, event->weapon, ctx))
+        return original(manager, sound);
 
-static bool OrcPedIsMinigunFiring(CPed* ped) {
-    return OrcWeaponAudioPedIsMinigunFiring(ped);
-}
+    // Resolve the runtime hook only for recognized sounds that can actually be replaced.
+    const ALuint buffer = OrcWeaponAudioResolveFirstPlayableAudioBuffer(ctx, event->suffix);
+    const bool ownedByPed = sound->m_pBaseAudio == &ped->m_weaponAudio;
+    const ALuint cuttingBuffer = event->cuttingSuffix && ownedByPed
+        ? OrcWeaponAudioResolveFirstPlayableAudioBuffer(ctx, event->cuttingSuffix) : 0;
+    if (!buffer && !cuttingBuffer)
+        return original(manager, sound);
 
-bool OrcWeaponAudioPedWantsMinigunFireLoop(CPed* ped) {
-    if (OrcWeaponAudioPedIsMinigunFiring(ped))
-        return true;
-    const auto it = g_minigunFireHoldUntilTick.find(ped);
-    return it != g_minigunFireHoldUntilTick.end() && GetTickCount() < it->second;
-}
+    const RequestSound native = OrcNativeRequestSound();
+    if (!native)
+        return original(manager, sound);
 
-static bool OrcPedWantsMinigunFireLoop(CPed* ped) {
-    return OrcWeaponAudioPedWantsMinigunFireLoop(ped);
-}
-
-static bool OrcTryStartLoopSuffix(const OrcWeaponAudioStemContext& ctx, const char* suffix, OrcLoopSlot slot) {
-    std::string path;
-    if (!OrcWeaponAudioResolveFirstExistingAudioPath(ctx, suffix, path))
-        return false;
-    if (!OrcWeaponAudioOpenAlInit()) {
-        OrcLogError("weapon audio: OpenAL init failed for loop %s", path.c_str());
-        return false;
+    OrcManagedSound managed{};
+    managed.event = event;
+    managed.owner = sound->m_pBaseAudio;
+    managed.ped = ped;
+    managed.pedRef = OrcSafeGetPedRef(ped);
+    managed.buffer = buffer;
+    managed.cuttingBuffer = cuttingBuffer;
+    if (event->loop) {
+        managed.params = OrcWeaponAudioBuildPlayParams(&ctx, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed,
+            OrcWeaponInferSoundClassFromSuffix(event->suffix));
+        managed.classPitch = managed.params.pitch / OrcTimeScale();
+        if (buffer) {
+            if (OrcWeaponAudioStartLoopSource(buffer, managed.params, ped, managed.source))
+                managed.playingBuffer = buffer;
+            else if (!cuttingBuffer)
+                return original(manager, sound);
+        }
+    } else if (!OrcWeaponAudioTryPlaySuffix(ctx, event->suffix, OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped))) {
+        return original(manager, sound);
     }
-    const ALuint buf = OrcGetOrCreateBufferForPath(path.c_str());
-    if (!buf) {
-        OrcLogError("weapon audio: decode failed for loop %s", path.c_str());
-        return false;
+
+    CAESound* slot = native(manager, sound);
+    if (!slot) {
+        OrcWeaponAudioStopLoopSource(managed.source);
+        // The stock allocator has already released the descriptor's entity reference.
+        return nullptr;
     }
-    const OrcWeaponSoundClass cls = OrcWeaponInferSoundClassFromSuffix(suffix);
-    OrcWeaponAudioPlayParams lp = OrcWeaponAudioBuildPlayParams(&ctx, OrcLoopGain(), OrcWeaponSpatial::WorldAtPed, cls);
-    ALuint& src = OrcLoopRef(ctx.ped, slot);
-    if (OrcWeaponAudioStartLoopSource(buf, lp, ctx.ped, src)) {
-        OrcWeaponAudioMarkSuppressVanilla();
-        return true;
-    }
-    return false;
+    if (const auto it = g_managedSounds.find(slot); it != g_managedSounds.end())
+        OrcWeaponAudioStopLoopSource(it->second.source);
+    g_managedSounds.insert_or_assign(slot, managed);
+    return slot;
 }
 
-static void OrcStopLoopSlot(CPed* ped, OrcLoopSlot slot);
-static void OrcStopChainsawLoops(CPed* ped);
-
-static CPed* OrcWeaponAudioResolvePedFromBase(CAEAudioEntity* base) {
-    return OrcWeaponAudioResolvePedFromSoundBase(base);
+static void __fastcall OrcCalculateVolumeDetour(CAESound* sound, void*) {
+    reinterpret_cast<CalculateVolume>(kCalculateVolumeAddress)(sound);
+    if (!OrcWeaponAudioCanPlayCustom() || g_managedSounds.empty())
+        return;
+    const auto it = g_managedSounds.find(sound);
+    if (it != g_managedSounds.end() && OrcSoundStillAlive(*sound, it->second) &&
+        (!it->second.event->loop || it->second.source))
+        sound->m_fFinalVolume = -100.0f;
 }
 
-static bool OrcWeaponAudioCustomPathForVanillaSfx(int bank, int sfx, const char** outSuffix, OrcWeaponSoundClass* outClass) {
-    if (!outSuffix || !outClass)
-        return false;
-    *outSuffix = nullptr;
-    const int sfxId = sfx;
-    const int bankId = bank;
-    switch (sfxId) {
-    case 28:
-        if (bankId == 5) {
-            *outSuffix = "_spraycan_sprayloop";
-            *outClass = OrcWeaponSoundClass::Loop;
-            return true;
-        }
+bool OrcWeaponAudioHasPlayableFireLoop(const OrcWeaponAudioStemContext& ctx) {
+    const OrcSoundEvent* event = nullptr;
+    switch (ctx.weaponType) {
+    case WEAPONTYPE_FTHROWER:
+        if (g_redirected[4])
+            event = &kFlameFire;
         break;
-    case 9:
-        if (bankId == 5) {
-            *outSuffix = "_extinguisher_loop";
-            *outClass = OrcWeaponSoundClass::Loop;
-            return true;
-        }
+    case WEAPONTYPE_SPRAYCAN:
+        if (g_redirected[5])
+            event = &kSpray;
         break;
-    case 10:
-    case 83:
-    case 26:
-        if (bankId == 5 || bankId == 19) {
-            if (sfxId == 26) {
-                *outSuffix = "_flamethrower_fire";
-                *outClass = OrcWeaponSoundClass::Loop;
-                return true;
-            }
-            if (sfxId == 83) {
-                *outSuffix = "_flamethrower_start";
-                *outClass = OrcWeaponSoundClass::Shoot;
-                return true;
-            }
-            if (sfxId == 10) {
-                *outSuffix = "_flamethrower_idlegasloop";
-                *outClass = OrcWeaponSoundClass::Loop;
-                return true;
-            }
-        }
-        break;
-    case 14:
-        if (bankId == 5) {
-            *outSuffix = "_minigun_barrelspinloop";
-            *outClass = OrcWeaponSoundClass::MinigunSpin;
-            return true;
-        }
-        break;
-    case 63:
-        if (bankId == 5) {
-            *outSuffix = "_minigun_barrelspinend";
-            *outClass = OrcWeaponSoundClass::MinigunSpinEnd;
-            return true;
-        }
-        break;
-    case 15:
-    case 16:
-    case 11:
-    case 12:
-    case 13:
-        if (bankId == 5) {
-            *outSuffix = "_minigun_fireloop";
-            *outClass = OrcWeaponSoundClass::Loop;
-            return true;
-        }
-        break;
-    case 1:
-        if (bankId == 40) {
-            *outSuffix = "_chainsaw_idle";
-            *outClass = OrcWeaponSoundClass::Loop;
-            return true;
-        }
-        break;
-    case 0:
-        if (bankId == 40) {
-            *outSuffix = "_chainsaw_active";
-            *outClass = OrcWeaponSoundClass::Loop;
-            return true;
-        }
-        break;
-    case 7:
-    case 8:
-        if (bankId == 3) {
-            *outSuffix = "_chainsaw_cuttingflesh";
-            *outClass = OrcWeaponSoundClass::Loop;
-            return true;
-        }
-        break;
-    case 2:
-        if (bankId == 40) {
-            *outSuffix = "_chainsaw_stop";
-            *outClass = OrcWeaponSoundClass::ChainsawStop;
-            return true;
-        }
+    case WEAPONTYPE_EXTINGUISHER:
+        if (g_redirected[5])
+            event = &kExtinguisher;
         break;
     default:
         break;
     }
-    return false;
+    return event && OrcNativeRequestSound() && OrcWeaponAudioResolveFirstPlayableAudioBuffer(ctx, event->suffix);
 }
 
-bool OrcWeaponAudioHandleVanillaSfx(CAESound* snd) {
-    if (!snd || !g_weaponCustomSounds || !g_weaponReplacementEnabled)
+bool OrcWeaponAudioTryHandleMinigunEvent(const OrcWeaponAudioStemContext& ctx, CAEWeaponAudioEntity*, int audioEventId) {
+    const bool spin = audioEventId == AE_WEAPON_FIRE_MINIGUN_NO_AMMO;
+    if (!spin && audioEventId != AE_WEAPON_FIRE && audioEventId != AE_WEAPON_FIRE_MINIGUN_AMMO)
         return false;
 
-    const char* suffix = nullptr;
-    OrcWeaponSoundClass cls = OrcWeaponSoundClass::Loop;
-    if (!OrcWeaponAudioCustomPathForVanillaSfx(snd->m_nBankSlotId, snd->m_nSoundIdInSlot, &suffix, &cls))
-        return false;
-
-    CAEAudioEntity* base = snd->m_pBaseAudio;
-    if (!base)
-        return false;
-    CPed* ped = OrcWeaponAudioResolvePedFromBase(base);
-    if (!ped)
-        return false;
-
-    int weaponType = static_cast<int>(WEAPONTYPE_UNARMED);
-    if (ped->m_nSelectedWepSlot >= 0 && ped->m_nSelectedWepSlot < 13)
-        weaponType = static_cast<int>(ped->m_aWeapons[ped->m_nSelectedWepSlot].m_eWeaponType);
-
-    OrcWeaponAudioStemContext ctx;
-    if (!OrcWeaponAudioTryBuildStemContext(ped, weaponType, ctx)) {
-        static const eWeaponType kFallback[] = {WEAPONTYPE_MINIGUN, WEAPONTYPE_CHAINSAW, WEAPONTYPE_FTHROWER, WEAPONTYPE_SPRAYCAN,
-            WEAPONTYPE_EXTINGUISHER};
-        bool ok = false;
-        for (eWeaponType wt : kFallback) {
-            if (OrcWeaponAudioTryBuildStemContext(ped, static_cast<int>(wt), ctx)) {
-                ok = true;
-                break;
-            }
-        }
-        if (!ok)
-            return false;
-    }
-
-    std::string path;
-    if (!OrcWeaponAudioResolveFirstExistingAudioPath(ctx, suffix, path))
-        return false;
-
-    if (strcmp(suffix, "_minigun_fireloop") == 0) {
-        if (OrcPedIsMinigunFiring(ped)) {
-            if (!OrcWeaponAudioIsLoopSourcePlaying(OrcLoopRef(ped, OrcLoop_MinigunFire)))
-                OrcTryStartLoopSuffix(ctx, suffix, OrcLoop_MinigunFire);
-            OrcTouchMinigunFireHold(ped);
-        } else if (!OrcPedWantsMinigunFireLoop(ped)) {
-            OrcClearMinigunFireHold(ped);
-            OrcStopLoopSlot(ped, OrcLoop_MinigunFire);
-        }
-        OrcWeaponAudioMarkSuppressVanilla();
-        return true;
-    }
-
-    if (cls == OrcWeaponSoundClass::MinigunSpin) {
-        (void)OrcTryStartLoopSuffix(ctx, suffix, OrcLoop_MinigunBarrelSpin);
-        OrcWeaponAudioMarkSuppressVanilla();
-        return true;
-    }
-    if (cls == OrcWeaponSoundClass::MinigunSpinEnd) {
-        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped))) {
-            OrcStopLoopSlot(ped, OrcLoop_MinigunBarrelSpin);
-            OrcWeaponAudioMarkSuppressVanilla();
+    CPed* ped = ctx.ped;
+    const unsigned now = CTimer::m_snTimeInMilliseconds;
+    const int pedRef = OrcSafeGetPedRef(ped);
+    const auto existing = g_minigunLoops.find(ped);
+    if (existing != g_minigunLoops.end()) {
+        OrcMinigunLoop& loop = existing->second;
+        if (loop.pedRef == pedRef && loop.spin == spin && OrcWeaponAudioIsLoopSourcePlaying(loop.source)) {
+            loop.lastEventTime = now;
             return true;
         }
+        OrcWeaponAudioStopLoopSource(loop.source);
+        g_minigunLoops.erase(existing);
+    }
+
+    ALuint source = 0;
+    const char* suffix = spin ? "_minigun_barrelspinloop" : "_minigun_fireloop";
+    if (!OrcTryStartLoop(ctx, suffix, source))
         return false;
-    }
-    if (cls == OrcWeaponSoundClass::ChainsawStop) {
-        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped))) {
-            OrcStopChainsawLoops(ped);
-            OrcWeaponAudioMarkSuppressVanilla();
-            return true;
-        }
-        return false;
-    }
-    if (cls == OrcWeaponSoundClass::Shoot) {
-        if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped))) {
-            OrcWeaponAudioMarkSuppressVanilla();
-            return true;
-        }
-        return false;
-    }
-    if (cls == OrcWeaponSoundClass::Loop) {
-        struct Map {
-            const char* suffix;
-            OrcLoopSlot slot;
-        };
-        static const Map kMap[] = {
-            {"_spraycan_sprayloop", OrcLoop_Spraycan},
-            {"_extinguisher_loop", OrcLoop_Extinguisher},
-            {"_flamethrower_fire", OrcLoop_FlameFire},
-            {"_flamethrower_idlegasloop", OrcLoop_FlameGasIdle},
-            {"_chainsaw_idle", OrcLoop_ChainsawIdle},
-            {"_chainsaw_active", OrcLoop_ChainsawActive},
-            {"_chainsaw_cuttingflesh", OrcLoop_ChainsawCutting},
-        };
-        for (const Map& m : kMap) {
-            if (strcmp(suffix, m.suffix) == 0) {
-                if (OrcTryStartLoopSuffix(ctx, suffix, m.slot)) {
-                    OrcWeaponAudioMarkSuppressVanilla();
-                    return true;
-                }
-                OrcLogInfoThrottled(402, 800, "weapon audio: loop start failed stem=%s suffix=%s path=%s", ctx.stem.c_str(), suffix,
-                    path.c_str());
-                return false;
-            }
-        }
-        return false;
-    }
-
-    return false;
-}
-
-static void __fastcall CalculateVolume_Detour(CAESound* self, void* /*edx*/) {
-    if (self && OrcWeaponAudioHandleVanillaSfx(self))
-        return;
-    if (g_CalculateVolume_Orig)
-        g_CalculateVolume_Orig(self);
-}
-
-static bool OrcTryStartLoopSuffixForPed(CPed* ped, int weaponType, const char* suffix, OrcLoopSlot slot) {
-    OrcWeaponAudioStemContext ctx;
-    if (!OrcWeaponAudioTryBuildStemContext(ped, weaponType, ctx))
-        return false;
-    return OrcTryStartLoopSuffix(ctx, suffix, slot);
-}
-
-void OrcWeaponAudioLoopsStopForPed(CPed* ped) {
-    if (!ped)
-        return;
-    auto it = g_pedLoops.find(ped);
-    if (it == g_pedLoops.end())
-        return;
-    for (ALuint& src : it->second)
-        OrcWeaponAudioStopLoopSource(src);
-    g_pedLoops.erase(it);
-}
-
-void OrcWeaponAudioLoopsStopAll() {
-    for (auto& kv : g_pedLoops) {
-        for (ALuint& src : kv.second)
-            OrcWeaponAudioStopLoopSource(src);
-    }
-    g_pedLoops.clear();
-}
-
-static void OrcStopLoopSlot(CPed* ped, OrcLoopSlot slot) {
-    if (!ped)
-        return;
-    auto it = g_pedLoops.find(ped);
-    if (it == g_pedLoops.end())
-        return;
-    OrcWeaponAudioStopLoopSource(it->second[static_cast<size_t>(slot)]);
-}
-
-static void OrcStopFlamethrowerLoops(CPed* ped) {
-    OrcStopLoopSlot(ped, OrcLoop_FlameFire);
-    OrcStopLoopSlot(ped, OrcLoop_FlameGasIdle);
-}
-
-static void OrcStopMinigunLoops(CPed* ped) {
-    OrcStopLoopSlot(ped, OrcLoop_MinigunFire);
-    OrcStopLoopSlot(ped, OrcLoop_MinigunBarrelSpin);
-}
-
-static void OrcStopChainsawLoops(CPed* ped) {
-    OrcStopLoopSlot(ped, OrcLoop_ChainsawIdle);
-    OrcStopLoopSlot(ped, OrcLoop_ChainsawActive);
-    OrcStopLoopSlot(ped, OrcLoop_ChainsawCutting);
-}
-
-static void __fastcall PlayFlameThrowerSounds_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPhysical* entity, short sfx1,
-    short sfx2, int audioEventId, float audability, float speed) {
-    (void)audioEventId;
-    (void)audability;
-    (void)speed;
-
-    bool handled = false;
-    if (g_weaponCustomSounds && g_weaponReplacementEnabled && self) {
-        CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
-        if (!ped)
-            ped = OrcWeaponAudioPedFromWeaponAudio(self);
-        const int wt = static_cast<int>(WEAPONTYPE_FTHROWER);
-        OrcWeaponAudioStemContext ctx;
-        if (ped && OrcWeaponAudioTryBuildStemContext(ped, wt, ctx)) {
-            if (sfx1 == 83 &&
-                OrcWeaponAudioTryPlaySuffix(ctx, "_flamethrower_start", OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped)))
-                handled = true;
-            if (sfx2 == 26 && OrcTryStartLoopSuffix(ctx, "_flamethrower_fire", OrcLoop_FlameFire))
-                handled = true;
-        }
-    }
-
-    if (!handled && g_PlayFlameThrowerSounds_Orig)
-        g_PlayFlameThrowerSounds_Orig(self, entity, sfx1, sfx2, audioEventId, audability, speed);
-}
-
-static void __fastcall PlayFlameIdleGas_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPhysical* entity) {
-    bool handled = false;
-    if (g_weaponCustomSounds && g_weaponReplacementEnabled && self) {
-        CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
-        if (!ped)
-            ped = OrcWeaponAudioPedFromWeaponAudio(self);
-        if (ped &&
-            OrcTryStartLoopSuffixForPed(ped, static_cast<int>(WEAPONTYPE_FTHROWER), "_flamethrower_idlegasloop",
-                OrcLoop_FlameGasIdle))
-            handled = true;
-    }
-    if (!handled && g_PlayFlameIdleGas_Orig)
-        g_PlayFlameIdleGas_Orig(self, entity);
-}
-
-static void __fastcall StopFlameIdleGas_Detour(CAEWeaponAudioEntity* self, void* /*edx*/) {
-    if (self) {
-        CPed* ped = OrcWeaponAudioPedFromWeaponAudio(self);
-        if (ped)
-            OrcStopLoopSlot(ped, OrcLoop_FlameGasIdle);
-    }
-    if (g_StopFlameIdleGas_Orig)
-        g_StopFlameIdleGas_Orig(self);
-}
-
-static void __fastcall PlayWeaponLoopSound_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPhysical* entity, short sfxId,
-    int audioEventId, float audability, float speed, unsigned finalEvent) {
-    if (g_PlayWeaponLoopSound_Orig)
-        g_PlayWeaponLoopSound_Orig(self, entity, sfxId, audioEventId, audability, speed, finalEvent);
-
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || !self)
-        return;
-
-    CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
-    if (!ped)
-        ped = OrcWeaponAudioPedFromWeaponAudio(self);
-    if (!ped)
-        return;
-
-    switch (sfxId) {
-    case 28:
-        if (!OrcWeaponAudioIsLoopSourcePlaying(OrcLoopRef(ped, OrcLoop_Spraycan)))
-            OrcTryStartLoopSuffixForPed(ped, static_cast<int>(WEAPONTYPE_SPRAYCAN), "_spraycan_sprayloop", OrcLoop_Spraycan);
-        break;
-    case 9:
-        if (!OrcWeaponAudioIsLoopSourcePlaying(OrcLoopRef(ped, OrcLoop_Extinguisher)))
-            OrcTryStartLoopSuffixForPed(ped, static_cast<int>(WEAPONTYPE_EXTINGUISHER), "_extinguisher_loop", OrcLoop_Extinguisher);
-        break;
-    case 14:
-        if (!OrcPedIsMinigunFiring(ped)) {
-            OrcClearMinigunFireHold(ped);
-            OrcStopLoopSlot(ped, OrcLoop_MinigunFire);
-        }
-        if (!OrcWeaponAudioIsLoopSourcePlaying(OrcLoopRef(ped, OrcLoop_MinigunBarrelSpin)))
-            OrcTryStartLoopSuffixForPed(ped, static_cast<int>(WEAPONTYPE_MINIGUN), "_minigun_barrelspinloop", OrcLoop_MinigunBarrelSpin);
-        break;
-    default:
-        break;
-    }
-}
-
-static void __fastcall PlayMiniGunFireSounds_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPhysical* entity, int audioEventId) {
-    if (g_PlayMiniGunFire_Orig)
-        g_PlayMiniGunFire_Orig(self, entity, audioEventId);
-
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || !self)
-        return;
-
-    CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
-    if (!ped)
-        ped = OrcWeaponAudioPedFromWeaponAudio(self);
-    if (ped && OrcPedIsMinigunFiring(ped))
-        OrcWeaponAudioLoopsTryPlayMinigunFireForPed(ped, self);
-}
-
-static void __fastcall PlayMiniGunStopSound_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPhysical* entity) {
-    CPed* ped = nullptr;
-    if (self) {
-        ped = OrcWeaponAudioPedFromPhysical(entity);
-        if (!ped)
-            ped = OrcWeaponAudioPedFromWeaponAudio(self);
-        if (ped) {
-            OrcClearMinigunFireHold(ped);
-            OrcWeaponAudioLoopsStopMinigunForPed(ped);
-        }
-    }
-    if (g_PlayMiniGunStop_Orig)
-        g_PlayMiniGunStop_Orig(self, entity);
-    if (ped)
-        OrcLogInfoThrottled(407, 800, "weapon audio: minigun stop");
-}
-
-static bool OrcVanillaSfxIsMinigunFireLoop(int bank, int sfx) {
-    return bank == 5 && (sfx == 15 || sfx == 16 || sfx == 11 || sfx == 12 || sfx == 13);
-}
-
-static void OrcStopLoopSlotForVanillaSfx(CPed* ped, int bank, int sfx) {
-    if (!ped)
-        return;
-    if (OrcVanillaSfxIsMinigunFireLoop(bank, sfx)) {
-        if (OrcPedWantsMinigunFireLoop(ped))
-            return;
-        OrcClearMinigunFireHold(ped);
-        OrcStopLoopSlot(ped, OrcLoop_MinigunFire);
-        return;
-    }
-    if (bank == 5 && (sfx == 14 || sfx == 63))
-        OrcStopLoopSlot(ped, OrcLoop_MinigunBarrelSpin);
-    if (bank == 5 && sfx == 28)
-        OrcStopLoopSlot(ped, OrcLoop_Spraycan);
-    if (bank == 5 && sfx == 9)
-        OrcStopLoopSlot(ped, OrcLoop_Extinguisher);
-    if ((bank == 5 || bank == 19) && sfx == 26)
-        OrcStopLoopSlot(ped, OrcLoop_FlameFire);
-    if (bank == 40 && sfx == 1)
-        OrcStopLoopSlot(ped, OrcLoop_ChainsawIdle);
-    if (bank == 40 && sfx == 0) {
-        OrcStopLoopSlot(ped, OrcLoop_ChainsawActive);
-        OrcStopLoopSlot(ped, OrcLoop_ChainsawCutting);
-    }
-}
-
-static void OrcStopLoopsByVanillaSfx(CAESound* snd) {
-    if (!snd)
-        return;
-    const int sfx = snd->m_nSoundIdInSlot;
-    const int bank = snd->m_nBankSlotId;
-    if (bank != 5 && bank != 19 && bank != 40)
-        return;
-
-    CPed* ped = nullptr;
-    if (snd->m_pBaseAudio)
-        ped = OrcWeaponAudioResolvePedFromBase(snd->m_pBaseAudio);
-    if (ped) {
-        OrcStopLoopSlotForVanillaSfx(ped, bank, sfx);
-        return;
-    }
-
-    for (auto& kv : g_pedLoops)
-        OrcStopLoopSlotForVanillaSfx(kv.first, bank, sfx);
-}
-
-static void __fastcall StopVanillaSound_Detour(CAESound* self, void* /*edx*/) {
-    OrcStopLoopsByVanillaSfx(self);
-    if (g_StopSound_Orig)
-        g_StopSound_Orig(self);
-}
-
-static void OrcUpdateChainsawLoops(CAEWeaponAudioEntity* self, CPed* ped) {
-    if (!self || !ped)
-        return;
-    const int wt = static_cast<int>(WEAPONTYPE_CHAINSAW);
-    OrcWeaponAudioStemContext ctx;
-    if (!OrcWeaponAudioTryBuildStemContext(ped, wt, ctx))
-        return;
-
-    const int st = self->m_nChainsawSoundState;
-    if (st != kChainsawStateCutting)
-        OrcStopLoopSlot(ped, OrcLoop_ChainsawCutting);
-
-    switch (st) {
-    case kChainsawStateIdle:
-        OrcTryStartLoopSuffix(ctx, "_chainsaw_idle", OrcLoop_ChainsawIdle);
-        break;
-    case kChainsawStateActive:
-        OrcTryStartLoopSuffix(ctx, "_chainsaw_active", OrcLoop_ChainsawActive);
-        break;
-    case kChainsawStateCutting:
-        OrcTryStartLoopSuffix(ctx, "_chainsaw_cuttingflesh", OrcLoop_ChainsawCutting);
-        break;
-    case kChainsawStateStopping:
-    case kChainsawStateStopped:
-        OrcWeaponAudioTryPlaySuffix(ctx, "_chainsaw_stop", OrcLoopGain(), OrcWeaponAudioSpatialForPed(ped));
-        OrcStopChainsawLoops(ped);
-        break;
-    default:
-        break;
-    }
-}
-
-static void __fastcall ReportChainsawEvent_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPed* ped, int aevent) {
-    (void)aevent;
-    if (g_ReportChainsaw_Orig)
-        g_ReportChainsaw_Orig(self, ped, aevent);
-
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || !self)
-        return;
-    ped = OrcWeaponAudioValidatePedCandidate(ped, "chainsawEvent.ped");
-    if (!ped)
-        return;
-
-    OrcUpdateChainsawLoops(self, ped);
-}
-
-bool OrcWeaponAudioLoopsTryPlayMinigunFireForPed(CPed* ped, CAEWeaponAudioEntity* audioEntity) {
-    (void)audioEntity;
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled || !ped)
-        return false;
-    if (!OrcPedIsMinigunFiring(ped)) {
-        return OrcWeaponAudioIsLoopSourcePlaying(OrcLoopRef(ped, OrcLoop_MinigunFire));
-    }
-    if (OrcWeaponAudioIsLoopSourcePlaying(OrcLoopRef(ped, OrcLoop_MinigunFire)))
-        return true;
-    const int wt = static_cast<int>(WEAPONTYPE_MINIGUN);
-    OrcWeaponAudioStemContext ctx;
-    if (!OrcWeaponAudioTryBuildStemContext(ped, wt, ctx)) {
-        OrcLogInfoThrottled(404, 1200, "weapon audio: minigun stem miss pedRef=%d", OrcSafeGetPedRef(ped));
-        return false;
-    }
-    std::string tmp;
-    if (!OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_minigun_fireloop", tmp)) {
-        OrcLogInfoThrottled(405, 1200, "weapon audio: minigun fireloop file miss stem=%s dir=%s", ctx.stem.c_str(), ctx.dir.c_str());
-        return false;
-    }
-    const bool wasPlaying = OrcWeaponAudioIsLoopSourcePlaying(OrcLoopRef(ped, OrcLoop_MinigunFire));
-    if (!OrcTryStartLoopSuffix(ctx, "_minigun_fireloop", OrcLoop_MinigunFire))
-        return false;
-    OrcTouchMinigunFireHold(ped);
-    if (!wasPlaying)
-        OrcLogInfoThrottled(406, 500, "weapon audio: minigun OpenAL fireloop stem=%s path=%s", ctx.stem.c_str(), tmp.c_str());
+    g_minigunLoops.emplace(ped, OrcMinigunLoop{pedRef, source, spin, now});
+    OrcLogInfoThrottled(406, 500, "weapon audio: OpenAL minigun %s stem=%s", spin ? "spin" : "fireloop", ctx.stem.c_str());
     return true;
 }
 
-void OrcWeaponAudioLoopsStopMinigunForPed(CPed* ped) {
-    OrcClearMinigunFireHold(ped);
-    OrcStopMinigunLoops(ped);
+void OrcWeaponAudioLoopsStopAll() {
+    for (auto& entry : g_managedSounds)
+        OrcWeaponAudioStopLoopSource(entry.second.source);
+    g_managedSounds.clear();
+    for (auto& entry : g_minigunLoops)
+        OrcWeaponAudioStopLoopSource(entry.second.source);
+    g_minigunLoops.clear();
 }
 
-static void OrcPruneMinigunLoopsNotFiring() {
-    std::vector<CPed*> stop;
-    stop.reserve(4);
-    for (auto& kv : g_pedLoops) {
-        CPed* ped = kv.first;
-        if (!ped)
+void OrcWeaponAudioLoopsOnGameProcess() {
+    const float gain = OrcLoopGain();
+    for (auto it = g_managedSounds.begin(); it != g_managedSounds.end();) {
+        OrcManagedSound& sound = it->second;
+        if (!OrcSoundStillAlive(*it->first, sound) ||
+            (sound.event->loop && !OrcPedStillEquipped(sound.ped, sound.pedRef, sound.event->weapon))) {
+            OrcWeaponAudioStopLoopSource(sound.source);
+            it = g_managedSounds.erase(it);
             continue;
-        if (!kv.second[static_cast<size_t>(OrcLoop_MinigunFire)])
-            continue;
-        if (!OrcPedHasMinigunEquipped(ped) || !OrcPedWantsMinigunFireLoop(ped))
-            stop.push_back(ped);
-    }
-    for (CPed* ped : stop) {
-        OrcClearMinigunFireHold(ped);
-        OrcStopMinigunLoops(ped);
-    }
-}
+        }
 
-bool OrcWeaponAudioShouldSkipWeaponFireOneShot(int weaponType, const OrcWeaponAudioStemContext& ctx) {
-    switch (weaponType) {
-    case WEAPONTYPE_MINIGUN: {
-        std::string tmp;
-        return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_minigun_fireloop", tmp);
+        if (sound.event->loop) {
+            const bool cutting = sound.cuttingBuffer && sound.ped->m_weaponAudio.m_nChainsawSoundState == 2;
+            const ALuint wantedBuffer = cutting ? sound.cuttingBuffer : sound.buffer;
+            if (wantedBuffer != sound.playingBuffer) {
+                OrcWeaponAudioStopLoopSource(sound.source);
+                OrcWeaponAudioPlayParams params = sound.params;
+                params.gain = gain;
+                params.pitch = sound.classPitch * OrcTimeScale();
+                OrcWeaponAudioStartLoopSource(wantedBuffer, params, sound.ped, sound.source);
+                sound.playingBuffer = wantedBuffer;
+            }
+            if (sound.source)
+                OrcWeaponAudioSyncLoopSourceWorldPos(sound.source, sound.ped, gain);
+        }
+        ++it;
     }
-    case WEAPONTYPE_FTHROWER: {
-        std::string tmp;
-        return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_flamethrower_fire", tmp);
-    }
-    case WEAPONTYPE_CHAINSAW:
-        return OrcWeaponAudioHasLoopCustomAudio(ctx);
-    case WEAPONTYPE_SPRAYCAN: {
-        std::string tmp;
-        return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_spraycan_sprayloop", tmp);
-    }
-    case WEAPONTYPE_EXTINGUISHER: {
-        std::string tmp;
-        return OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_extinguisher_loop", tmp);
-    }
-    default:
-        return false;
+
+    const unsigned now = CTimer::m_snTimeInMilliseconds;
+    for (auto it = g_minigunLoops.begin(); it != g_minigunLoops.end();) {
+        CPed* ped = it->first;
+        auto& loop = it->second;
+        const bool equipped = OrcPedStillEquipped(ped, loop.pedRef, WEAPONTYPE_MINIGUN);
+        const bool expired = now - loop.lastEventTime > 300;
+        if (equipped && !expired) {
+            OrcWeaponAudioSyncLoopSourceWorldPos(loop.source, ped, gain);
+            if (loop.source) {
+                ++it;
+                continue;
+            }
+        }
+        OrcWeaponAudioStopLoopSource(loop.source);
+        if (equipped && expired) {
+            OrcWeaponAudioStemContext ctx;
+            if (OrcWeaponAudioTryBuildStemContext(ped, WEAPONTYPE_MINIGUN, ctx))
+                OrcWeaponAudioTryPlaySuffix(ctx, "_minigun_barrelspinend", gain, OrcWeaponAudioSpatialForPed(ped));
+        }
+        it = g_minigunLoops.erase(it);
     }
 }
 
 void OrcWeaponAudioLoopsEnsureInstalled() {
-    if (g_loopHooksInstalled)
+    if (g_calculateVolumeRedirected)
         return;
-
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_PlayFlameThrowerSounds), reinterpret_cast<void*>(&PlayFlameThrowerSounds_Detour),
-            reinterpret_cast<void**>(&g_PlayFlameThrowerSounds_Orig)) != MH_OK) {
-        OrcLogError("weapon audio loops: MH_CreateHook PlayFlameThrowerSounds failed");
-        return;
-    }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_PlayFlameThrowerIdleGasLoop),
-            reinterpret_cast<void*>(&PlayFlameIdleGas_Detour), reinterpret_cast<void**>(&g_PlayFlameIdleGas_Orig)) != MH_OK) {
-        OrcLogError("weapon audio loops: MH_CreateHook PlayFlameThrowerIdleGasLoop failed");
+    if (OrcCallTarget(kCalculateVolumeCall) != kCalculateVolumeAddress ||
+        std::memcmp(reinterpret_cast<const void*>(kCalculateVolumeAddress), kCalculateVolumePrologue.data(),
+            kCalculateVolumePrologue.size()) != 0) {
+        OrcLogError("weapon audio loops: unexpected CAESound::CalculateVolume call");
         return;
     }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_StopFlameThrowerIdleGasLoop), reinterpret_cast<void*>(&StopFlameIdleGas_Detour),
-            reinterpret_cast<void**>(&g_StopFlameIdleGas_Orig)) != MH_OK) {
-        OrcLogError("weapon audio loops: MH_CreateHook StopFlameThrowerIdleGasLoop failed");
+    const auto calculateVolumeDetour = reinterpret_cast<uintptr_t>(&OrcCalculateVolumeDetour);
+    patch::RedirectCall(kCalculateVolumeCall, calculateVolumeDetour);
+    g_calculateVolumeRedirected = OrcCallTarget(kCalculateVolumeCall) == calculateVolumeDetour;
+    if (!g_calculateVolumeRedirected) {
+        OrcLogError("weapon audio loops: CalculateVolume redirect failed");
         return;
-    }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_ReportChainsawEvent), reinterpret_cast<void*>(&ReportChainsawEvent_Detour),
-            reinterpret_cast<void**>(&g_ReportChainsaw_Orig)) != MH_OK) {
-        OrcLogError("weapon audio loops: MH_CreateHook ReportChainsawEvent failed");
-        return;
-    }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_PlayMiniGunFireSounds), reinterpret_cast<void*>(&PlayMiniGunFireSounds_Detour),
-            reinterpret_cast<void**>(&g_PlayMiniGunFire_Orig)) != MH_OK) {
-        OrcLogError("weapon audio loops: MH_CreateHook PlayMiniGunFireSounds failed");
-        return;
-    }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_PlayMiniGunStopSound), reinterpret_cast<void*>(&PlayMiniGunStopSound_Detour),
-            reinterpret_cast<void**>(&g_PlayMiniGunStop_Orig)) != MH_OK) {
-        OrcLogError("weapon audio loops: MH_CreateHook PlayMiniGunStopSound failed");
-        return;
-    }
-    if (!g_calculateVolumeHookInstalled) {
-        if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CAESound_CalculateVolume),
-                reinterpret_cast<void*>(&CalculateVolume_Detour), reinterpret_cast<void**>(&g_CalculateVolume_Orig)) != MH_OK) {
-            OrcLogError("weapon audio loops: MH_CreateHook CAESound::CalculateVolume failed");
-            return;
-        }
-        g_calculateVolumeHookInstalled = true;
     }
 
-    MH_EnableHook(reinterpret_cast<void*>(kAddr_PlayFlameThrowerSounds));
-    MH_EnableHook(reinterpret_cast<void*>(kAddr_PlayFlameThrowerIdleGasLoop));
-    MH_EnableHook(reinterpret_cast<void*>(kAddr_StopFlameThrowerIdleGasLoop));
-    MH_EnableHook(reinterpret_cast<void*>(kAddr_ReportChainsawEvent));
-    MH_EnableHook(reinterpret_cast<void*>(kAddr_PlayMiniGunFireSounds));
-    MH_EnableHook(reinterpret_cast<void*>(kAddr_PlayMiniGunStopSound));
-    if (g_calculateVolumeHookInstalled)
-        MH_EnableHook(reinterpret_cast<void*>(kAddr_CAESound_CalculateVolume));
-    g_loopHooksInstalled = true;
-
-    if (!g_loopRedirectsInstalled) {
-        const uintptr_t loopTarget = OrcResolveCallTarget(kCallSite_PlayWeaponLoopSoundA);
-        if (loopTarget) {
-            g_PlayWeaponLoopSound_Orig = reinterpret_cast<PlayWeaponLoopSound_t>(loopTarget);
-            patch::RedirectCall(kCallSite_PlayWeaponLoopSoundA, reinterpret_cast<void*>(&PlayWeaponLoopSound_Detour));
-            patch::RedirectCall(kCallSite_PlayWeaponLoopSoundB, reinterpret_cast<void*>(&PlayWeaponLoopSound_Detour));
-        } else {
-            OrcLogError("weapon audio loops: PlayWeaponLoopSound call site 0x%08X is not E8", (unsigned)kCallSite_PlayWeaponLoopSoundA);
-        }
-
-        const uintptr_t stopTarget = OrcResolveCallTarget(kCallSite_StopFlamethrowerFire);
-        if (stopTarget) {
-            g_StopSound_Orig = reinterpret_cast<CAESound_StopSoundAndForget_t>(stopTarget);
-            patch::RedirectCall(kCallSite_StopFlamethrowerFire, reinterpret_cast<void*>(&StopVanillaSound_Detour));
-            patch::RedirectCall(kCallSite_StopSpraycan, reinterpret_cast<void*>(&StopVanillaSound_Detour));
-            patch::RedirectCall(kCallSite_StopExtinguisher, reinterpret_cast<void*>(&StopVanillaSound_Detour));
-            patch::RedirectCall(kCallSite_StopMinigunA, reinterpret_cast<void*>(&StopVanillaSound_Detour));
-            patch::RedirectCall(kCallSite_StopMinigunB, reinterpret_cast<void*>(&StopVanillaSound_Detour));
-            patch::RedirectCall(kCallSite_StopChainsaw, reinterpret_cast<void*>(&StopVanillaSound_Detour));
-            g_loopRedirectsInstalled = true;
-        } else {
-            OrcLogError("weapon audio loops: stop sound call site 0x%08X is not E8", (unsigned)kCallSite_StopFlamethrowerFire);
-        }
-    }
-
-    if (g_loopHooksInstalled && g_loopRedirectsInstalled)
-        OrcLogInfo("weapon audio loop hooks installed");
-}
-
-void OrcWeaponAudioLoopsOnGameProcess() {
-    if (!g_weaponCustomSounds || !OrcWeaponAudioHasActiveContext())
-        return;
-    if (!OrcWeaponAudioEnsureAlContextCurrent())
-        return;
-    for (auto it = g_pedLoops.begin(); it != g_pedLoops.end();) {
-        CPed* ped = it->first;
-        if (!OrcWeaponAudioValidatePedCandidate(ped, "loopTick")) {
-            for (ALuint& src : it->second)
-                OrcWeaponAudioStopLoopSource(src);
-            it = g_pedLoops.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    OrcPruneMinigunLoopsNotFiring();
-    const float gain = OrcLoopGain();
-    for (auto& kv : g_pedLoops) {
-        CPed* ped = kv.first;
-        if (!ped)
+    const auto detour = reinterpret_cast<uintptr_t>(&OrcRequestSoundDetour);
+    unsigned installed = 0;
+    for (size_t i = 0; i < kRequestCallSites.size(); ++i) {
+        const uintptr_t site = kRequestCallSites[i];
+        if (OrcCallTarget(site) != kRequestSoundAddress) {
+            OrcLogError("weapon audio loops: unexpected sound request call at 0x%08X", static_cast<unsigned>(site));
             continue;
-        for (ALuint src : kv.second) {
-            if (src)
-                OrcWeaponAudioSyncLoopSourceWorldPos(src, ped, gain);
         }
+        patch::RedirectCall(site, detour);
+        g_redirected[i] = OrcCallTarget(site) == detour;
+        installed += g_redirected[i];
     }
-    OrcWeaponAudioUpdateLoopSources();
+    OrcLogInfo("weapon audio loops: installed %u sound request redirects", installed);
 }
 
 void OrcWeaponAudioLoopsShutdown() {
-    g_pedLoops.clear();
-    g_minigunFireHoldUntilTick.clear();
-    if (g_loopHooksInstalled) {
-        MH_DisableHook(reinterpret_cast<void*>(kAddr_PlayFlameThrowerSounds));
-        MH_DisableHook(reinterpret_cast<void*>(kAddr_PlayFlameThrowerIdleGasLoop));
-        MH_DisableHook(reinterpret_cast<void*>(kAddr_StopFlameThrowerIdleGasLoop));
-        MH_DisableHook(reinterpret_cast<void*>(kAddr_ReportChainsawEvent));
-        MH_DisableHook(reinterpret_cast<void*>(kAddr_PlayMiniGunFireSounds));
-        MH_DisableHook(reinterpret_cast<void*>(kAddr_PlayMiniGunStopSound));
-        if (g_calculateVolumeHookInstalled)
-            MH_DisableHook(reinterpret_cast<void*>(kAddr_CAESound_CalculateVolume));
-        MH_RemoveHook(reinterpret_cast<void*>(kAddr_PlayFlameThrowerSounds));
-        MH_RemoveHook(reinterpret_cast<void*>(kAddr_PlayFlameThrowerIdleGasLoop));
-        MH_RemoveHook(reinterpret_cast<void*>(kAddr_StopFlameThrowerIdleGasLoop));
-        MH_RemoveHook(reinterpret_cast<void*>(kAddr_ReportChainsawEvent));
-        MH_RemoveHook(reinterpret_cast<void*>(kAddr_PlayMiniGunFireSounds));
-        MH_RemoveHook(reinterpret_cast<void*>(kAddr_PlayMiniGunStopSound));
-        if (g_calculateVolumeHookInstalled) {
-            MH_RemoveHook(reinterpret_cast<void*>(kAddr_CAESound_CalculateVolume));
-            g_calculateVolumeHookInstalled = false;
-            g_CalculateVolume_Orig = nullptr;
-        }
-        g_loopHooksInstalled = false;
-        g_PlayFlameThrowerSounds_Orig = nullptr;
-        g_PlayFlameIdleGas_Orig = nullptr;
-        g_StopFlameIdleGas_Orig = nullptr;
-        g_ReportChainsaw_Orig = nullptr;
-        g_PlayMiniGunFire_Orig = nullptr;
-        g_PlayMiniGunStop_Orig = nullptr;
+    const auto detour = reinterpret_cast<uintptr_t>(&OrcRequestSoundDetour);
+    for (size_t i = 0; i < kRequestCallSites.size(); ++i) {
+        const uintptr_t site = kRequestCallSites[i];
+        if (g_redirected[i] && OrcCallTarget(site) == detour)
+            patch::RedirectCall(site, kRequestSoundAddress);
+        g_redirected[i] = false;
     }
-    g_loopRedirectsInstalled = false;
-    g_PlayWeaponLoopSound_Orig = nullptr;
-    g_StopSound_Orig = nullptr;
+    if (g_calculateVolumeRedirected &&
+        OrcCallTarget(kCalculateVolumeCall) == reinterpret_cast<uintptr_t>(&OrcCalculateVolumeDetour))
+        patch::RedirectCall(kCalculateVolumeCall, kCalculateVolumeAddress);
+    g_calculateVolumeRedirected = false;
+    OrcWeaponAudioLoopsStopAll();
 }

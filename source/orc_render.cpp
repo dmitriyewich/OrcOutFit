@@ -26,9 +26,9 @@ static bool OrcRwPointerLooksReadable(const void* ptr) {
 RwMatrix* OrcGetBoneMatrix(CPed* ped, int boneNodeId) {
     if (!ped || !ped->m_pRwClump) return nullptr;
     RpHAnimHierarchy* h = GetAnimHierarchyFromSkinClump(ped->m_pRwClump);
-    if (!h) return nullptr;
+    if (!h || !h->pMatrixArray) return nullptr;
     RwInt32 id = RpHAnimIDGetIndex(h, boneNodeId);
-    if (id < 0) return nullptr;
+    if (id < 0 || id >= h->numNodes) return nullptr;
     return &h->pMatrixArray[id];
 }
 
@@ -73,15 +73,6 @@ void OrcTryPedRemoveLighting(CPed* ped, bool lightingWasSetup) {
         removeLighting(ped, lightingWasSetup);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         OrcLogError("SEH CPed::RemoveLighting ex=0x%08X ped=%p", GetExceptionCode(), ped);
-    }
-}
-
-void OrcTryRpClumpRender(RpClump* clump) {
-    if (!clump) return;
-    __try {
-        RpClumpRender(clump);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogError("SEH RpClumpRender ex=0x%08X clump=%p", GetExceptionCode(), clump);
     }
 }
 

@@ -1,555 +1,599 @@
 #include "plugin.h"
 
-#include "CPed.h"
-#include "CPools.h"
-#include "CWeaponInfo.h"
-#include "CEntity.h"
-#include "CWeapon.h"
-#include "CVector.h"
 #include "CClumpModelInfo.h"
-#include "CTimer.h"
-#include "RenderWare.h"
-#include "eWeaponType.h"
+#include "CPed.h"
+#include "CVisibilityPlugins.h"
+#include "CWeapon.h"
+#include "CWeaponInfo.h"
+#include "Fx_c.h"
 
 #include <cmath>
 #include <cstring>
-
+#include <intrin.h>
 #include <windows.h>
 
 #include "external/MinHook/include/MinHook.h"
-
 #include "orc_app.h"
-#include "orc_render.h"
 #include "orc_log.h"
-#include "orc_types.h"
+#include "orc_render.h"
+#include "orc_weapon_assets.h"
+#include "orc_weapon_gunflash_state.h"
+#include "orc_weapon_metadata_cache.h"
 #include "orc_weapon_runtime.h"
+#include "samp_bridge.h"
 
-using namespace plugin;
+namespace {
+constexpr uintptr_t kDoGunFlash = 0x5DF340;
+constexpr uintptr_t kFireInstantHit = 0x73FB10;
+constexpr uintptr_t kFireHeldGun = 0x61EB10;
+constexpr uintptr_t kFireHeldRightCall = 0x624F0D;
+constexpr uintptr_t kFireHeldLeftCall = 0x624F1D;
 
-/// GTA SA 1.0 US — точки спавна FX выстрела (`muzzlePosn`); `origin` пули не трогаем.
-static constexpr uintptr_t kAddr_CWeapon_Fire = 0x742300;
-static constexpr uintptr_t kAddr_CWeapon_FireInstantHit = 0x73FB10;
-static constexpr uintptr_t kAddr_CPed_DoGunFlash = 0x5DF340;
-static constexpr uintptr_t kAddr_CPed_SetGunFlashAlpha = 0x5DF400;
+// Only the three visual calls in GTA SA 1.0 US FireInstantHit are redirected.
+// The same muzzle argument also participates in hit detection inside the original function.
+constexpr uintptr_t kAddLightCall = 0x740D68;
+constexpr uintptr_t kTriggerGunshotCall = 0x740DA7;
+constexpr uintptr_t kAddGunshellCall = 0x740E35;
+constexpr uintptr_t kAddLight = 0x7000E0;
+constexpr uintptr_t kTriggerGunshot = 0x4A0DE0;
+constexpr uintptr_t kAddGunshell = 0x73A3E0;
 
-static bool g_weaponFireFxHooksInstalled = false;
-static bool g_pedGunflashHooksInstalled = false;
+constexpr uintptr_t kGunflashProgressMax = 0x8D1370;
+constexpr uintptr_t kGunflashAlphaMax = 0x8D21DC;
+constexpr uintptr_t kGunflashDuration = 0x8D2E90;
 
-using CPed_DoGunFlash_orig_t = bool(__thiscall*)(CPed* self, int duration, bool isLeftHand);
-static CPed_DoGunFlash_orig_t g_CPedDoGunFlash_Orig = nullptr;
-using CPed_SetGunFlashAlpha_orig_t = void(__thiscall*)(CPed* self, bool rightHand);
-static CPed_SetGunFlashAlpha_orig_t g_CPedSetGunFlashAlpha_Orig = nullptr;
+using DoGunFlashFn = bool(__thiscall*)(CPed*, int, bool);
+using FireInstantHitFn = bool(__thiscall*)(
+    CWeapon*, CEntity*, CVector*, CVector*, CEntity*, CVector*, CVector*, bool, bool);
+using FireHeldGunFn = unsigned char(__thiscall*)(void*, CPed*, bool);
+using AddLightFn = void(__cdecl*)(
+    unsigned char, RwV3d, RwV3d, float, float, float, float, unsigned char, bool, CEntity*);
 
-static constexpr int kOrcMuzzleDeltaCacheMs = 160;
-static constexpr int kOrcMaxRwFrameAncestorsFx = 64;
+DoGunFlashFn g_doGunFlashOriginal = nullptr;
+FireInstantHitFn g_fireInstantHitOriginal = nullptr;
+FireHeldGunFn g_fireHeldGunOriginal = nullptr;
 
-struct OrcHeldMuzzleDeltaCache {
-    int pedRef = 0;
-    int wt = 0;
-    unsigned timeMs = 0;
-    float x = 0.0f;
-    float y = 0.0f;
-    float z = 0.0f;
-    float rx = 0.0f;
-    float ry = 0.0f;
-    float rz = 0.0f;
-    float scale = 1.0f;
-    RwV3d dw{};
+struct FiringHand {
+    CPed* ped;
+    bool left;
 };
+const FiringHand* g_firingHand = nullptr;
 
-static OrcHeldMuzzleDeltaCache s_lastHeldMuzzleDelta;
+struct ShotFx {
+    CPed* ped = nullptr;
+    int weaponType = 0;
+    RwV3d delta{};
+    bool hasReplacementFlashMesh = false;
+    bool sampDirect = false;
+};
+ShotFx* g_shotFx = nullptr;
+const std::string g_stockPoseKey;
 
-static bool OrcFxVecFinite(const RwV3d& v) {
-    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+bool IsFinitePoint(const RwV3d& point) {
+    return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z);
 }
 
-static bool OrcFxMatrixUsable(const RwMatrix* m) {
-    if (!m)
-        return false;
-    if (!OrcFxVecFinite(m->right) || !OrcFxVecFinite(m->up) || !OrcFxVecFinite(m->at) || !OrcFxVecFinite(m->pos))
-        return false;
-    const float r2 = m->right.x * m->right.x + m->right.y * m->right.y + m->right.z * m->right.z;
-    const float u2 = m->up.x * m->up.x + m->up.y * m->up.y + m->up.z * m->up.z;
-    const float a2 = m->at.x * m->at.x + m->at.y * m->at.y + m->at.z * m->at.z;
-    return r2 > 1e-8f && u2 > 1e-8f && a2 > 1e-8f;
+bool IsFiniteTransform(const RwMatrix& matrix) {
+    return IsFinitePoint(matrix.right) && IsFinitePoint(matrix.up) &&
+        IsFinitePoint(matrix.at) && IsFinitePoint(matrix.pos);
 }
 
-static RwFrame* OrcFxRwFrameGetParent(RwFrame* f) {
-    return OrcGetRwFrameParentSafe(f);
+RwV3d TransformPoint(const RwV3d& point, const RwMatrix& matrix) {
+    RwV3d result{};
+    RwV3dTransformPoints(&result, &point, 1, &matrix);
+    return result;
 }
 
-static bool OrcFxRwFrameIsDescendantOf(RwFrame* frame, RwFrame* ancestor) {
-    if (!frame || !ancestor)
+float DistanceSquared(const RwV3d& a, const RwV3d& b) {
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    const float dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+bool IsLeftHandShot(CPed* ped, int wt, const RwV3d& muzzle, const RwV3d& fireOffset) {
+    if (g_firingHand && g_firingHand->ped == ped)
+        return g_firingHand->left;
+    if (!ped->bCalledPreRender)
         return false;
-    int steps = 0;
-    for (RwFrame* x = frame; x && steps < kOrcMaxRwFrameAncestorsFx; x = OrcFxRwFrameGetParent(x), ++steps) {
-        if (x == ancestor)
+    if (!OrcPedWantsDualWieldHeld(ped, wt))
+        return false;
+    const RwMatrix* left = OrcGetBoneMatrix(ped, BONE_L_HAND);
+    const RwMatrix* right = OrcGetBoneMatrix(ped, BONE_R_HAND);
+    if (!left || !right)
+        return false;
+
+    const RwV3d leftMuzzle = TransformPoint(fireOffset, *left);
+    const RwV3d rightMuzzle = TransformPoint(fireOffset, *right);
+    return DistanceSquared(muzzle, leftMuzzle) < DistanceSquared(muzzle, rightMuzzle);
+}
+
+bool IsDirectSampShot(const void* returnAddress) {
+    // All inspected SA:MP wrappers call the GTA entry via mov edx, 73FB10h; call edx.
+    constexpr unsigned char call[] = {0xBA, 0x10, 0xFB, 0x73, 0x00, 0xFF, 0xD2};
+    static const void* verified = nullptr;
+    if (returnAddress == verified)
+        return verified != nullptr;
+    const auto* instruction = static_cast<const unsigned char*>(returnAddress) - sizeof(call);
+    if (std::memcmp(instruction, call, sizeof(call)) != 0 || !samp_bridge::IsSampBuildKnown())
+        return false;
+    HMODULE owner = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<LPCSTR>(returnAddress), &owner) || owner != GetModuleHandleA("samp.dll"))
+        return false;
+    verified = returnAddress;
+    return true;
+}
+
+const CWeaponInfo* WeaponInfoForShot(CPed* ped, int wt) {
+    if (!OrcWeaponTypeCanUseVanillaInfoContract(wt, static_cast<int>(WEAPONTYPE_PARACHUTE)))
+        return nullptr;
+    const auto type = static_cast<eWeaponType>(wt);
+    return CWeaponInfo::GetWeaponInfo(type, ped->GetWeaponSkill(type));
+}
+
+void ResolveShotFx(ShotFx& shot, const RwV3d& muzzle) {
+    CPed* ped = shot.ped;
+    const CWeaponInfo* info = WeaponInfoForShot(ped, shot.weaponType);
+    if (!IsFinitePoint(muzzle) || !info)
+        return;
+
+    const RwV3d& fireOffset = info->m_vecFireOffset;
+    const bool left = !shot.sampDirect && IsLeftHandShot(ped, shot.weaponType, muzzle, fireOffset);
+    const OrcHeldGunflash* gunflash = nullptr;
+    RwObject* clone = nullptr;
+    const bool hasReplacement = OrcTryResolveHeldReplacementGunflash(ped, shot.weaponType, left, clone, gunflash);
+    shot.hasReplacementFlashMesh = gunflash && !gunflash->atomics.empty();
+    if (!ped->bCalledPreRender)
+        return;
+    const RwMatrix* firingBone = OrcGetBoneMatrix(ped, left ? BONE_L_HAND : BONE_R_HAND);
+    if (!firingBone || !OrcCanRelocateGunshotFx(true,
+        DistanceSquared(muzzle, TransformPoint(fireOffset, *firingBone))))
+        return;
+
+    const HeldWeaponPoseCfg& pose = GetHeldPoseForPed(ped, shot.weaponType,
+        left && g_considerWeaponSkills, hasReplacement ? nullptr : &g_stockPoseKey);
+    const bool hasMuzzleLocator = gunflash && gunflash->hasMuzzleOffset;
+    if (!hasMuzzleLocator && !pose.enabled)
+        return;
+
+    RwMatrix basis{};
+    if (!OrcBuildHeldWeaponHandMatrix(ped, left, basis))
+        return;
+    RwMatrix held = basis;
+    if (pose.enabled && !OrcApplyHeldWeaponPoseToMatrix(held, pose) && !hasMuzzleLocator)
+        return;
+
+    RwV3d localMuzzle{};
+    if (hasMuzzleLocator) {
+        localMuzzle = gunflash->muzzleOffset;
+    } else {
+        RwMatrix inverse{};
+        RwMatrixInvert(&inverse, &basis);
+        localMuzzle = TransformPoint(muzzle, inverse);
+    }
+    const RwV3d adjusted = TransformPoint(localMuzzle, held);
+    if (!IsFinitePoint(adjusted))
+        return;
+    shot.delta = { adjusted.x - muzzle.x, adjusted.y - muzzle.y, adjusted.z - muzzle.z };
+    if (g_orcLogLevel >= OrcLogLevel::Info && g_heldWeaponTrace >= 2) {
+        OrcLogInfoThrottled(left ? 702u : 701u, 1000u,
+            "weapon fx: ped=%p wt=%d clone=%p hand=%s source=%s delta=(%.3f,%.3f,%.3f)",
+            ped, shot.weaponType, clone, left ? "left" : "right", hasMuzzleLocator ? "muzzle" : "held",
+            shot.delta.x, shot.delta.y, shot.delta.z);
+    }
+}
+
+RwV3d OffsetPoint(const RwV3d& point, const RwV3d& delta) {
+    return { point.x + delta.x, point.y + delta.y, point.z + delta.z };
+}
+
+void __cdecl AddShotLight(unsigned char type, RwV3d point, RwV3d direction, float radius,
+    float red, float green, float blue, unsigned char fogType, bool shadows, CEntity* affected) {
+    if (ShotFx* shot = g_shotFx) {
+        __try {
+            ResolveShotFx(*shot, point);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            shot->delta = {};
+            shot->hasReplacementFlashMesh = false;
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                OrcLogError("weapon fx: muzzle calculation SEH ex=0x%08X", GetExceptionCode());
+            }
+        }
+        point = OffsetPoint(point, shot->delta);
+    }
+    reinterpret_cast<AddLightFn>(kAddLight)(
+        type, point, direction, radius, red, green, blue, fogType, shadows, affected);
+}
+
+void __fastcall TriggerShotParticles(
+    Fx_c* fx, void*, CEntity* creator, CVector& point, CVector& direction, bool particleFlash) {
+    if (const ShotFx* shot = g_shotFx; shot && shot->ped == creator) {
+        CVector adjusted(OffsetPoint(point, shot->delta));
+        bool meshFlash = shot->hasReplacementFlashMesh;
+        if (meshFlash && shot->sampDirect) {
+            // The network wrapper supplies BONE_R_HAND and returns without calling DoGunFlash.
+            const auto duration = *reinterpret_cast<const unsigned short*>(kGunflashDuration);
+            meshFlash = duration > 0 && shot->ped->DoGunFlash(duration, false);
+        }
+        particleFlash = particleFlash && !meshFlash;
+        fx->TriggerGunshot(creator, adjusted, direction, particleFlash);
+        return;
+    }
+    fx->TriggerGunshot(creator, point, direction, particleFlash);
+}
+
+void __fastcall AddShotShell(CWeapon* weapon, void*, CEntity* creator,
+    const CVector& point, const CVector2D& direction, float size) {
+    if (const ShotFx* shot = g_shotFx; shot && shot->ped == creator) {
+        const CVector adjusted(OffsetPoint(point, shot->delta));
+        weapon->AddGunshell(creator, adjusted, direction, size);
+        return;
+    }
+    weapon->AddGunshell(creator, point, direction, size);
+}
+
+bool __fastcall FireInstantHitDetour(CWeapon* self, void*, CEntity* firingEntity, CVector* origin,
+    CVector* muzzlePosn, CEntity* targetEntity, CVector* target, CVector* originForDriveBy, bool arg6, bool muzzle) {
+    ShotFx shot{};
+    if (muzzle && !originForDriveBy && firingEntity && firingEntity->m_nType == ENTITY_TYPE_PED &&
+        !OrcIsRuntimeShuttingDown() && OrcCanModifyHeldWeapon(static_cast<CPed*>(firingEntity))) {
+        shot.ped = static_cast<CPed*>(firingEntity);
+        shot.weaponType = static_cast<int>(self->m_eWeaponType);
+        shot.sampDirect = (!g_firingHand || g_firingHand->ped != shot.ped) && IsDirectSampShot(_ReturnAddress());
+    }
+    ShotFx* const previous = g_shotFx;
+    g_shotFx = shot.ped ? &shot : nullptr;
+    __try {
+        return g_fireInstantHitOriginal(
+            self, firingEntity, origin, muzzlePosn, targetEntity, target, originForDriveBy, arg6, muzzle);
+    } __finally {
+        g_shotFx = previous;
+    }
+}
+
+unsigned char __fastcall FireHeldGunDetour(void* task, void*, CPed* ped, bool left) {
+    const FiringHand hand{ped, left};
+    const FiringHand* const previous = g_firingHand;
+    g_firingHand = &hand;
+    __try {
+        return g_fireHeldGunOriginal(task, ped, left);
+    } __finally {
+        g_firingHand = previous;
+    }
+}
+
+bool __fastcall DoGunFlashDetour(CPed* ped, void*, int duration, bool left) {
+    if (g_enabled && ped && duration > 0 && !OrcIsRuntimeShuttingDown()) {
+        const int wt = OrcResolveWeaponHeldVisualWeaponType(ped);
+        RwObject* clone = nullptr;
+        const OrcHeldGunflash* gunflash = nullptr;
+        if (OrcTryResolveHeldReplacementGunflash(ped, wt, left, clone, gunflash) &&
+            clone && gunflash && gunflash->frame && !gunflash->atomics.empty()) {
+            RwObject* const stock = ped->m_pWeaponObject;
+            RwFrame* const stockGunflash = ped->m_pGunflashObject;
+            ped->m_pWeaponObject = clone;
+            ped->m_pGunflashObject = gunflash->frame;
+            __try {
+                const bool started = g_doGunFlashOriginal(ped, duration, left);
+                if (started)
+                    RwFrameUpdateObjects(gunflash->frame);
+                return started;
+            } __finally {
+                ped->m_pWeaponObject = stock;
+                ped->m_pGunflashObject = stockGunflash;
+            }
+        }
+    }
+    return g_doGunFlashOriginal(ped, duration, left);
+}
+
+bool IsFrameUnder(RwFrame* frame, RwFrame* ancestor) {
+    for (int depth = 0; frame && depth < 64; ++depth, frame = OrcGetRwFrameParentSafe(frame)) {
+        if (frame == ancestor)
             return true;
     }
     return false;
 }
 
-struct OrcFxWeaponBasisCtx {
-    RwFrame* gunflash = nullptr;
-    RwFrame* basis = nullptr;
+bool FrameRelativeTo(RwFrame* frame, RwFrame* root, RwMatrix& matrix) {
+    RwMatrixSetIdentity(&matrix);
+    for (int depth = 0; frame && frame != root && depth < 64; ++depth) {
+        RwMatrix next{};
+        RwMatrixMultiply(&next, &matrix, RwFrameGetMatrix(frame));
+        matrix = next;
+        frame = OrcGetRwFrameParentSafe(frame);
+    }
+    return frame == root && IsFiniteTransform(matrix);
+}
+
+struct MuzzleSample {
+    RwFrame* root;
+    RwFrame* flash;
+    OrcGunflashMuzzleTip<RwV3d> tip;
 };
 
-static RpAtomic* OrcFxFindWeaponBasisAtomicCb(RpAtomic* atomic, void* data) {
-    auto* ctx = reinterpret_cast<OrcFxWeaponBasisCtx*>(data);
-    if (!ctx || ctx->basis || !atomic)
-        return atomic;
+RpAtomic* SampleMuzzleAtomic(RpAtomic* atomic, void* data) {
+    auto& sample = *static_cast<MuzzleSample*>(data);
     RwFrame* frame = RpAtomicGetFrame(atomic);
-    if (!frame)
+    const RpGeometry* geometry = RpAtomicGetGeometry(atomic);
+    if (!frame || !geometry || !(RpAtomicGetFlags(atomic) & rpATOMICRENDER) ||
+        (sample.flash && IsFrameUnder(frame, sample.flash)) ||
+        (geometry->flags & rpGEOMETRYNATIVE) || geometry->numVertices <= 0 || geometry->numVertices > 65536 ||
+        geometry->numMorphTargets < 1 || !geometry->morphTarget)
         return atomic;
-    if (ctx->gunflash && OrcFxRwFrameIsDescendantOf(frame, ctx->gunflash))
+    const RwV3d* vertices = RpMorphTargetGetVertices(geometry->morphTarget);
+    if (!vertices)
         return atomic;
-    ctx->basis = frame;
+    RwMatrix relative{};
+    if (frame != sample.root && !FrameRelativeTo(frame, sample.root, relative))
+        return atomic;
+    for (int i = 0; i < geometry->numVertices; ++i) {
+        const RwV3d& v = vertices[i];
+        if (frame == sample.root) {
+            sample.tip.Add(v);
+        } else {
+            sample.tip.Add({
+                relative.pos.x + v.x * relative.right.x + v.y * relative.up.x + v.z * relative.at.x,
+                relative.pos.y + v.x * relative.right.y + v.y * relative.up.y + v.z * relative.at.y,
+                relative.pos.z + v.x * relative.right.z + v.y * relative.up.z + v.z * relative.at.z,
+            });
+        }
+    }
     return atomic;
 }
 
-static RwFrame* OrcFxResolveWeaponBasisFrame(CPed* ped, int wt) {
-    if (!ped)
-        return nullptr;
-    if (RpClump* clump = OrcPedResolveGunflashTargetClump(ped, wt)) {
-        OrcFxWeaponBasisCtx ctx{};
-        ctx.gunflash = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
-        RpClumpForAllAtomics(clump, OrcFxFindWeaponBasisAtomicCb, &ctx);
-        if (ctx.basis)
-            return ctx.basis;
-        return RpClumpGetFrame(clump);
-    }
-    RwObject* wo = ped->m_pWeaponObject;
-    if (!wo)
-        return nullptr;
-    if (wo->type == rpATOMIC)
-        return RpAtomicGetFrame(reinterpret_cast<RpAtomic*>(wo));
-    if (wo->type == rpCLUMP) {
-        RpClump* clump = reinterpret_cast<RpClump*>(wo);
-        OrcFxWeaponBasisCtx ctx{};
-        ctx.gunflash = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
-        RpClumpForAllAtomics(clump, OrcFxFindWeaponBasisAtomicCb, &ctx);
-        if (ctx.basis)
-            return ctx.basis;
-        return RpClumpGetFrame(clump);
-    }
-    return nullptr;
-}
-
-static RwV3d OrcFxWorldPointToFrameLocal(const RwMatrix* frameLtm, const CVector& world) {
-    RwV3d d{};
-    d.x = world.x - frameLtm->pos.x;
-    d.y = world.y - frameLtm->pos.y;
-    d.z = world.z - frameLtm->pos.z;
-    RwV3d local{};
-    local.x = frameLtm->right.x * d.x + frameLtm->right.y * d.y + frameLtm->right.z * d.z;
-    local.y = frameLtm->up.x * d.x + frameLtm->up.y * d.y + frameLtm->up.z * d.z;
-    local.z = frameLtm->at.x * d.x + frameLtm->at.y * d.y + frameLtm->at.z * d.z;
-    return local;
-}
-
-static CVector OrcFxFrameLocalPointToWorld(const RwMatrix& frameLtm, const RwV3d& local) {
-    CVector out{};
-    out.x = frameLtm.right.x * local.x + frameLtm.up.x * local.y + frameLtm.at.x * local.z + frameLtm.pos.x;
-    out.y = frameLtm.right.y * local.x + frameLtm.up.y * local.y + frameLtm.at.y * local.z + frameLtm.pos.y;
-    out.z = frameLtm.right.z * local.x + frameLtm.up.z * local.y + frameLtm.at.z * local.z + frameLtm.pos.z;
-    return out;
-}
-
-static bool OrcFxTryGetPoseBaselineLtm(RwFrame* frame, RwMatrix& out) {
-    RwMatrix local{};
-    if (!OrcHeldTryGetPoseEngineBaselineForFrame(frame, local))
+bool SampleMuzzle(RpClump* clump, RwFrame* flash, const RwV3d& reference, float& x) {
+    MuzzleSample sample{RpClumpGetFrame(clump), flash, OrcGunflashMuzzleTip<RwV3d>(reference)};
+    RpClumpForAllAtomics(clump, SampleMuzzleAtomic, &sample);
+    if (!sample.tip.Found())
         return false;
-    if (RwFrame* parent = OrcFxRwFrameGetParent(frame)) {
-        const RwMatrix* parentLtm = RwFrameGetLTM(parent);
-        if (!OrcFxMatrixUsable(parentLtm))
-            return false;
-        RwMatrixMultiply(&out, &local, parentLtm);
-    } else {
-        out = local;
-    }
-    return OrcFxMatrixUsable(&out);
-}
-
-static bool OrcComputeAdjustedMuzzleFromWeaponFrame(CPed* ped, int wt, const CVector& vanillaMuzzle, CVector& out) {
-    if (!ped || wt <= 0)
-        return false;
-    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
-    if (!h.enabled)
-        return false;
-    RwFrame* basisFrame = OrcFxResolveWeaponBasisFrame(ped, wt);
-    const RwMatrix* basisLtm = basisFrame ? RwFrameGetLTM(basisFrame) : nullptr;
-    if (!OrcFxMatrixUsable(basisLtm))
-        return false;
-    RwMatrix baseline{};
-    const RwMatrix* basis = basisLtm;
-    if (OrcFxTryGetPoseBaselineLtm(basisFrame, baseline))
-        basis = &baseline;
-    const RwV3d localMuzzle = OrcFxWorldPointToFrameLocal(basis, vanillaMuzzle);
-    RwMatrix held = *basis;
-    OrcApplyAttachmentOffset(&held, h.x, h.y, h.z);
-    OrcRotateAttachmentMatrix(&held, h.rx, h.ry, h.rz);
-    if (h.scale > 0.0f && h.scale != 1.0f) {
-        RwV3d s = { h.scale, h.scale, h.scale };
-        RwMatrixScale(&held, &s, rwCOMBINEPRECONCAT);
-    }
-    if (!OrcFxMatrixUsable(&held))
-        return false;
-    out = OrcFxFrameLocalPointToWorld(held, localMuzzle);
+    x = sample.tip.Front();
     return true;
 }
 
-static void OrcStoreHeldMuzzleDelta(CPed* ped, int wt, const CVector& oldMuzzle, const CVector& newMuzzle) {
-    const int pedRef = ped ? CPools::GetPedRef(ped) : 0;
-    if (pedRef <= 0 || wt <= 0)
-        return;
-    s_lastHeldMuzzleDelta.pedRef = pedRef;
-    s_lastHeldMuzzleDelta.wt = wt;
-    s_lastHeldMuzzleDelta.timeMs = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
-    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
-    s_lastHeldMuzzleDelta.x = h.x;
-    s_lastHeldMuzzleDelta.y = h.y;
-    s_lastHeldMuzzleDelta.z = h.z;
-    s_lastHeldMuzzleDelta.rx = h.rx;
-    s_lastHeldMuzzleDelta.ry = h.ry;
-    s_lastHeldMuzzleDelta.rz = h.rz;
-    s_lastHeldMuzzleDelta.scale = h.scale;
-    s_lastHeldMuzzleDelta.dw.x = newMuzzle.x - oldMuzzle.x;
-    s_lastHeldMuzzleDelta.dw.y = newMuzzle.y - oldMuzzle.y;
-    s_lastHeldMuzzleDelta.dw.z = newMuzzle.z - oldMuzzle.z;
+bool IsFlashMesh(const RpGeometry* geometry) {
+    return geometry && geometry->numTriangles > 0 &&
+        geometry->matList.materials && geometry->matList.numMaterials > 0;
 }
 
-static bool OrcTryGetRecentHeldMuzzleDelta(CPed* ped, int wt, RwV3d* outDw) {
-    if (!ped || wt <= 0 || !outDw)
-        return false;
-    const int pedRef = CPools::GetPedRef(ped);
-    if (pedRef <= 0 || s_lastHeldMuzzleDelta.pedRef != pedRef || s_lastHeldMuzzleDelta.wt != wt)
-        return false;
-    const unsigned now = static_cast<unsigned>(CTimer::m_snTimeInMilliseconds);
-    if (now - s_lastHeldMuzzleDelta.timeMs > kOrcMuzzleDeltaCacheMs)
-        return false;
-    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
-    if (std::fabs(h.x - s_lastHeldMuzzleDelta.x) > 1e-5f || std::fabs(h.y - s_lastHeldMuzzleDelta.y) > 1e-5f ||
-        std::fabs(h.z - s_lastHeldMuzzleDelta.z) > 1e-5f || std::fabs(h.rx - s_lastHeldMuzzleDelta.rx) > 1e-5f ||
-        std::fabs(h.ry - s_lastHeldMuzzleDelta.ry) > 1e-5f || std::fabs(h.rz - s_lastHeldMuzzleDelta.rz) > 1e-5f ||
-        std::fabs(h.scale - s_lastHeldMuzzleDelta.scale) > 1e-5f)
-        return false;
-    *outDw = s_lastHeldMuzzleDelta.dw;
-    return true;
-}
+RpAtomic* PrepareGunflashAtomic(RpAtomic* atomic, void* data) {
+    auto& gunflash = *static_cast<OrcHeldGunflash*>(data);
+    if (!atomic || !IsFrameUnder(RpAtomicGetFrame(atomic), gunflash.frame))
+        return atomic;
 
-void OrcPedSyncGunflashFrameFromCurrentWeaponObject(CPed* ped, int wtHint) {
-    if (!ped)
-        return;
-    RwObject* const woSlot = ped->m_pWeaponObject;
-    RwFrame* const prevGf = ped->m_pGunflashObject;
-    RpClump* clump = OrcPedResolveGunflashTargetClump(ped, wtHint);
-    if (!clump) {
-        ped->m_pGunflashObject = nullptr;
-        if (prevGf && g_orcLogLevel >= OrcLogLevel::Info) {
-            OrcLogInfoThrottled(937u, 4000u, "gunflash: cleared (no target clump) pedRef=%d slotWo=%p",
-                CPools::GetPedRef(ped), woSlot);
-        }
-        return;
+    RpAtomicSetFlags(atomic, OrcInitialGunflashAtomicFlags(RpAtomicGetFlags(atomic)));
+    RpGeometry* geometry = RpAtomicGetGeometry(atomic);
+    if (IsFlashMesh(geometry)) {
+        gunflash.atomics.push_back(atomic);
+        const auto materialCount = static_cast<std::size_t>(geometry->matList.numMaterials);
+        if (materialCount > gunflash.alphaScratch.size())
+            gunflash.alphaScratch.resize(materialCount);
     }
-    RwFrame* gf = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
-    ped->m_pGunflashObject = gf;
-    const int pedRef = CPools::GetPedRef(ped);
-    if (g_orcLogLevel >= OrcLogLevel::Info) {
-        if (gf != prevGf) {
-            OrcLogInfoThrottled(938u, 2500u,
-                "gunflash: frame rebound pedRef=%d clump=%p slotWo=%p gf=%p (was %p)", pedRef, clump, woSlot, gf,
-                prevGf);
-        }
-        if (!gf) {
-            OrcLogInfoThrottled(939u, 12000u,
-                "gunflash: no \"gunflash\" frame in weapon clump pedRef=%d clump=%p slotWo=%p (custom mesh may omit dummy)",
-                pedRef, clump, woSlot);
-        }
-    }
+    return atomic;
 }
 
-static bool OrcComputeVanillaMuzzleWorldForPed(CPed* ped, int wt, CVector& out) {
-    if (!ped || wt <= 0)
-        return false;
-    RwMatrix* bone = OrcGetBoneMatrix(ped, BONE_R_HAND);
-    if (!bone)
-        return false;
-    const unsigned char skill = static_cast<unsigned char>(ped->GetWeaponSkill(static_cast<eWeaponType>(wt)));
-    CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), skill);
-    if (!wi)
-        return false;
-    RwMatrix M{};
-    std::memcpy(&M, bone, sizeof(RwMatrix));
-    const float vx = wi->m_vecFireOffset.x;
-    const float vy = wi->m_vecFireOffset.y;
-    const float vz = wi->m_vecFireOffset.z;
-    out.x = M.right.x * vx + M.up.x * vy + M.at.x * vz + M.pos.x;
-    out.y = M.right.y * vx + M.up.y * vy + M.at.y * vz + M.pos.y;
-    out.z = M.right.z * vx + M.up.z * vy + M.at.z * vz + M.pos.z;
-    return true;
-}
-
-static bool OrcComputeAdjustedMuzzleForPed(CPed* ped, int wt, CVector& out) {
-    if (!ped || wt <= 0)
-        return false;
-    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
-    if (!h.enabled)
-        return false;
-    RwMatrix* bone = OrcGetBoneMatrix(ped, BONE_R_HAND);
-    if (!bone)
-        return false;
-    const unsigned char skill = static_cast<unsigned char>(ped->GetWeaponSkill(static_cast<eWeaponType>(wt)));
-    CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), skill);
-    if (!wi)
-        return false;
-    RwMatrix M{};
-    std::memcpy(&M, bone, sizeof(RwMatrix));
-    OrcApplyAttachmentOffset(&M, h.x, h.y, h.z);
-    OrcRotateAttachmentMatrix(&M, h.rx, h.ry, h.rz);
-    if (h.scale > 0.0f && h.scale != 1.0f) {
-        RwV3d s = { h.scale, h.scale, h.scale };
-        RwMatrixScale(&M, &s, rwCOMBINEPRECONCAT);
-    }
-    const float vx = wi->m_vecFireOffset.x;
-    const float vy = wi->m_vecFireOffset.y;
-    const float vz = wi->m_vecFireOffset.z;
-    out.x = M.right.x * vx + M.up.x * vy + M.at.x * vz + M.pos.x;
-    out.y = M.right.y * vx + M.up.y * vy + M.at.y * vz + M.pos.y;
-    out.z = M.right.z * vx + M.up.z * vy + M.at.z * vz + M.pos.z;
-    return true;
-}
-
-bool OrcHeldTryGetMuzzleWorldDeltaHeldMinusVanilla(CPed* ped, int wt, RwV3d* outDw) {
-    if (!ped || wt <= 0 || !outDw)
-        return false;
-    const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
-    if (!h.enabled)
-        return false;
-    if (OrcTryGetRecentHeldMuzzleDelta(ped, wt, outDw))
+bool InheritStockGunflash(CPed* ped, RpClump* clump, const RwV3d& reference, OrcHeldGunflash& gunflash) {
+    RwObject* stock = ped->m_pWeaponObject;
+    RwFrame* stockFlash = ped->m_pGunflashObject;
+    if (!stock || stock->type != rpCLUMP || !stockFlash)
         return true;
-    CVector vHeld{};
-    CVector vVan{};
-    if (!OrcComputeAdjustedMuzzleForPed(ped, wt, vHeld))
+    auto* stockClump = reinterpret_cast<RpClump*>(stock);
+    RwFrame* stockRoot = RpClumpGetFrame(stockClump);
+    RwMatrix matrix{};
+    if (!stockRoot || stockFlash == stockRoot || !FrameRelativeTo(stockFlash, stockRoot, matrix))
+        return true;
+
+    // The game's SetGunFlashAlpha addresses the first object attached directly to this frame.
+    struct NativeFlash {
+        RwFrame* frame;
+        RpAtomic* atomic = nullptr;
+    } source{stockFlash};
+    RpClumpForAllAtomics(stockClump, [](RpAtomic* atomic, void* data) -> RpAtomic* {
+        auto& source = *static_cast<NativeFlash*>(data);
+        if (!source.atomic && RpAtomicGetFrame(atomic) == source.frame && IsFlashMesh(RpAtomicGetGeometry(atomic)))
+            source.atomic = atomic;
+        return atomic;
+    }, &source);
+    if (!source.atomic)
+        return true;
+
+    if (gunflash.hasMuzzleOffset) {
+        float nativeX = reference.x;
+        SampleMuzzle(stockClump, stockFlash, reference, nativeX);
+        matrix.pos.x += gunflash.muzzleOffset.x - nativeX;
+        matrix.pos.y += gunflash.muzzleOffset.y - reference.y;
+        matrix.pos.z += gunflash.muzzleOffset.z - reference.z;
+    }
+    RwMatrixUpdate(&matrix);
+
+    RpAtomic* copy = RpAtomicClone(source.atomic);
+    if (!copy)
         return false;
-    if (!OrcComputeVanillaMuzzleWorldForPed(ped, wt, vVan))
+    RwFrame* frame = RwFrameCreate();
+    if (!frame) {
+        RpAtomicDestroy(copy);
         return false;
-    outDw->x = vHeld.x - vVan.x;
-    outDw->y = vHeld.y - vVan.y;
-    outDw->z = vHeld.z - vVan.z;
+    }
+    *RwFrameGetMatrix(frame) = matrix;
+    if (!RwFrameAddChild(RpClumpGetFrame(clump), frame)) {
+        RwFrameDestroy(frame);
+        RpAtomicDestroy(copy);
+        return false;
+    }
+    CVisibilityPlugins::SetAtomicRenderCallback(copy, nullptr);
+    RpAtomicSetFrame(copy, frame);
+    if (!RpClumpAddAtomic(clump, copy)) {
+        RpAtomicDestroy(copy);
+        RwFrameRemoveChild(frame);
+        RwFrameDestroy(frame);
+        return false;
+    }
+
+    gunflash.frame = frame;
+    PrepareGunflashAtomic(copy, &gunflash);
+    OrcLogInfoThrottled(940u, 4000u,
+        "weapon fx: inherited stock flash ped=%p clone=%p mesh=%p muzzleX=%.3f",
+        ped, clump, copy, gunflash.hasMuzzleOffset ? gunflash.muzzleOffset.x : reference.x);
     return true;
 }
 
-using CWeapon_Fire_orig_t = bool(__thiscall*)(CWeapon* self, CEntity* firingEntity, CVector* origin, CVector* muzzlePosn,
-    CEntity* targetEntity, CVector* target, CVector* originForDriveBy);
-using CWeapon_FireInstantHit_orig_t = bool(__thiscall*)(CWeapon* self, CEntity* firingEntity, CVector* origin,
-    CVector* muzzlePosn, CEntity* targetEntity, CVector* target, CVector* originForDriveBy, bool arg6, bool muzzle);
-
-static CWeapon_Fire_orig_t g_CWeaponFire_Orig = nullptr;
-static CWeapon_FireInstantHit_orig_t g_CWeaponFireInstantHit_Orig = nullptr;
-
-static void OrcTryPatchMuzzlePosnForPedWeaponFx(CPed* ped, CWeapon* weapon, CVector* muzzlePosn, const char* phase) {
-    if (!g_enabled || !ped || !weapon || !muzzlePosn)
+void DrawGunflashAtomic(RpAtomic* atomic, RwUInt8 alpha, std::vector<RwUInt8>& scratch) {
+    RpGeometry* geometry = RpAtomicGetGeometry(atomic);
+    if (!geometry)
         return;
-    const int wt = static_cast<int>(weapon->m_eWeaponType);
-    const CVector oldMuzzle = *muzzlePosn;
-    CVector adj{};
-    const bool frameBasis = OrcComputeAdjustedMuzzleFromWeaponFrame(ped, wt, oldMuzzle, adj);
-    if (!frameBasis && !OrcComputeAdjustedMuzzleForPed(ped, wt, adj)) {
-        if (g_heldWeaponTrace >= 2 && g_orcLogLevel >= OrcLogLevel::Info) {
-            const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
-            if (!h.enabled) {
-                OrcLogInfoThrottled(703, 4000u,
-                    "weapon fx: muzzle skip held_off wt=%d pedRef=%d phase=%s", wt, CPools::GetPedRef(ped),
-                    phase ? phase : "?");
-            }
-        }
+    const int count = geometry->matList.numMaterials;
+    RpMaterial** materials = geometry->matList.materials;
+    if (!materials || count <= 0 || static_cast<std::size_t>(count) > scratch.size())
         return;
+
+    // A geometry may share materials with another atomic or have duplicate material slots.
+    // Capture the complete original state before changing the first slot.
+    for (int i = 0; i < count; ++i) {
+        if (materials[i])
+            scratch[i] = materials[i]->color.alpha;
     }
-    OrcStoreHeldMuzzleDelta(ped, wt, oldMuzzle, adj);
+
+    const auto oldGeometryFlags = RpGeometryGetFlags(geometry);
+    __try {
+        RpGeometrySetFlags(geometry, oldGeometryFlags | rpGEOMETRYMODULATEMATERIALCOLOR);
+        for (int i = 0; i < count; ++i) {
+            if (materials[i])
+                materials[i]->color.alpha = alpha;
+        }
+        // The ordinary clump pass skips all flash atomics. Direct draw uses the same native callback.
+        RpAtomicRender(atomic);
+    } __finally {
+        for (int i = 0; i < count; ++i) {
+            if (materials[i])
+                materials[i]->color.alpha = scratch[i];
+        }
+        RpGeometrySetFlags(geometry, oldGeometryFlags);
+    }
+}
+
+bool IsOriginalCall(uintptr_t site, uintptr_t target) {
+    return plugin::patch::GetUChar(site) == 0xE8 &&
+        site + 5 + plugin::patch::GetInt(site + 1) == target;
+}
+
+bool InstallHook(uintptr_t address, void* detour, void** original, const char* name) {
+    auto* target = reinterpret_cast<void*>(address);
+    const MH_STATUS created = MH_CreateHook(target, detour, original);
+    if (created != MH_OK) {
+        OrcLogError("weapon fx: %s MH_CreateHook -> %s", name, MH_StatusToString(created));
+        return false;
+    }
+    const MH_STATUS enabled = MH_EnableHook(target);
+    if (enabled != MH_OK) {
+        MH_RemoveHook(target);
+        *original = nullptr;
+        OrcLogError("weapon fx: %s MH_EnableHook -> %s", name, MH_StatusToString(enabled));
+        return false;
+    }
+    return true;
+}
+} // namespace
+
+bool OrcHeldPrepareGunflash(RwObject* object, CPed* ped, int wt,
+    WeaponReplacementAsset& asset, OrcHeldGunflash& gunflash) {
+    gunflash = {};
+    if (!ped || !object || object->type != rpCLUMP)
+        return false;
+
+    auto* clump = reinterpret_cast<RpClump*>(object);
+    RwFrame* const root = RpClumpGetFrame(clump);
+    if (!root)
+        return false;
+
+    RwFrame* frame = CClumpModelInfo::GetFrameFromName(clump, "gunflash");
+    RwMatrix authored{};
+    if (frame && frame != root && FrameRelativeTo(frame, root, authored)) {
+        gunflash.frame = frame;
+        RpClumpForAllAtomics(clump, PrepareGunflashAtomic, &gunflash);
+    }
+
+    const CWeaponInfo* info = WeaponInfoForShot(ped, wt);
+    if (info && IsFinitePoint(info->m_vecFireOffset) &&
+        (info->m_nWeaponFire == WEAPON_FIRE_INSTANT_HIT || ped->m_pGunflashObject)) {
+        const RwV3d& reference = info->m_vecFireOffset;
+        if (!asset.muzzleSampled) {
+            asset.muzzleSampled = true;
+            asset.muzzleFound = SampleMuzzle(clump, gunflash.frame, reference, asset.muzzleX);
+        }
+        if (asset.muzzleFound) {
+            gunflash.muzzleOffset = {asset.muzzleX, reference.y, reference.z};
+            gunflash.hasMuzzleOffset = true;
+        }
+        // Empty authored dummies can mark the muzzle. Dummies with geometry are usually its pivot.
+        if (gunflash.frame && gunflash.atomics.empty() &&
+            (!gunflash.hasMuzzleOffset || DistanceSquared(authored.pos, gunflash.muzzleOffset) <= 0.01f)) {
+            gunflash.muzzleOffset = authored.pos;
+            gunflash.hasMuzzleOffset = true;
+        }
+        if (gunflash.atomics.empty() && !InheritStockGunflash(ped, clump, reference, gunflash))
+            return false;
+    }
     if (g_orcLogLevel >= OrcLogLevel::Info) {
-        const HeldWeaponPoseCfg& h = GetHeldPoseForPed(ped, wt, false);
-        const unsigned char skill = static_cast<unsigned char>(ped->GetWeaponSkill(static_cast<eWeaponType>(wt)));
-        CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), skill);
-        const float r2d = 180.0f / kOrcPi;
-        const unsigned logId = (phase && phase[0] == 'I') ? 702u : 701u;
-        OrcLogInfoThrottled(
-            logId, 800u,
-            "weapon fx: muzzle adjust phase=%s src=%s wt=%d pedRef=%d h=(%.3f,%.3f,%.3f)/(%.2f,%.2f,%.2f)/sc=%.3f vfo=(%.3f,%.3f,%.3f) old=(%.2f,%.2f,%.2f) new=(%.2f,%.2f,%.2f)",
-            phase ? phase : "?", frameBasis ? "weaponFrame" : "bone", wt, CPools::GetPedRef(ped), h.x, h.y, h.z,
-            h.rx * r2d, h.ry * r2d, h.rz * r2d, h.scale,
-            wi ? wi->m_vecFireOffset.x : 0.0f, wi ? wi->m_vecFireOffset.y : 0.0f, wi ? wi->m_vecFireOffset.z : 0.0f,
-            oldMuzzle.x, oldMuzzle.y, oldMuzzle.z, adj.x, adj.y, adj.z);
+        OrcLogInfoThrottled(939u, 4000u,
+            "weapon fx: prepared ped=%p key=%s clone=%p flashFrame=%p atomics=%zu",
+            ped, asset.key.c_str(), object, gunflash.frame, gunflash.atomics.size());
     }
-    *muzzlePosn = adj;
+    return true;
 }
 
-static bool __fastcall CWeapon_Fire_Detour(CWeapon* self, void* /*edx*/, CEntity* firingEntity, CVector* origin,
-    CVector* muzzlePosn, CEntity* targetEntity, CVector* target, CVector* originForDriveBy) {
-    if (firingEntity && firingEntity->m_nType == ENTITY_TYPE_PED && muzzlePosn) {
-        CPed* ped = reinterpret_cast<CPed*>(firingEntity);
-        const int wtFire = static_cast<int>(self->m_eWeaponType);
-        if (GetHeldPoseForPed(ped, wtFire, false).enabled) {
-            OrcTryPatchMuzzlePosnForPedWeaponFx(ped, self, muzzlePosn, "Fire");
-            OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped, wtFire);
-            OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(ped, wtFire);
-        } else {
-            OrcTryPatchMuzzlePosnForPedWeaponFx(ped, self, muzzlePosn, "Fire");
-        }
-    }
-    if (!g_CWeaponFire_Orig)
-        return false;
-    return g_CWeaponFire_Orig(self, firingEntity, origin, muzzlePosn, targetEntity, target, originForDriveBy);
+RwUInt8 OrcHeldGunflashAlpha(const CPed* ped, const OrcHeldGunflash* gunflash, bool left) {
+    if (!ped || !gunflash || gunflash->atomics.empty())
+        return 0;
+    const int progress = left ? ped->m_nWeaponGunflashAlphaMP2 : ped->m_nWeaponGunflashAlphaMP1;
+    if (progress <= 0)
+        return 0;
+
+    const auto maxProgress = *reinterpret_cast<const unsigned short*>(kGunflashProgressMax);
+    const auto maxAlpha = *reinterpret_cast<const int*>(kGunflashAlphaMax);
+    return OrcGunflashAlphaForProgress(progress, maxProgress, maxAlpha);
 }
 
-static bool __fastcall CWeapon_FireInstantHit_Detour(CWeapon* self, void* /*edx*/, CEntity* firingEntity, CVector* origin,
-    CVector* muzzlePosn, CEntity* targetEntity, CVector* target, CVector* originForDriveBy, bool arg6, bool muzzle) {
-    if (firingEntity && firingEntity->m_nType == ENTITY_TYPE_PED && muzzlePosn) {
-        CPed* ped = reinterpret_cast<CPed*>(firingEntity);
-        const int wtFire = static_cast<int>(self->m_eWeaponType);
-        if (GetHeldPoseForPed(ped, wtFire, false).enabled) {
-            OrcTryPatchMuzzlePosnForPedWeaponFx(ped, self, muzzlePosn, "FireInstantHit");
-            OrcPedSyncGunflashFrameFromCurrentWeaponObject(ped, wtFire);
-            OrcHeldNudgeGunflashMuzzleDeltaAfterFrameSync(ped, wtFire);
-        } else {
-            OrcTryPatchMuzzlePosnForPedWeaponFx(ped, self, muzzlePosn, "FireInstantHit");
-        }
-    }
-    if (!g_CWeaponFireInstantHit_Orig)
-        return false;
-    return g_CWeaponFireInstantHit_Orig(
-        self, firingEntity, origin, muzzlePosn, targetEntity, target, originForDriveBy, arg6, muzzle);
-}
-
-static bool __fastcall CPed_DoGunFlash_Detour(CPed* self, void* /*edx*/, int duration, bool isLeftHand) {
-    if (g_enabled && self) {
-        const int wt = OrcResolveWeaponHeldVisualWeaponType(self);
-        if (wt > 0 && OrcPedWantsDualWieldHeld(self, wt)) {
-            RwFrame* const prevGf = self->m_pGunflashObject;
-            RwFrame* const gf = OrcPedResolveGunflashFrameForDualHand(self, wt, isLeftHand);
-            if (gf)
-                self->m_pGunflashObject = gf;
-            const bool ok = g_CPedDoGunFlash_Orig ? g_CPedDoGunFlash_Orig(self, duration, isLeftHand) : false;
-            if (gf)
-                self->m_pGunflashObject = prevGf;
-            return ok;
-        }
-    }
-    if (!g_CPedDoGunFlash_Orig)
-        return false;
-    return g_CPedDoGunFlash_Orig(self, duration, isLeftHand);
-}
-
-static void __fastcall CPed_SetGunFlashAlpha_Detour(CPed* self, void* /*edx*/, bool rightHand) {
-    if (g_enabled && self) {
-        const int wt = OrcResolveWeaponHeldVisualWeaponType(self);
-        if (wt > 0 && OrcPedWantsDualWieldHeld(self, wt)) {
-            RwFrame* const prevGf = self->m_pGunflashObject;
-            RwFrame* const gf = OrcPedResolveGunflashFrameForDualHand(self, wt, rightHand);
-            if (gf)
-                self->m_pGunflashObject = gf;
-            if (g_CPedSetGunFlashAlpha_Orig)
-                g_CPedSetGunFlashAlpha_Orig(self, rightHand);
-            if (gf)
-                self->m_pGunflashObject = prevGf;
-            return;
-        }
-    }
-    if (g_CPedSetGunFlashAlpha_Orig)
-        g_CPedSetGunFlashAlpha_Orig(self, rightHand);
-}
-
-// --- Dual-wield: строго ванильная вспышка (gunflash) для ЛЕВОГО кастомного ствола ---
-// Ваниль (`RenderWeaponPedsForPC` @0x732F30, GTA SA 1.0 US): для twin pistols (PRO) вспышка —
-// это атом `"gunflash"` внутри того же weapon-clump; клумп рисуется дважды. Перед ПРАВЫМ проходом
-// зовётся `CPed::SetGunFlashAlpha(0,0x5DF400)` (правое состояние +0x504), перед ЛЕВЫМ —
-// `SetGunFlashAlpha(1)` (левое +0x508); в конце кадра `CPed::ClearGunFlash` (0x5DF4E0) гасит атом.
-// SetGunFlashAlpha включает рендер-флаг атома (`flags=4`) и ставит alpha, ClearGunFlash — `flags=0`,
-// alpha=0. Плагин же рисует ОБА клона в первом (правом) RWCB-проходе, т.е. ДО ванильного
-// `SetGunFlashAlpha(left)` второго прохода, поэтому у левого клона атом `gunflash` так и остаётся
-// выключенным (flags=0) и не рисуется. Здесь повторяем ванильную пару Clear + SetAlpha(left) на
-// собственном кадре `"gunflash"` левого клона ровно перед его отрисовкой.
-static constexpr uintptr_t kAddr_CPed_ClearGunFlash = 0x5DF4E0;
-using CPed_ClearGunFlash_t = void(__thiscall*)(CPed* self);
-
-void OrcHeldApplyVanillaGunflashForDualSecondary(CPed* ped, int wt) {
-    if (!g_enabled || !ped || wt <= 0)
-        return;
-    RwFrame* gf = OrcPedResolveGunflashFrameForDualHand(ped, wt, /*isLeftHand=*/true);
-    if (!gf)
-        return;
-    RwFrame* const prevGf = ped->m_pGunflashObject;
-    ped->m_pGunflashObject = gf;
-    // Сначала гасим (ванильный pass2 мог оставить атом видимым с прошлого кадра — иначе «залипшая» вспышка)…
-    reinterpret_cast<CPed_ClearGunFlash_t>(kAddr_CPed_ClearGunFlash)(ped);
-    // …затем включаем по текущему состоянию ЛЕВОЙ руки (no-op, если левая сейчас не стреляет).
-    if (g_CPedSetGunFlashAlpha_Orig)
-        g_CPedSetGunFlashAlpha_Orig(ped, /*rightHand=*/true);
-    ped->m_pGunflashObject = prevGf;
-}
-
-void OrcWeaponEnsureGunflashHooksInstalled() {
-    if (g_pedGunflashHooksInstalled)
-        return;
-    MH_STATUS st = MH_Initialize();
-    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
-        OrcLogError("CPed gunflash hooks: MH_Initialize -> %s", MH_StatusToString(st));
-        return;
-    }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CPed_DoGunFlash),
-            reinterpret_cast<void*>(&CPed_DoGunFlash_Detour),
-            reinterpret_cast<void**>(&g_CPedDoGunFlash_Orig)) != MH_OK) {
-        OrcLogError("CPed::DoGunFlash hook: MH_CreateHook failed (0x%08X)", (unsigned)kAddr_CPed_DoGunFlash);
-        return;
-    }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CPed_SetGunFlashAlpha),
-            reinterpret_cast<void*>(&CPed_SetGunFlashAlpha_Detour),
-            reinterpret_cast<void**>(&g_CPedSetGunFlashAlpha_Orig)) != MH_OK) {
-        OrcLogError("CPed::SetGunFlashAlpha hook: MH_CreateHook failed (0x%08X)", (unsigned)kAddr_CPed_SetGunFlashAlpha);
-        return;
-    }
-    g_pedGunflashHooksInstalled = true;
-    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CPed_DoGunFlash));
-    if (st != MH_OK)
-        OrcLogError("CPed::DoGunFlash hook: MH_EnableHook -> %s", MH_StatusToString(st));
-    else
-        OrcLogInfo("CPed::DoGunFlash hook (0x%08X)", (unsigned)kAddr_CPed_DoGunFlash);
-    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CPed_SetGunFlashAlpha));
-    if (st != MH_OK)
-        OrcLogError("CPed::SetGunFlashAlpha hook: MH_EnableHook -> %s", MH_StatusToString(st));
-    else
-        OrcLogInfo("CPed::SetGunFlashAlpha hook (0x%08X)", (unsigned)kAddr_CPed_SetGunFlashAlpha);
+void OrcHeldDrawGunflash(OrcHeldGunflash& gunflash, RwUInt8 alpha) {
+    RwFrameGetLTM(gunflash.frame);
+    for (RpAtomic* atomic : gunflash.atomics)
+        DrawGunflashAtomic(atomic, alpha, gunflash.alphaScratch);
 }
 
 void OrcWeaponEnsureFireFxHooksInstalled() {
-    if (g_weaponFireFxHooksInstalled)
+    static bool attempted = false;
+    if (attempted)
         return;
-    MH_STATUS st = MH_Initialize();
-    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
-        OrcLogError("CWeapon::Fire FX hooks: MH_Initialize -> %s", MH_StatusToString(st));
-        return;
-    }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CWeapon_Fire), reinterpret_cast<void*>(&CWeapon_Fire_Detour),
-            reinterpret_cast<void**>(&g_CWeaponFire_Orig)) != MH_OK) {
-        OrcLogError("CWeapon::Fire hook: MH_CreateHook failed (0x%08X)", (unsigned)kAddr_CWeapon_Fire);
+    attempted = true;
+
+    const MH_STATUS initialized = MH_Initialize();
+    if (initialized != MH_OK && initialized != MH_ERROR_ALREADY_INITIALIZED) {
+        OrcLogError("weapon fx: MH_Initialize -> %s", MH_StatusToString(initialized));
         return;
     }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CWeapon_FireInstantHit),
-            reinterpret_cast<void*>(&CWeapon_FireInstantHit_Detour),
-            reinterpret_cast<void**>(&g_CWeaponFireInstantHit_Orig)) != MH_OK) {
-        OrcLogError("CWeapon::FireInstantHit hook: MH_CreateHook failed (0x%08X)",
-            (unsigned)kAddr_CWeapon_FireInstantHit);
+    if (InstallHook(kDoGunFlash, reinterpret_cast<void*>(&DoGunFlashDetour),
+            reinterpret_cast<void**>(&g_doGunFlashOriginal), "CPed::DoGunFlash")) {
+        OrcLogInfo("weapon fx: installed scoped CPed::DoGunFlash hook");
+    }
+
+    if (!IsOriginalCall(kAddLightCall, kAddLight) || !IsOriginalCall(kTriggerGunshotCall, kTriggerGunshot) ||
+        !IsOriginalCall(kAddGunshellCall, kAddGunshell)) {
+        OrcLogError("weapon fx: muzzle effect calls changed; visual redirects disabled");
         return;
     }
-    g_weaponFireFxHooksInstalled = true;
-    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CWeapon_Fire));
-    if (st != MH_OK)
-        OrcLogError("CWeapon::Fire hook: MH_EnableHook -> %s", MH_StatusToString(st));
-    else
-        OrcLogInfo("CWeapon::Fire muzzle FX hook (0x%08X)", (unsigned)kAddr_CWeapon_Fire);
-    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CWeapon_FireInstantHit));
-    if (st != MH_OK)
-        OrcLogError("CWeapon::FireInstantHit hook: MH_EnableHook -> %s", MH_StatusToString(st));
-    else
-        OrcLogInfo("CWeapon::FireInstantHit muzzle FX hook (0x%08X)", (unsigned)kAddr_CWeapon_FireInstantHit);
-    OrcWeaponEnsureGunflashHooksInstalled();
+    if (!InstallHook(kFireInstantHit, reinterpret_cast<void*>(&FireInstantHitDetour),
+            reinterpret_cast<void**>(&g_fireInstantHitOriginal), "CWeapon::FireInstantHit"))
+        return;
+
+    if (IsOriginalCall(kFireHeldRightCall, kFireHeldGun) && IsOriginalCall(kFireHeldLeftCall, kFireHeldGun) &&
+        InstallHook(kFireHeldGun, reinterpret_cast<void*>(&FireHeldGunDetour),
+            reinterpret_cast<void**>(&g_fireHeldGunOriginal), "CTaskSimpleUseGun::FireGun"))
+        OrcLogInfo("weapon fx: installed native firing-hand scope");
+
+    plugin::patch::RedirectCall(kAddLightCall, reinterpret_cast<void*>(&AddShotLight));
+    plugin::patch::RedirectCall(kTriggerGunshotCall, reinterpret_cast<void*>(&TriggerShotParticles));
+    plugin::patch::RedirectCall(kAddGunshellCall, reinterpret_cast<void*>(&AddShotShell));
+    OrcLogInfo("weapon fx: installed visual muzzle redirects (light, particles, shell)");
 }

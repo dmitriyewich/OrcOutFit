@@ -2,13 +2,8 @@
 
 #include "orc_weapon_audio_config.h"
 
-#include <cstdio>
-#include <cstring>
-#include <unordered_map>
-
 #include "plugin.h"
 
-#include "CGame.h"
 #include "CTimer.h"
 
 #include "orc_app.h"
@@ -17,230 +12,160 @@
 #include "orc_path.h"
 #include "orc_weapon_audio_internal.h"
 
-static const char* kWeaponAudioSection = "WeaponAudio";
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <optional>
+#include <string>
+#include <unordered_map>
 
-static const char* kClassKey[kOrcWeaponSoundClassCount] = {
-    "Shoot", "After", "Reload", "ReloadOne", "ReloadTwo", "Distant", "LowAmmo", "Dryfire", "Melee", "Loop", "MinigunSpin",
-    "MinigunSpinEnd", "ChainsawStop"};
+namespace {
+constexpr char kWeaponAudioSection[] = "WeaponAudio";
 
-static OrcWeaponAudioAttenuation g_builtin[kOrcWeaponSoundClassCount];
-static OrcWeaponAudioAttenuation g_iniOverride[kOrcWeaponSoundClassCount];
-static bool g_iniOverrideValid[kOrcWeaponSoundClassCount];
-static float g_iniPitch[kOrcWeaponSoundClassCount];
-static bool g_iniPitchValid[kOrcWeaponSoundClassCount];
-static bool g_builtinInited = false;
-
-struct OrcStemAttPack {
-    OrcWeaponAudioAttenuation per[kOrcWeaponSoundClassCount]{};
-    bool valid[kOrcWeaponSoundClassCount]{};
-    float pitch[kOrcWeaponSoundClassCount]{};
-    bool pitchValid[kOrcWeaponSoundClassCount]{};
+struct OrcAudioClassDefaults {
+    const char* key;
+    OrcWeaponAudioAttenuation att;
 };
 
-static std::unordered_map<std::string, OrcStemAttPack> g_stemAtt;
+constexpr OrcAudioClassDefaults kClassDefaults[kOrcWeaponSoundClassCount] = {
+    {"Shoot",          {250.0f, 1.5f, 1.0f, 2.0f}},
+    {"After",          {180.0f, 2.3f, 6.0f, 2.0f}},
+    {"Reload",         { 45.0f, 2.3f, 6.0f, 2.0f}},
+    {"ReloadOne",      { 45.0f, 2.3f, 6.0f, 2.0f}},
+    {"ReloadTwo",      { 45.0f, 2.3f, 6.0f, 2.0f}},
+    {"Distant",        {500.0f, 2.0f, 1.0f, 2.0f}},
+    {"LowAmmo",        { 80.0f, 4.5f, 1.0f, 2.0f}},
+    {"Dryfire",        { 35.0f, 1.5f, 1.0f, 2.0f}},
+    {"Melee",          { 35.0f, 2.0f, 3.0f, 1.0f}},
+    {"Loop",           {200.0f, 2.0f, 1.0f, 1.0f}},
+    {"MinigunSpin",    {160.0f, 3.0f, 1.5f, 0.8f}},
+    {"MinigunSpinEnd", {160.0f, 3.0f, 1.5f, 0.8f}},
+    {"ChainsawStop",   { 80.0f, 2.0f, 1.5f, 1.0f}},
+};
 
-static void OrcEnsureBuiltinDefaults() {
-    if (g_builtinInited)
-        return;
-    g_builtinInited = true;
-    auto set = [](int i, float ref, float maxd, float roll, float air) {
-        g_builtin[i].refDist = ref;
-        g_builtin[i].maxDist = maxd;
-        g_builtin[i].rolloffFactor = roll;
-        g_builtin[i].airAbsorption = air;
-    };
-    using O = OrcWeaponSoundClass;
-    set((int)O::Shoot, 1.5f, 250.0f, 1.0f, 2.0f);
-    set((int)O::After, 2.3f, 180.0f, 6.0f, 2.0f);
-    set((int)O::Reload, 2.3f, 45.0f, 6.0f, 2.0f);
-    set((int)O::ReloadOne, 2.3f, 45.0f, 6.0f, 2.0f);
-    set((int)O::ReloadTwo, 2.3f, 45.0f, 6.0f, 2.0f);
-    set((int)O::Distant, 2.0f, 500.0f, 1.0f, 2.0f);
-    set((int)O::LowAmmo, 4.5f, 80.0f, 1.0f, 2.0f);
-    set((int)O::Dryfire, 1.5f, 35.0f, 1.0f, 2.0f);
-    set((int)O::Melee, 2.0f, 35.0f, 3.0f, 1.0f);
-    set((int)O::Loop, 2.0f, 200.0f, 1.0f, 1.0f);
-    set((int)O::MinigunSpin, 3.0f, 160.0f, 1.5f, 0.8f);
-    set((int)O::MinigunSpinEnd, 3.0f, 160.0f, 1.5f, 0.8f);
-    set((int)O::ChainsawStop, 2.0f, 80.0f, 1.5f, 1.0f);
+struct OrcAudioClassSettings {
+    OrcWeaponAudioAttenuation att;
+    std::optional<float> pitch;
+};
+
+using OrcAudioClassSettingsArray = std::array<OrcAudioClassSettings, kOrcWeaponSoundClassCount>;
+
+struct OrcAudioStemSettings {
+    OrcAudioClassSettingsArray classes;
+    std::optional<bool> efxReverb;
+    std::optional<bool> efxInteriorOnly;
+};
+
+constexpr OrcAudioClassSettingsArray OrcBuiltinClasses() {
+    OrcAudioClassSettingsArray classes{};
+    for (size_t i = 0; i < classes.size(); ++i)
+        classes[i].att = kClassDefaults[i].att;
+    return classes;
 }
 
-static bool OrcMergeClassAttFromIni(const OrcIniDocument& doc, OrcWeaponAudioAttenuation& io, const char* classKey) {
-    bool any = false;
-    char buf[64];
-    _snprintf_s(buf, _TRUNCATE, "%s.RefDist", classKey);
-    if (doc.KeyExists(kWeaponAudioSection, buf)) {
-        io.refDist = static_cast<float>(atof(doc.GetString(kWeaponAudioSection, buf, "0").c_str()));
-        any = true;
-    }
-    _snprintf_s(buf, _TRUNCATE, "%s.MaxDist", classKey);
-    if (doc.KeyExists(kWeaponAudioSection, buf)) {
-        io.maxDist = static_cast<float>(atof(doc.GetString(kWeaponAudioSection, buf, "0").c_str()));
-        any = true;
-    }
-    _snprintf_s(buf, _TRUNCATE, "%s.Rolloff", classKey);
-    if (doc.KeyExists(kWeaponAudioSection, buf)) {
-        io.rolloffFactor = static_cast<float>(atof(doc.GetString(kWeaponAudioSection, buf, "0").c_str()));
-        any = true;
-    }
-    _snprintf_s(buf, _TRUNCATE, "%s.AirAbsorption", classKey);
-    if (doc.KeyExists(kWeaponAudioSection, buf)) {
-        io.airAbsorption = static_cast<float>(atof(doc.GetString(kWeaponAudioSection, buf, "0").c_str()));
-        any = true;
-    }
-    return any;
+OrcAudioClassSettingsArray g_audioClasses = OrcBuiltinClasses();
+std::unordered_map<std::string, OrcAudioStemSettings> g_stemSettings;
+
+std::optional<float> OrcReadAudioNumber(const OrcIniDocument& doc, const char* key) {
+    const std::string value = doc.GetString(kWeaponAudioSection, key, "");
+    const char* begin = value.data();
+    const char* end = begin + value.size();
+    while (begin != end && (*begin == ' ' || *begin == '\t'))
+        ++begin;
+    if (begin != end && *begin == '+')
+        ++begin;
+
+    float number = 0.0f;
+    auto parsed = std::from_chars(begin, end, number);
+    if (parsed.ec != std::errc{} || !std::isfinite(number))
+        return std::nullopt;
+
+    while (parsed.ptr != end && (*parsed.ptr == ' ' || *parsed.ptr == '\t'))
+        ++parsed.ptr;
+    if (parsed.ptr != end && *parsed.ptr != ';' && *parsed.ptr != '#')
+        return std::nullopt;
+    return number;
 }
 
-static bool OrcMergeClassPitchFromIni(const OrcIniDocument& doc, float& io, const char* classKey) {
-    char buf[64];
-    _snprintf_s(buf, _TRUNCATE, "%s.Pitch", classKey);
-    if (!doc.KeyExists(kWeaponAudioSection, buf))
-        return false;
-    io = static_cast<float>(atof(doc.GetString(kWeaponAudioSection, buf, "1").c_str()));
-    return true;
+std::optional<bool> OrcReadAudioFlag(const OrcIniDocument& doc, const char* key) {
+    if (const auto value = OrcReadAudioNumber(doc, key))
+        return *value != 0.0f;
+    return std::nullopt;
 }
+
+void OrcMergeAudioClasses(const OrcIniDocument& doc, OrcAudioClassSettingsArray& classes) {
+    constexpr float kMinPositive = std::numeric_limits<float>::min();
+    constexpr float kMaxFloat = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < classes.size(); ++i) {
+        const std::string prefix = std::string(kClassDefaults[i].key) + ".";
+        auto apply = [&](const char* field, float& target, float min, float max) {
+            const auto value = OrcReadAudioNumber(doc, (prefix + field).c_str());
+            if (value && *value >= min && *value <= max)
+                target = *value;
+        };
+
+        auto& cls = classes[i];
+        apply("RefDist", cls.att.refDist, kMinPositive, kMaxFloat);
+        apply("MaxDist", cls.att.maxDist, 0.0f, kMaxFloat);
+        apply("Rolloff", cls.att.rolloffFactor, 0.0f, kMaxFloat);
+        apply("AirAbsorption", cls.att.airAbsorption, 0.0f, 10.0f);
+        if (const auto pitch = OrcReadAudioNumber(doc, (prefix + "Pitch").c_str()))
+            cls.pitch = std::clamp(*pitch, 0.01f, 4.0f);
+    }
+}
+
+const OrcAudioStemSettings& OrcGetStemSettings(const OrcWeaponAudioStemContext& ctx) {
+    auto [it, inserted] = g_stemSettings.try_emplace(ctx.asset->dffPath);
+    auto& settings = it->second;
+    if (inserted) {
+        settings.classes = g_audioClasses;
+        const std::string path = OrcJoinPath(ctx.dir, ctx.stem + ".audio");
+        OrcIniDocument doc;
+        if (doc.LoadFromFile(path.c_str())) {
+            OrcMergeAudioClasses(doc, settings.classes);
+            settings.efxReverb = OrcReadAudioFlag(doc, "EfxReverb");
+            settings.efxInteriorOnly = OrcReadAudioFlag(doc, "EfxReverbInteriorOnly");
+        }
+    }
+    return settings;
+}
+
+void OrcPushIniFloat(std::vector<OrcIniValue>& values, const std::string& key, float value) {
+    char buf[48];
+    const auto result = std::to_chars(buf, buf + sizeof(buf), value);
+    if (result.ec == std::errc{})
+        values.push_back({kWeaponAudioSection, key, std::string(buf, result.ptr)});
+}
+} // namespace
 
 void OrcWeaponAudioConfigApplyFromMainIni(const OrcIniDocument& ini) {
-    OrcEnsureBuiltinDefaults();
-    for (int i = 0; i < kOrcWeaponSoundClassCount; ++i) {
-        OrcWeaponAudioAttenuation a = g_builtin[i];
-        const bool any = OrcMergeClassAttFromIni(ini, a, kClassKey[i]);
-        g_iniOverrideValid[i] = any;
-        if (any)
-            g_iniOverride[i] = a;
-
-        float p = 1.0f;
-        g_iniPitchValid[i] = OrcMergeClassPitchFromIni(ini, p, kClassKey[i]);
-        if (g_iniPitchValid[i])
-            g_iniPitch[i] = p;
-    }
-
-    g_weaponAudioEfxReverb = ini.GetInt(kWeaponAudioSection, "EfxReverb", 1) != 0;
-    g_weaponAudioEfxInteriorOnly = ini.GetInt(kWeaponAudioSection, "EfxReverbInteriorOnly", 1) != 0;
-
-    g_stemAtt.clear();
+    g_audioClasses = OrcBuiltinClasses();
+    OrcMergeAudioClasses(ini, g_audioClasses);
+    g_weaponAudioEfxReverb = OrcReadAudioFlag(ini, "EfxReverb").value_or(true);
+    g_weaponAudioEfxInteriorOnly = OrcReadAudioFlag(ini, "EfxReverbInteriorOnly").value_or(true);
+    OrcWeaponAudioConfigClearStemOverrides();
 }
 
 void OrcWeaponAudioConfigClearStemOverrides() {
-    g_stemAtt.clear();
-}
-
-static void OrcPushIniFloat(std::vector<OrcIniValue>& values, const char* key, float v, const char* fmt) {
-    char buf[48];
-    _snprintf_s(buf, _TRUNCATE, fmt, v);
-    OrcIniValue iv;
-    iv.section = kWeaponAudioSection;
-    iv.key = key;
-    iv.value = buf;
-    values.push_back(std::move(iv));
+    g_stemSettings.clear();
 }
 
 void OrcWeaponAudioConfigAppendMainIniValues(std::vector<OrcIniValue>& values) {
-    OrcEnsureBuiltinDefaults();
-    char kbuf[80];
-    for (int i = 0; i < kOrcWeaponSoundClassCount; ++i) {
-        const OrcWeaponAudioAttenuation& a = g_iniOverrideValid[i] ? g_iniOverride[i] : g_builtin[i];
-        _snprintf_s(kbuf, _TRUNCATE, "%s.RefDist", kClassKey[i]);
-        OrcPushIniFloat(values, kbuf, a.refDist, "%.2f");
-        _snprintf_s(kbuf, _TRUNCATE, "%s.MaxDist", kClassKey[i]);
-        OrcPushIniFloat(values, kbuf, a.maxDist, "%.0f");
-        _snprintf_s(kbuf, _TRUNCATE, "%s.Rolloff", kClassKey[i]);
-        OrcPushIniFloat(values, kbuf, a.rolloffFactor, "%.2f");
-        _snprintf_s(kbuf, _TRUNCATE, "%s.AirAbsorption", kClassKey[i]);
-        OrcPushIniFloat(values, kbuf, a.airAbsorption, "%.2f");
-        if (g_iniPitchValid[i]) {
-            _snprintf_s(kbuf, _TRUNCATE, "%s.Pitch", kClassKey[i]);
-            OrcPushIniFloat(values, kbuf, g_iniPitch[i], "%.2f");
-        }
+    for (size_t i = 0; i < g_audioClasses.size(); ++i) {
+        const std::string prefix = std::string(kClassDefaults[i].key) + ".";
+        const auto& cls = g_audioClasses[i];
+        OrcPushIniFloat(values, prefix + "RefDist", cls.att.refDist);
+        OrcPushIniFloat(values, prefix + "MaxDist", cls.att.maxDist);
+        OrcPushIniFloat(values, prefix + "Rolloff", cls.att.rolloffFactor);
+        OrcPushIniFloat(values, prefix + "AirAbsorption", cls.att.airAbsorption);
+        if (cls.pitch)
+            OrcPushIniFloat(values, prefix + "Pitch", *cls.pitch);
     }
-    {
-        OrcIniValue iv;
-        iv.section = kWeaponAudioSection;
-        iv.key = "EfxReverb";
-        iv.value = g_weaponAudioEfxReverb ? "1" : "0";
-        values.push_back(std::move(iv));
-    }
-    {
-        OrcIniValue iv;
-        iv.section = kWeaponAudioSection;
-        iv.key = "EfxReverbInteriorOnly";
-        iv.value = g_weaponAudioEfxInteriorOnly ? "1" : "0";
-        values.push_back(std::move(iv));
-    }
-}
-
-OrcWeaponAudioAttenuation OrcWeaponAudioConfigBuiltinAttenuation(OrcWeaponSoundClass cls) {
-    OrcEnsureBuiltinDefaults();
-    const int i = static_cast<int>(cls);
-    if (i < 0 || i >= kOrcWeaponSoundClassCount)
-        return g_builtin[0];
-    return g_builtin[i];
-}
-
-static void OrcLoadStemSidecar(const OrcWeaponAudioStemContext& ctx, OrcStemAttPack& pack) {
-    OrcEnsureBuiltinDefaults();
-    const std::string path = OrcJoinPath(ctx.dir, ctx.stem + ".audio");
-    OrcIniDocument doc;
-    if (!doc.LoadFromFile(path.c_str()))
-        return;
-    for (int i = 0; i < kOrcWeaponSoundClassCount; ++i) {
-        OrcWeaponAudioAttenuation a = g_iniOverrideValid[i] ? g_iniOverride[i] : g_builtin[i];
-        const bool any = OrcMergeClassAttFromIni(doc, a, kClassKey[i]);
-        if (any) {
-            pack.per[i] = a;
-            pack.valid[i] = true;
-        }
-        float p = 1.0f;
-        if (OrcMergeClassPitchFromIni(doc, p, kClassKey[i])) {
-            pack.pitch[i] = p;
-            pack.pitchValid[i] = true;
-        }
-    }
-}
-
-static const OrcStemAttPack& OrcGetStemPack(const OrcWeaponAudioStemContext& ctx) {
-    const std::string key = OrcJoinPath(ctx.dir, ctx.stem);
-    auto it = g_stemAtt.find(key);
-    if (it != g_stemAtt.end())
-        return it->second;
-
-    OrcStemAttPack pack{};
-    OrcLoadStemSidecar(ctx, pack);
-    auto ins = g_stemAtt.emplace(key, std::move(pack));
-    return ins.first->second;
-}
-
-static float OrcResolveClassPitch(const OrcWeaponAudioStemContext* ctx, OrcWeaponSoundClass cls) {
-    const int ci = static_cast<int>(cls);
-    float p = 1.0f;
-    if (g_iniPitchValid[ci])
-        p = g_iniPitch[ci];
-    if (ctx) {
-        const OrcStemAttPack& sp = OrcGetStemPack(*ctx);
-        if (sp.pitchValid[ci])
-            p = sp.pitch[ci];
-    }
-    return std::max(0.01f, std::min(4.0f, p));
-}
-
-OrcWeaponAudioAttenuation OrcWeaponAudioConfigResolveAttenuation(const OrcWeaponAudioStemContext* ctx, OrcWeaponSoundClass cls) {
-    OrcEnsureBuiltinDefaults();
-    const int ci = static_cast<int>(cls);
-    OrcWeaponAudioAttenuation a = g_iniOverrideValid[ci] ? g_iniOverride[ci] : g_builtin[ci];
-    if (ctx) {
-        const OrcStemAttPack& sp = OrcGetStemPack(*ctx);
-        if (sp.valid[ci])
-            a = sp.per[ci];
-    }
-    return a;
-}
-
-bool OrcWeaponAudioConfigEfxReverbEnabled() {
-    return g_weaponAudioEfxReverb;
-}
-
-bool OrcWeaponAudioConfigEfxInteriorOnly() {
-    return g_weaponAudioEfxInteriorOnly;
+    values.push_back({kWeaponAudioSection, "EfxReverb", g_weaponAudioEfxReverb ? "1" : "0"});
+    values.push_back({kWeaponAudioSection, "EfxReverbInteriorOnly", g_weaponAudioEfxInteriorOnly ? "1" : "0"});
 }
 
 OrcWeaponSoundClass OrcWeaponInferSoundClassFromSuffix(const char* sfxSuffix) {
@@ -291,16 +216,22 @@ OrcWeaponSoundClass OrcWeaponInferSoundClassFromSuffix(const char* sfxSuffix) {
 
 OrcWeaponAudioPlayParams OrcWeaponAudioBuildPlayParams(const OrcWeaponAudioStemContext* ctx, float gainScale,
     OrcWeaponSpatial spatial, OrcWeaponSoundClass cls) {
-    OrcWeaponAudioPlayParams p{};
-    p.gain = gainScale >= 0.0f ? gainScale : 0.0f;
-    p.spatial = spatial;
-    p.soundClass = cls;
-    const float classPitch = OrcResolveClassPitch(ctx, cls);
-    const float timeScale = std::max(0.01f, std::min(4.0f, CTimer::ms_fTimeScale));
-    p.pitch = classPitch * timeScale;
-    p.att = OrcWeaponAudioConfigResolveAttenuation(ctx, cls);
-    const bool interior = CGame::currArea > 0;
-    p.useEfxReverb =
-        g_weaponAudioEfxReverb && spatial == OrcWeaponSpatial::WorldAtPed && (!g_weaponAudioEfxInteriorOnly || interior);
-    return p;
+    const OrcAudioStemSettings* stem = ctx && ctx->asset ? &OrcGetStemSettings(*ctx) : nullptr;
+    const size_t index = static_cast<size_t>(cls);
+    const auto& classes = stem ? stem->classes : g_audioClasses;
+    const auto& settings = classes[index < classes.size() ? index : 0];
+
+    OrcWeaponAudioPlayParams params{};
+    params.gain = std::isfinite(gainScale) ? std::max(0.0f, gainScale) : 0.0f;
+    params.spatial = spatial;
+    params.soundClass = cls;
+    const float timeScale = CTimer::ms_fTimeScale;
+    params.pitch = settings.pitch.value_or(1.0f) * (std::isfinite(timeScale) ? std::clamp(timeScale, 0.01f, 4.0f) : 1.0f);
+    params.att = settings.att;
+
+    if (stem) {
+        params.efxReverbEnabled = stem->efxReverb;
+        params.efxReverbInteriorOnly = stem->efxInteriorOnly;
+    }
+    return params;
 }

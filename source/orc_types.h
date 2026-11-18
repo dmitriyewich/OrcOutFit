@@ -5,9 +5,9 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
-#include <cstdint>
 
 struct RwObject;
+class CBaseModelInfo;
 
 // RpHAnim NODE IDs (same as in main / context.md)
 constexpr int BONE_PELVIS = 2;
@@ -86,6 +86,8 @@ struct CustomSkinCfg {
     int txdSlot = -1;
     RwObject* rwObject = nullptr;
     bool loadFailed = false;
+    uint32_t retryLoadAt = 0;
+    uint32_t lastUseAt = 0;
 };
 
 struct StandardObjectSlotCfg {
@@ -100,7 +102,10 @@ struct StandardSkinCfg {
     std::string nickListCsv;
     std::vector<std::string> nicknames;
     RwObject* rwObject = nullptr;
+    CBaseModelInfo* loadedModel = nullptr;
     bool loadFailedLogged = false;
+    uint32_t retryLoadAt = 0;
+    uint32_t lastUseAt = 0;
 };
 
 enum SkinSelectedSource {

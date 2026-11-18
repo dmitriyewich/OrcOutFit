@@ -111,3 +111,21 @@ constexpr bool OrcShouldRunWeaponBodyCacheSync(bool pluginEnabled, bool playerPr
 constexpr bool OrcShouldApplyObjectSuppressionToWeaponBody(bool attachmentSceneRendererAvailable) {
     return attachmentSceneRendererAvailable;
 }
+
+// A clump can be rendered twice for dual wield or again in a different view on the same tick.
+// Suppress its stock atomics only after a successful replacement in this specific invocation.
+class OrcHeldStockDrawPass {
+public:
+    template<class Draw>
+    bool TryReplace(Draw draw) {
+        if (!attempted_) {
+            attempted_ = true;
+            replaced_ = draw();
+        }
+        return replaced_;
+    }
+
+private:
+    bool attempted_ = false;
+    bool replaced_ = false;
+};

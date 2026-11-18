@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 class CPed;
 
@@ -16,10 +17,12 @@ struct WeaponReplacementAsset {
     std::string displayName;
     std::string dffPath;
     std::string txdPath;
-    int txdSlot = -1;
+    RwTexDictionary* txd = nullptr;
     RwObject* rwObject = nullptr;
     bool loadAttempted = false;
-    bool loadFailedLogged = false;
+    bool muzzleSampled = false;
+    bool muzzleFound = false;
+    float muzzleX = 0.0f;
 };
 
 struct WeaponTextureAsset {
@@ -28,9 +31,8 @@ struct WeaponTextureAsset {
     std::string matchNameLower;
     std::string displayName;
     std::string txdPath;
-    int txdSlot = -1;
+    RwTexDictionary* txd = nullptr;
     bool loadAttempted = false;
-    bool loadFailedLogged = false;
 };
 
 void DiscoverWeaponReplacements(bool rerollStickyChoices);
@@ -39,19 +41,13 @@ void DiscoverWeaponTextures();
 WeaponReplacementStats OrcGetWeaponReplacementStats();
 WeaponTextureStats OrcGetWeaponTextureStats();
 
-void OrcRestoreWeaponTextureOverrides();
-/// Applies only entries queued while `OrcWeaponHeldTextureDeferBegin` active (held weapon clone path).
-void OrcRestoreWeaponHeldTextureOverrides();
-
-/// Route texture override recording to the held defer buffer until paired `OrcWeaponHeldTextureDeferEnd()` (fixes
-/// premature restore inside `pedRenderEvent.after`, before GTA draws `m_pWeaponObject`).
-void OrcWeaponHeldTextureDeferBegin();
-void OrcWeaponHeldTextureDeferEnd();
+/// Capture before applying draw-local overrides; pass the result to restore only that draw's changes.
+std::size_t OrcWeaponTextureRestorePoint();
+void OrcRestoreWeaponTextureOverrides(std::size_t restorePoint = 0);
 void OrcWeaponAssetsShutdown();
 
 std::string OrcGetWeaponModelBaseNameLower(int wt);
 
-WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom);
 WeaponReplacementAsset* OrcResolveUsableWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom);
 std::string OrcResolveUsableWeaponReplacementKeyForPed(CPed* ped, int wt, bool allowRandom);
 void OrcCollectWeaponReplacementVariantKeys(int wt, std::vector<std::string>& outKeys);
@@ -59,7 +55,6 @@ bool OrcPinWeaponReplacementChoiceForPed(CPed* ped, int wt, const std::string& r
 
 RwObject* OrcCloneWeaponReplacementObject(WeaponReplacementAsset& asset);
 
-void OrcApplyWeaponTextureToRwObject(RwObject* object, WeaponTextureAsset* asset);
 /// Applies vanilla TXD `*_remap` (only if weapon mesh is standard / not Guns replacement),
 /// Guns/GunsNick TXD internal `*_remap` variants (only replacement mesh),
 /// then same-name texture overlay from custom TXD (`customAsset`).
@@ -68,6 +63,7 @@ void OrcApplyWeaponTexturesCombined(CPed* ped,
     RwObject* object,
     WeaponTextureAsset* customAsset,
     bool weaponMeshIsReplacement);
+/// `nullptr` resolves the replacement automatically. An explicit empty key is a stock mesh.
 WeaponTextureAsset* OrcResolveUsableWeaponTextureAssetForPed(CPed* ped,
     int wt,
     bool allowRandom,

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -12,4 +11,4 @@ struct OrcAudioPcm {
 };
 
 /// Поддержка: .wav .mp3 .flac .ogg (регистр расширения по пути).
-bool OrcAudioDecodeFile(const char* pathUtf8, OrcAudioPcm& out, std::string* errorOut = nullptr);
+bool OrcAudioDecodeFile(const char* path, OrcAudioPcm& out, std::string* errorOut = nullptr);

@@ -1,23 +1,13 @@
 #pragma once
 
-#include <cstdint>
-
-struct CVector;
-
-/// Вызывать из `DllMain` после `g_module = module` (до логов опционально).
-void OrcWeaponAudioSetPluginModule(void* module);
-
-/// MinHook на `CAEWeaponAudioEntity::WeaponFire` / `WeaponReload` и `CAEPedAudioEntity::HandlePedHit` (1.0 US).
-void OrcWeaponAudioEnsureHooksInstalled();
-
 /// Контекст OpenAL + слушатель; пауза при меню.
 void OrcWeaponAudioShutdown();
 
-/// Каждый кадр из `gameProcessEvent` (главный поток игры).
+/// Установка хуков после включения звуков и обработка источников в главном потоке.
 void OrcWeaponAudioOnGameProcess();
 
-/// Сброс negative cache путей WAV (после rescan замены оружия).
-void OrcWeaponAudioInvalidateCaches();
+/// Остановить источники при перезапуске мира или приостановке плагина.
+void OrcWeaponAudioStopPlayback();
 
-/// Остановить loop-источники OpenAL для ped (смена оружия / unload).
-void OrcWeaponAudioLoopsStopForPed(CPed* ped);
+/// Сброс путей, декодированных буферов и настроек .audio после пересканирования.
+void OrcWeaponAudioInvalidateCaches();

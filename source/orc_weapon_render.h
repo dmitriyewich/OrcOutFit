@@ -6,6 +6,7 @@
 #include <vector>
 
 class CPed;
+struct OrcHeldGunflash;
 struct WeaponTextureAsset;
 
 /// Normalizes and validates a detached body clone once. All body atomics use GTA's default callback so the
@@ -21,17 +22,16 @@ void OrcReleaseWeaponBodyMaterialPins(std::vector<RpMaterial*>& pinnedMaterials)
 /// Existing atomic callbacks stay unchanged (normally `AtomicDefaultRenderCallBack`).
 bool OrcNormalizeWeaponObjectToClumpForDefaultRender(RwObject*& object);
 
-/// Renders a normalized held replacement through its existing GTA callbacks.
-/// Does not override lighting or RenderWare states; the surrounding held draw owns them.
-bool OrcRenderWeaponObjectLikeVanilla(RwObject* object);
-
-/// Applies existing weapon texture overrides, renders, and always restores material texture pointers.
+/// Handles a held draw with scoped textures. Pass only the requested mesh and flash for split batches.
 bool OrcRenderWeaponObjectLikeVanillaWithTextures(CPed* ped,
     int weaponType,
     RwObject* object,
     WeaponTextureAsset* customAsset,
     bool weaponMeshIsReplacement,
-    bool applyTextureOverrides);
+    bool applyTextureOverrides,
+    OrcHeldGunflash* gunflash = nullptr,
+    bool left = false,
+    bool drawMesh = true);
 
 /// Renders a prepared body clone through AtomicDefault while bypassing held interception.
 /// The caller owns the attachment lighting and RenderWare states.
@@ -47,7 +47,3 @@ bool OrcIsBodyAttachmentDrawActive();
 
 /// Detours use this guard to bypass replacement matching while prepared custom atomics call original GTA callbacks.
 bool OrcIsVanillaCustomWeaponDrawActive();
-
-/// Full installs this hook only for held before/after ownership around GTA's weapon batch.
-/// Detached body clones render later as ordinary attachments from `drawingEvent`.
-void OrcWeaponRenderEnsureBatchHookInstalled();

@@ -5,11 +5,14 @@
 #include "orc_log.h"
 
 #include <algorithm>
-#include <cctype>
-#include <cfloat>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
+#include <memory>
+
+#include <windows.h>
 
 #define DR_WAV_IMPLEMENTATION
 #include "external/dr_libs/dr_wav.h"
@@ -22,154 +25,138 @@ extern "C" {
 #include "external/stb_vorbis/stb_vorbis.c"
 }
 
-static bool OrcStrEndsWithIgnoreCase(const char* path, const char* extWithDot) {
-    if (!path || !extWithDot)
+namespace {
+constexpr size_t kMaxDecodedFrames = 4 * 1024 * 1024; // 16 MiB моно PCM
+constexpr DWORD kMaxEncodedBytes = 64 * 1024 * 1024;
+constexpr unsigned kMaxSampleRate = 384000;
+constexpr unsigned kMaxChannels = 64;
+
+template <typename ReadFrames>
+bool OrcDecodeMono(unsigned channels, unsigned rate, uint64_t expectedFrames, ReadFrames read,
+    OrcAudioPcm& out, const char*& error) {
+    if (channels == 0 || channels > kMaxChannels || rate == 0 || rate > kMaxSampleRate) {
+        error = "invalid channels or sample rate";
         return false;
-    const size_t lp = strlen(path);
-    const size_t le = strlen(extWithDot);
-    if (lp < le)
-        return false;
-    for (size_t i = 0; i < le; ++i) {
-        const char a = (char)tolower((unsigned char)path[lp - le + i]);
-        const char b = (char)tolower((unsigned char)extWithDot[i]);
-        if (a != b)
-            return false;
     }
+    if (expectedFrames > kMaxDecodedFrames) {
+        error = "decoded audio exceeds 16 MiB";
+        return false;
+    }
+
+    OrcAudioPcm pcm;
+    pcm.samples.reserve(static_cast<size_t>(expectedFrames));
+    std::array<float, 4096> interleaved;
+    const double channelScale = 1.0 / channels;
+    for (;;) {
+        const size_t offset = pcm.samples.size();
+        const size_t remaining = kMaxDecodedFrames - offset;
+        const size_t requested = std::min(interleaved.size() / channels, remaining + 1);
+        const uint64_t framesRead = read(interleaved.data(), requested);
+        if (framesRead > remaining) {
+            error = "decoded audio exceeds 16 MiB";
+            return false;
+        }
+        const size_t frames = static_cast<size_t>(framesRead);
+        pcm.samples.resize(offset + frames);
+        for (size_t frame = 0; frame < frames; ++frame) {
+            double sum = 0.0;
+            const float* samples = interleaved.data() + frame * channels;
+            for (unsigned c = 0; c < channels; ++c) {
+                if (std::isfinite(samples[c]))
+                    sum += samples[c];
+            }
+            pcm.samples[offset + frame] = std::clamp(static_cast<float>(sum * channelScale), -1.0f, 1.0f);
+        }
+        if (frames < requested)
+            break;
+    }
+    if (pcm.samples.empty() || (expectedFrames != 0 && pcm.samples.size() != expectedFrames)) {
+        error = "empty or truncated audio";
+        return false;
+    }
+
+    pcm.sampleRate = rate;
+    pcm.channels = 1;
+    out = std::move(pcm);
     return true;
 }
 
-static void OrcDownmixToMono(OrcAudioPcm& io) {
-    if (io.channels <= 1 || io.samples.empty())
-        return;
-    const size_t frames = io.samples.size() / io.channels;
-    std::vector<float> mono(frames);
-    for (size_t f = 0; f < frames; ++f) {
-        double acc = 0.0;
-        for (unsigned c = 0; c < io.channels; ++c)
-            acc += (double)io.samples[f * io.channels + c];
-        mono[f] = (float)(acc / (double)io.channels);
-    }
-    io.samples = std::move(mono);
-    io.channels = 1;
-}
-
-static bool OrcDecodeWav(const char* path, OrcAudioPcm& out, std::string* err) {
+bool OrcDecodeWav(const char* path, OrcAudioPcm& out, const char*& error) {
     drwav wav{};
     if (!drwav_init_file(&wav, path, nullptr)) {
-        if (err)
-            *err = "drwav_init_file failed";
+        error = "invalid WAV";
         return false;
     }
-    drwav_uint64 frames = wav.totalPCMFrameCount;
-    if (frames == 0 || wav.channels == 0) {
-        drwav_uninit(&wav);
-        if (err)
-            *err = "empty wav";
-        return false;
-    }
-    std::vector<float> buf(static_cast<size_t>(frames) * wav.channels);
-    drwav_uint64 n = drwav_read_pcm_frames_f32(&wav, frames, buf.data());
-    drwav_uninit(&wav);
-    if (n == 0) {
-        if (err)
-            *err = "drwav read 0 frames";
-        return false;
-    }
-    buf.resize(static_cast<size_t>(n) * wav.channels);
-    out.samples = std::move(buf);
-    out.channels = wav.channels;
-    out.sampleRate = wav.sampleRate;
-    return true;
+    const std::unique_ptr<drwav, decltype(&drwav_uninit)> close(&wav, drwav_uninit);
+    return OrcDecodeMono(wav.channels, wav.sampleRate, wav.totalPCMFrameCount,
+        [&](float* samples, size_t frames) { return drwav_read_pcm_frames_f32(&wav, frames, samples); }, out, error);
 }
 
-static bool OrcDecodeMp3(const char* path, OrcAudioPcm& out, std::string* err) {
-    drmp3_config cfg{};
-    drmp3_uint64 total = 0;
-    float* p = drmp3_open_file_and_read_pcm_frames_f32(path, &cfg, &total, nullptr);
-    if (!p || total == 0 || cfg.channels == 0) {
-        if (p)
-            drmp3_free(p, nullptr);
-        if (err)
-            *err = "drmp3 failed";
+bool OrcDecodeMp3(const char* path, OrcAudioPcm& out, const char*& error) {
+    drmp3 mp3{};
+    if (!drmp3_init_file(&mp3, path, nullptr)) {
+        error = "invalid MP3";
         return false;
     }
-    out.samples.assign(p, p + static_cast<size_t>(total) * cfg.channels);
-    drmp3_free(p, nullptr);
-    out.channels = cfg.channels;
-    out.sampleRate = cfg.sampleRate;
-    return true;
+    const std::unique_ptr<drmp3, decltype(&drmp3_uninit)> close(&mp3, drmp3_uninit);
+    return OrcDecodeMono(mp3.channels, mp3.sampleRate, 0,
+        [&](float* samples, size_t frames) { return drmp3_read_pcm_frames_f32(&mp3, frames, samples); }, out, error);
 }
 
-static bool OrcDecodeFlac(const char* path, OrcAudioPcm& out, std::string* err) {
-    unsigned ch = 0, sr = 0;
-    drflac_uint64 frames = 0;
-    float* p = drflac_open_file_and_read_pcm_frames_f32(path, &ch, &sr, &frames, nullptr);
-    if (!p || frames == 0 || ch == 0) {
-        if (p)
-            drflac_free(p, nullptr);
-        if (err)
-            *err = "drflac failed";
+bool OrcDecodeFlac(const char* path, OrcAudioPcm& out, const char*& error) {
+    const std::unique_ptr<drflac, decltype(&drflac_close)> flac(drflac_open_file(path, nullptr), drflac_close);
+    if (!flac) {
+        error = "invalid FLAC";
         return false;
     }
-    out.samples.assign(p, p + static_cast<size_t>(frames) * ch);
-    drflac_free(p, nullptr);
-    out.channels = ch;
-    out.sampleRate = sr;
-    return true;
+    return OrcDecodeMono(flac->channels, flac->sampleRate, flac->totalPCMFrameCount,
+        [&](float* samples, size_t frames) { return drflac_read_pcm_frames_f32(flac.get(), frames, samples); }, out, error);
 }
 
-static bool OrcDecodeOgg(const char* path, OrcAudioPcm& out, std::string* err) {
-    short* decoded = nullptr;
-    int ch = 0, sr = 0;
-    int total = stb_vorbis_decode_filename(path, &ch, &sr, &decoded);
-    if (total <= 0 || !decoded || ch <= 0) {
-        if (decoded)
-            free(decoded);
-        if (err)
-            *err = "stb_vorbis failed";
+bool OrcDecodeOgg(const char* path, OrcAudioPcm& out, const char*& error) {
+    int vorbisError = 0;
+    const std::unique_ptr<stb_vorbis, decltype(&stb_vorbis_close)> ogg(
+        stb_vorbis_open_filename(path, &vorbisError, nullptr), stb_vorbis_close);
+    if (!ogg) {
+        error = "invalid Ogg Vorbis";
         return false;
     }
-    const int samples = total;
-    out.samples.resize(static_cast<size_t>(samples));
-    for (int i = 0; i < samples; ++i) {
-        float v = static_cast<float>(decoded[i]) / 32768.0f;
-        out.samples[static_cast<size_t>(i)] = std::clamp(v, -1.0f, 1.0f);
-    }
-    free(decoded);
-    out.channels = static_cast<unsigned>(ch);
-    out.sampleRate = static_cast<unsigned>(sr);
-    return true;
+    const stb_vorbis_info info = stb_vorbis_get_info(ogg.get());
+    const unsigned expectedFrames = stb_vorbis_stream_length_in_samples(ogg.get());
+    return OrcDecodeMono(info.channels, info.sample_rate, expectedFrames,
+        [&](float* samples, size_t frames) {
+            return stb_vorbis_get_samples_float_interleaved(
+                ogg.get(), info.channels, samples, static_cast<int>(frames * info.channels));
+        }, out, error);
 }
+} // namespace
 
-bool OrcAudioDecodeFile(const char* pathUtf8, OrcAudioPcm& out, std::string* errorOut) {
+bool OrcAudioDecodeFile(const char* path, OrcAudioPcm& out, std::string* errorOut) {
     out = {};
-    if (!pathUtf8 || !pathUtf8[0]) {
-        if (errorOut)
-            *errorOut = "empty path";
-        return false;
-    }
-    std::string err;
+    const char* error = "";
     bool ok = false;
-    if (OrcStrEndsWithIgnoreCase(pathUtf8, ".wav"))
-        ok = OrcDecodeWav(pathUtf8, out, &err);
-    else if (OrcStrEndsWithIgnoreCase(pathUtf8, ".mp3"))
-        ok = OrcDecodeMp3(pathUtf8, out, &err);
-    else if (OrcStrEndsWithIgnoreCase(pathUtf8, ".flac"))
-        ok = OrcDecodeFlac(pathUtf8, out, &err);
-    else if (OrcStrEndsWithIgnoreCase(pathUtf8, ".ogg"))
-        ok = OrcDecodeOgg(pathUtf8, out, &err);
-    else {
-        if (errorOut)
-            *errorOut = "unknown extension";
-        return false;
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if (!path || !path[0]) {
+        error = "empty path";
+    } else if (!GetFileAttributesExA(path, GetFileExInfoStandard, &attributes) ||
+        (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        error = "audio file unavailable";
+    } else if (attributes.nFileSizeHigh != 0 || attributes.nFileSizeLow > kMaxEncodedBytes) {
+        error = "audio file exceeds 64 MiB";
+    } else {
+        const char* ext = std::strrchr(path, '.');
+        if (ext && _stricmp(ext, ".wav") == 0)
+            ok = OrcDecodeWav(path, out, error);
+        else if (ext && _stricmp(ext, ".mp3") == 0)
+            ok = OrcDecodeMp3(path, out, error);
+        else if (ext && _stricmp(ext, ".flac") == 0)
+            ok = OrcDecodeFlac(path, out, error);
+        else if (ext && _stricmp(ext, ".ogg") == 0)
+            ok = OrcDecodeOgg(path, out, error);
+        else
+            error = "unknown extension";
     }
-    if (!ok) {
-        if (errorOut)
-            *errorOut = err;
-        return false;
-    }
-    if (out.channels > 1 && g_orcLogLevel >= OrcLogLevel::Info)
-        OrcLogInfo("weapon audio decode: stereo/multichannel -> mono (%s)", pathUtf8);
-    OrcDownmixToMono(out);
-    return !out.samples.empty() && out.sampleRate > 0 && out.channels == 1;
+    if (errorOut)
+        *errorOut = error;
+    return ok;
 }

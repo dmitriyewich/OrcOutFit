@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 enum class OrcWeaponSpatial : uint8_t {
     ListenerRelative,
@@ -38,5 +39,6 @@ struct OrcWeaponAudioPlayParams {
     OrcWeaponSpatial spatial = OrcWeaponSpatial::ListenerRelative;
     OrcWeaponSoundClass soundClass = OrcWeaponSoundClass::Shoot;
     OrcWeaponAudioAttenuation att{};
-    bool useEfxReverb = false;
+    std::optional<bool> efxReverbEnabled;
+    std::optional<bool> efxReverbInteriorOnly;
 };

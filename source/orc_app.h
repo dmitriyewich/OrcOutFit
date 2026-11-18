@@ -149,20 +149,23 @@ struct OrcResolvedPedSkin {
     bool isLocalPed = false;
     bool fromRandomPool = false;
 };
+const char* OrcGetSelectedManualSkinDffName();
 OrcResolvedPedSkin OrcResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer);
 OrcResolvedPedSkin OrcResolveSkinForPedModel(CPed* ped, CPlayerPed* localPlayer, int baseModelId);
 bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s);
 void OrcReleaseCustomSkinTxd(int txdSlot);
-void OrcSkinsRenderForPeds(CPlayerPed* localPlayer);
+void OrcSkinsInstallOverlayRenderHook();
 void OrcSkinsReleaseAllInstancesAndPreview();
-bool OrcSkinsLocalSelectionAddsActiveWork();
 void OrcSkinsOnPedRenderBefore(CPed* ped);
 void OrcSkinsOnPedRenderAfter(CPed* ped);
 void OrcSkinsShutdown();
+void OrcSkinsPruneRandomSelections();
+void OrcSkinsPruneUnusedAssets();
 
 // Shared with orc_ui.cpp (skin list selection)
 extern int g_uiSkinIdx;
 extern int g_uiSkinEditIdx;
+extern int g_uiStdSkinEditModelId;
 extern int g_uiCustomIdx;
 
 void LoadConfig();
@@ -227,7 +230,6 @@ bool OrcRandomizeLocalPedTextureRemaps();
 bool OrcSetAllLocalPedTextureRemaps(int remap);
 void OrcReloadTextureRemapNickBindings();
 void OrcCollectLocalPedTextureRemapNickBindings(std::vector<TextureRemapNickBindingInfo>& out);
-void OrcFlushDeferredHeldWeaponSlotRestore();
 bool OrcSaveLocalPedTextureRemapNickBinding(const char* nickCsv);
 bool OrcDeleteLocalPedTextureRemapNickBinding(int bindingId);
 
@@ -253,13 +255,13 @@ std::vector<std::string> ParseNickCsv(const std::string& csv);
 
 const WeaponCfg& GetWeaponCfgForPed(CPed* ped, int wt);
 const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt);
-/// `secondary`: пресет с диска — вторая строка (twin / секции `*_2` в Weapons\<skin>.ini). Рантайм RWCB/слот пока всегда `false`.
-const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary);
+/// `secondary`: пресет с диска — вторая строка (twin / секции `*_2` в Weapons\<skin>.ini).
+const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary,
+    const std::string* drawKey = nullptr);
 /// Совпадает ли выбранный в UI `Weapons\<picker>.ini` с реальным путём пресета педа (lookup/raw DFF сравнение, как в оружейном live-preview).
 bool OrcWeaponUiLivePreviewMatchesPedWeaponsIni(CPed* ped);
 /// Сброс live-preview оружия/«В руке», когда меню закрыто (иначе INI с диска может игнорироваться).
 void OrcClearWeaponUiLivePreviewWhenMenuClosed();
 /// Детальный лог, почему пресет held не активен (throttled внутри).
-void OrcLogHeldPoseCfgDisabled(CPed* ped, int wt);
 const char* VkToString(int vk);
 int ParseActivationVk(const char* text);

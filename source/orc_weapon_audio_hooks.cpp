@@ -1,31 +1,29 @@
-// MinHook detours: WeaponFire, WeaponReload, PlayGunSounds, HandlePedHit, HandlePedSwing.
+// Weapon audio events from GTA SA 1.0 US.
 
 #include "plugin.h"
 
 #include "CAEWeaponAudioEntity.h"
 #include "CAEPedAudioEntity.h"
-#include "CGame.h"
 #include "CMenuManager.h"
 #include "CPed.h"
 #include "CPhysical.h"
 #include "CTimer.h"
-#include "CVector.h"
 #include "CWeapon.h"
 #include "CWeaponInfo.h"
 #include "eAudioEvents.h"
-#include "eEntityType.h"
+#include "eSurfaceType.h"
 #include "eWeaponType.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <unordered_map>
+#include <iterator>
+#include <vector>
 
 #include "external/MinHook/include/MinHook.h"
 
-#include "Patch.h"
 
 #include "orc_app.h"
 #include "orc_log.h"
@@ -36,36 +34,48 @@ using namespace plugin;
 
 class SurfaceInfos_c;
 
-// GTA SA 1.0 US — EarShotOpenAL Loaders.cpp
-static constexpr uintptr_t kAddr_CAEWeaponAudioEntity_WeaponFire = 0x504F80;
-static constexpr uintptr_t kAddr_CAEWeaponAudioEntity_WeaponReload = 0x503690;
-static constexpr uintptr_t kAddr_CAEPedAudioEntity_HandlePedHit = 0x4E1CC0;
-static constexpr uintptr_t kAddr_CAEPedAudioEntity_HandlePedSwing = 0x4E1A40;
-static constexpr uintptr_t kCallSite_PlayGunSounds = 0x50493D;
+namespace {
 
 using CAEWeaponAudioEntity_WeaponFire_t = void(__thiscall*)(CAEWeaponAudioEntity*, eWeaponType, CPhysical*, int);
 using CAEWeaponAudioEntity_WeaponReload_t = void(__thiscall*)(CAEWeaponAudioEntity*, eWeaponType, CPhysical*, int);
 using CAEPedAudioEntity_HandlePedHit_t = void(__thiscall*)(CAEPedAudioEntity*, int, CPhysical*, uint8_t, float, uint32_t);
-using CAEPedAudioEntity_HandlePedSwing_t = char(__thiscall*)(CAEPedAudioEntity*, int, int, int);
-using CAEWeaponAudioEntity_PlayGunSounds_t = void(__thiscall*)(CAEWeaponAudioEntity*, CPhysical*, short, short, short, short, short,
-    int, float, float, float);
+using CAEPedAudioEntity_HandlePedSwing_t = void(__thiscall*)(CAEPedAudioEntity*, int, int, uint32_t);
 
-static CAEWeaponAudioEntity_WeaponFire_t g_WeaponFire_Orig = nullptr;
-static CAEWeaponAudioEntity_WeaponReload_t g_WeaponReload_Orig = nullptr;
-static CAEPedAudioEntity_HandlePedHit_t g_HandlePedHit_Orig = nullptr;
-static CAEPedAudioEntity_HandlePedSwing_t g_HandlePedSwing_Orig = nullptr;
-static CAEWeaponAudioEntity_PlayGunSounds_t g_PlayGunSounds_Orig = nullptr;
+CAEWeaponAudioEntity_WeaponFire_t g_WeaponFire_Orig = nullptr;
+CAEWeaponAudioEntity_WeaponFire_t g_ArizonaWeaponFire_Orig = nullptr;
+CAEWeaponAudioEntity_WeaponReload_t g_WeaponReload_Orig = nullptr;
+CAEPedAudioEntity_HandlePedHit_t g_HandlePedHit_Orig = nullptr;
+CAEPedAudioEntity_HandlePedSwing_t g_HandlePedSwing_Orig = nullptr;
 
-bool g_hooksInstalled = false;
-bool g_hitHookInstalled = false;
-bool g_swingHookInstalled = false;
-bool g_playGunSoundsRedirectInstalled = false;
-DWORD g_suppressVanillaGunSoundsUntilTick = 0;
+DWORD g_gameThreadId = 0;
+bool g_hooksInstallAttempted = false;
+bool g_forwardingArizonaFire = false;
+HMODULE g_arizonaCore = nullptr;
+ULONGLONG g_nextArizonaProbe = 0;
 
-static std::unordered_map<CPed*, DWORD> g_lastMinigunShootOnlyTick;
+struct MinigunShot {
+    int pedRef = 0;
+    const WeaponReplacementAsset* asset = nullptr;
+    DWORD tick = 0;
+};
+std::vector<MinigunShot> g_minigunShots;
+
+bool IsPaused() {
+    return FrontEndMenuManager.m_bMenuActive || CTimer::m_UserPause || CTimer::m_CodePause || CTimer::ms_fTimeScale <= 0.0f;
+}
+
+bool IsCustomAudioEnabled() {
+    return g_enabled && g_weaponCustomSounds && g_weaponReplacementEnabled && !OrcIsRuntimeShuttingDown();
+}
+
+}  // namespace
+
+bool OrcWeaponAudioCanPlayCustom() {
+    return g_gameThreadId == GetCurrentThreadId() && IsCustomAudioEnabled() && !IsPaused();
+}
 
 void OrcWeaponAudioHooksClearShootThrottleState() {
-    g_lastMinigunShootOnlyTick.clear();
+    g_minigunShots.clear();
 }
 
 static SurfaceInfos_c& OrcSurfaceInfos() {
@@ -80,13 +90,6 @@ static bool OrcIsAudioWood(uint32_t surfaceId) {
     return plugin::CallMethodAndReturn<bool, 0x55EAB0, SurfaceInfos_c*, uint32_t>(&OrcSurfaceInfos(), surfaceId);
 }
 
-static uintptr_t OrcResolveCallTarget(uintptr_t callRva) {
-    if (patch::GetUChar(callRva) != 0xE8)
-        return 0;
-    const int32_t rel = static_cast<int32_t>(patch::GetUInt(callRva + 1));
-    return static_cast<uintptr_t>(static_cast<ptrdiff_t>(callRva + 5) + rel);
-}
-
 static float OrcWeaponAudioCloseGain() {
     return std::max(0.0f, g_weaponCustomSoundGain);
 }
@@ -98,11 +101,19 @@ static float OrcWeaponAudioDistantGain() {
 
 static bool OrcTryFirstExistingNumbered(const OrcWeaponAudioStemContext& ctx, const char* prefix, int maxAlt, float gain,
     OrcWeaponSpatial spatial, int* outIndex) {
-    if (maxAlt <= 0)
+    const uint16_t variants = OrcWeaponAudioNumberedVariants(ctx, prefix, maxAlt);
+    if (variants == 0)
         return false;
-    const int start = rand() % maxAlt;
-    for (int n = 0; n < maxAlt; ++n) {
-        const int i = (start + n) % maxAlt;
+    int indices[10];
+    int count = 0;
+    for (int i = 0; i < maxAlt; ++i) {
+        if (variants & (1u << i))
+            indices[count++] = i;
+    }
+    for (int remaining = count; remaining > 0; --remaining) {
+        const int next = rand() % remaining;
+        const int i = indices[next];
+        indices[next] = indices[remaining - 1];
         char suffix[32];
         sprintf_s(suffix, "%s%d", prefix, i);
         if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, gain, spatial)) {
@@ -118,92 +129,97 @@ static bool OrcTryDistantShot(const OrcWeaponAudioStemContext& ctx) {
     const float gain = OrcWeaponAudioDistantGain();
     if (OrcWeaponAudioTryPlaySuffix(ctx, "_distant", gain, OrcWeaponSpatial::WorldAtPed))
         return true;
-    const int maxAlt = std::max(1, std::min(10, g_weaponCustomSoundMaxAlternatives));
+    const int maxAlt = std::clamp(g_weaponCustomSoundMaxAlternatives, 1, 10);
     return OrcTryFirstExistingNumbered(ctx, "_distant", maxAlt, gain, OrcWeaponSpatial::WorldAtPed, nullptr);
 }
 
-static bool OrcTryAfterSuffix(const OrcWeaponAudioStemContext& ctx, const char* afterSuffix, float gain) {
-    if (OrcWeaponAudioIsInterior())
-        return false;
-    return OrcWeaponAudioTryPlaySuffix(ctx, afterSuffix, gain, OrcWeaponAudioSpatialForPed(ctx.ped));
-}
-
-static bool OrcTryCloseShoot(const OrcWeaponAudioStemContext& ctx) {
+static bool OrcTryShoot(const OrcWeaponAudioStemContext& ctx, OrcWeaponSpatial spatial) {
     const float gain = OrcWeaponAudioCloseGain();
-    const int maxAlt = std::max(1, std::min(10, g_weaponCustomSoundMaxAlternatives));
-    const OrcWeaponSpatial spatial = OrcWeaponAudioSpatialForPed(ctx.ped);
+    const int maxAlt = std::clamp(g_weaponCustomSoundMaxAlternatives, 1, 10);
 
     int shootIndex = -1;
     if (OrcTryFirstExistingNumbered(ctx, "_shoot", maxAlt, gain, spatial, &shootIndex)) {
-        if (shootIndex >= 0) {
+        if (!OrcWeaponAudioIsInterior()) {
             char afterSuf[32];
             sprintf_s(afterSuf, "_after%d", shootIndex);
-            OrcTryAfterSuffix(ctx, afterSuf, gain);
+            if (!OrcWeaponAudioTryPlaySuffix(ctx, afterSuf, gain, spatial))
+                OrcWeaponAudioTryPlaySuffix(ctx, "_after", gain, spatial);
         }
         return true;
     }
 
     if (OrcWeaponAudioTryPlaySuffix(ctx, "_shoot", gain, spatial)) {
-        OrcTryAfterSuffix(ctx, "_after", gain);
+        if (!OrcWeaponAudioIsInterior())
+            OrcWeaponAudioTryPlaySuffix(ctx, "_after", gain, spatial);
         return true;
     }
     return false;
 }
 
-// Minigun без _minigun_fireloop: WeaponFire вызывается десятки раз/с — без throttle заливает OpenAL _shoot.
-static bool OrcWeaponAudioConsumeMinigunShootOnlyThrottle(const OrcWeaponAudioStemContext& ctx) {
-    if (ctx.weaponType != WEAPONTYPE_MINIGUN || !ctx.ped)
+static bool OrcTryAmmoShot(const OrcWeaponAudioStemContext& ctx, eWeaponType weaponType, OrcWeaponSpatial spatial) {
+    CPed* ped = ctx.ped;
+    const unsigned slot = ped->m_nSelectedWepSlot;
+    // Read weapon.dat clip size only for vanilla guns with the matching selected slot.
+    if (weaponType < WEAPONTYPE_PISTOL || weaponType > WEAPONTYPE_SNIPERRIFLE ||
+        slot >= std::size(ped->m_aWeapons))
         return false;
-    std::string tmp;
-    if (OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_minigun_fireloop", tmp))
+    const CWeapon& weapon = ped->m_aWeapons[slot];
+    if (weapon.m_eWeaponType != weaponType || weapon.m_nAmmoInClip == 0)
         return false;
-    if (!OrcWeaponAudioResolveFirstExistingAudioPath(ctx, "_shoot", tmp))
+    const CWeaponInfo* info = CWeaponInfo::GetWeaponInfo(weaponType, ped->GetWeaponSkill());
+    if (!info || info->m_nAmmoClip == 0)
         return false;
 
+    // Fire is reported before GTA decrements the current clip.
+    const unsigned ammoLeft = weapon.m_nAmmoInClip - 1;
+    const float gain = OrcWeaponAudioCloseGain();
+    if (ammoLeft < info->m_nAmmoClip / 3u && OrcWeaponAudioTryPlaySuffix(ctx, "_low_ammo", gain, spatial))
+        return true;
+    return ammoLeft == 0 && OrcWeaponAudioTryPlaySuffix(ctx, "_dryfire", gain, spatial);
+}
+
+static bool OrcTryCustomWeaponFire(const OrcWeaponAudioStemContext& ctx, eWeaponType weaponType,
+    CAEWeaponAudioEntity* self = nullptr) {
+    const OrcWeaponSpatial spatial = OrcWeaponAudioSpatialForPed(ctx.ped);
+    const bool world = spatial == OrcWeaponSpatial::WorldAtPed;
+    const bool useNativeCadence = self && world &&
+        ((weaponType >= WEAPONTYPE_PISTOL && weaponType <= WEAPONTYPE_SNIPERRIFLE) || weaponType == WEAPONTYPE_DETONATOR);
+    const uint32_t now = useNativeCadence ? CTimer::m_snTimeInMilliseconds : 0;
+    // PlayGunSounds coalesces repeated events from the same audio entity for 25 ms.
+    // Dual-wield tasks can send both hands in the same simulation frame.
+    if (useNativeCadence && now - static_cast<uint32_t>(self->m_dwTimeLastFired) < 25u)
+        return true;
+
+    const float threshold = g_weaponCustomSoundDistantThreshold;
+    const bool distant = world && OrcWeaponAudioCameraDistanceSquared(ctx.ped) >= threshold * threshold;
+    const bool preferred = distant ? OrcTryDistantShot(ctx) : OrcTryAmmoShot(ctx, weaponType, spatial);
+    const bool handled = preferred || OrcTryShoot(ctx, spatial);
+    if (handled && useNativeCadence)
+        self->m_dwTimeLastFired = static_cast<int>(now);
+    if (world && !preferred && (distant || !handled)) {
+        OrcLogInfoThrottled(402, 2000, "weapon audio: world shot fallback=%s wt=%d stem=%s",
+            handled ? "shoot" : "original", ctx.weaponType, ctx.stem.c_str());
+    }
+    return handled;
+}
+
+static bool OrcTryMinigunOneShot(const OrcWeaponAudioStemContext& ctx) {
+    const int ref = OrcSafeGetPedRef(ctx.ped);
+    if (ref <= 0)
+        return OrcTryCustomWeaponFire(ctx, WEAPONTYPE_MINIGUN);
+
+    // GTA's pool reference holds the slot index above its 8-bit generation.
+    const auto slot = static_cast<unsigned>(ref) >> 8;
+    if (slot >= g_minigunShots.size())
+        g_minigunShots.resize(slot + 1);
+    MinigunShot& last = g_minigunShots[slot];
     const DWORD now = GetTickCount();
-    DWORD& last = g_lastMinigunShootOnlyTick[ctx.ped];
-    if (last != 0 && now - last < 95u)
+    if (last.pedRef == ref && last.asset == ctx.asset && now - last.tick < 95u)
         return true;
-    last = now;
-    return false;
-}
-
-static bool OrcWeaponAudioTryCustomWeaponFire(CPed* ped, eWeaponType weaponType) {
-    if (!ped)
+    if (!OrcTryCustomWeaponFire(ctx, WEAPONTYPE_MINIGUN))
         return false;
-    OrcWeaponAudioStemContext ctx;
-    if (!OrcWeaponAudioTryBuildStemContext(ped, static_cast<int>(weaponType), ctx))
-        return false;
-
-    const float dist = OrcWeaponAudioLocalPedDistance(ped);
-    const bool farAway = dist >= g_weaponCustomSoundDistantThreshold;
-    const bool close = !farAway;
-    const OrcWeaponSpatial spatial = OrcWeaponAudioSpatialForPed(ped);
-
-    CWeapon* weap = ped->GetWeapon();
-    CWeaponInfo* info = CWeaponInfo::GetWeaponInfo(weaponType, ped->GetWeaponSkill());
-
-    if (close && weap && info && info->m_nAmmoClip > 0) {
-        const unsigned ammo = weap->m_nAmmoInClip;
-        const unsigned clip = info->m_nAmmoClip;
-        const unsigned left = clip / 3;
-        if (ammo < left) {
-            if (OrcWeaponAudioTryPlaySuffix(ctx, "_low_ammo", OrcWeaponAudioCloseGain(), spatial))
-                return true;
-            if (ammo < 2) {
-                if (OrcWeaponAudioTryPlaySuffix(ctx, "_dryfire", OrcWeaponAudioCloseGain(), spatial))
-                    return true;
-            }
-        }
-    }
-
-    if (farAway) {
-        if (OrcTryDistantShot(ctx))
-            return true;
-        return false;
-    }
-
-    return OrcTryCloseShoot(ctx);
+    last = {ref, ctx.asset, now};
+    return true;
 }
 
 static bool OrcWeaponAudioIsMeleeHitAudioEvent(int audioEvent) {
@@ -234,85 +250,80 @@ static const char* OrcMeleeHitSuffix(int audioEvent, uint8_t surface) {
     default:
         break;
     }
-    if (OrcIsAudioMetal(surface))
-        return "_hitmetal";
-    if (OrcIsAudioWood(surface))
-        return "_hitwood";
+    if (surface < TOTAL_NUM_SURFACE_TYPES) {
+        if (OrcIsAudioMetal(surface))
+            return "_hitmetal";
+        if (OrcIsAudioWood(surface))
+            return "_hitwood";
+    }
     return "_hit";
 }
 
-static bool OrcTryMeleeSuffixForPed(CPed* ped, const char* suffix, float gain) {
+static bool OrcTryMeleeSuffixForPed(CPed* ped, const char* suffix, uint32_t delayMs) {
     if (!ped || !suffix)
         return false;
-    const int slot = ped->m_nSelectedWepSlot;
-    if (slot < 0 || slot >= 13)
+    const unsigned slot = ped->m_nSelectedWepSlot;
+    if (slot >= std::size(ped->m_aWeapons))
         return false;
     const int wt = static_cast<int>(ped->m_aWeapons[slot].m_eWeaponType);
     OrcWeaponAudioStemContext ctx;
     if (!OrcWeaponAudioTryBuildStemContext(ped, wt, ctx))
         return false;
-    return OrcWeaponAudioTryPlaySuffix(ctx, suffix, gain, OrcWeaponAudioSpatialForPed(ped));
+    const OrcWeaponSpatial spatial = OrcWeaponAudioSpatialForPed(ped);
+    const float gain = OrcWeaponAudioCloseGain();
+    if (OrcWeaponAudioTryPlaySuffix(ctx, suffix, gain, spatial, delayMs))
+        return true;
+    return strcmp(suffix, "_swing") != 0 && strcmp(suffix, "_hit") != 0 &&
+        OrcWeaponAudioTryPlaySuffix(ctx, "_hit", gain, spatial, delayMs);
+}
+
+static bool OrcTryReplaceFire(CAEWeaponAudioEntity* self, eWeaponType weaponType, CPhysical* entity, int audioEventId) {
+    const bool minigun = weaponType == WEAPONTYPE_MINIGUN;
+    if (!OrcWeaponAudioCanPlayCustom() || g_forwardingArizonaFire || !entity ||
+        (audioEventId != AE_WEAPON_FIRE &&
+            !(minigun && (audioEventId == AE_WEAPON_FIRE_MINIGUN_AMMO || audioEventId == AE_WEAPON_FIRE_MINIGUN_NO_AMMO))))
+        return false;
+
+    CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
+    if (!ped)
+        ped = OrcWeaponAudioPedFromWeaponAudio(self);
+    OrcWeaponAudioStemContext ctx;
+    if (!ped || !OrcWeaponAudioTryBuildStemContext(ped, static_cast<int>(weaponType), ctx))
+        return false;
+
+    if (minigun) {
+        if (OrcWeaponAudioTryHandleMinigunEvent(ctx, self, audioEventId))
+            return true;
+        return audioEventId != AE_WEAPON_FIRE_MINIGUN_NO_AMMO && OrcTryMinigunOneShot(ctx);
+    }
+
+    // These stock fire functions submit independent components. The loop hook
+    // substitutes each component and leaves any failed replacement audible.
+    if (OrcWeaponAudioHasPlayableFireLoop(ctx))
+        return false;
+    return OrcTryCustomWeaponFire(ctx, weaponType, self);
 }
 
 static void __fastcall WeaponFire_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, eWeaponType weaponType, CPhysical* entity,
     int audioEventId) {
-    (void)audioEventId;
-    if (!g_WeaponFire_Orig)
-        return;
-
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled) {
+    if (!OrcTryReplaceFire(self, weaponType, entity, audioEventId))
         g_WeaponFire_Orig(self, weaponType, entity, audioEventId);
-        return;
-    }
-
-    CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
-    if (!ped && self)
-        ped = OrcWeaponAudioPedFromWeaponAudio(self);
-    if (!ped) {
-        g_WeaponFire_Orig(self, weaponType, entity, audioEventId);
-        return;
-    }
-
-    OrcWeaponAudioStemContext ctx;
-    if (OrcWeaponAudioTryBuildStemContext(ped, static_cast<int>(weaponType), ctx)) {
-        if (OrcWeaponAudioShouldSkipWeaponFireOneShot(static_cast<int>(weaponType), ctx)) {
-            if (static_cast<int>(weaponType) == WEAPONTYPE_MINIGUN && OrcWeaponAudioPedHasCustomMinigunFireloop(ped)) {
-                // Orig — PlayMiniGunFireSounds; OpenAL fireloop — явно (PlayGunSounds может не попасть в FIRING).
-                g_WeaponFire_Orig(self, weaponType, entity, audioEventId);
-                if (OrcWeaponAudioPedIsMinigunFiring(ped))
-                    OrcWeaponAudioLoopsTryPlayMinigunFireForPed(ped, self);
-                return;
-            }
-            return;
-        }
-        if (OrcWeaponAudioConsumeMinigunShootOnlyThrottle(ctx))
-            return;
-        if (OrcWeaponAudioTryCustomWeaponFire(ped, weaponType))
-            return;
-    }
-
-    g_WeaponFire_Orig(self, weaponType, entity, audioEventId);
 }
 
-static void __fastcall PlayGunSounds_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, CPhysical* entity, short emptySfxId,
-    short farSfxId2, short highPitchSfxId3, short lowPitchSfxId4, short echoSfxId5, int nAudioEventId, float volumeChange,
-    float speed1, float speed2) {
-    if (!g_PlayGunSounds_Orig)
+static void __fastcall ArizonaWeaponFire_Detour(CAEWeaponAudioEntity* self, void* /*edx*/, eWeaponType weaponType,
+    CPhysical* entity, int audioEventId) {
+    if (GetCurrentThreadId() != g_gameThreadId) {
+        g_ArizonaWeaponFire_Orig(self, weaponType, entity, audioEventId);
         return;
-    if (g_weaponCustomSounds && g_weaponReplacementEnabled && self) {
-        CPed* ped = OrcWeaponAudioPedFromPhysical(entity);
-        if (!ped)
-            ped = OrcWeaponAudioPedFromWeaponAudio(self);
-        if (ped && OrcWeaponAudioPedHasCustomMinigunFireloop(ped) && OrcWeaponAudioPedIsMinigunFiring(ped)) {
-            OrcWeaponAudioMarkSuppressVanilla();
-            if (OrcWeaponAudioLoopsTryPlayMinigunFireForPed(ped, self))
-                return;
-            OrcLogInfoThrottled(408, 1200, "weapon audio: minigun PlayGunSounds OpenAL miss pedRef=%d — vanilla fallback",
-                OrcSafeGetPedRef(ped));
-        }
     }
-    g_PlayGunSounds_Orig(self, entity, emptySfxId, farSfxId2, highPitchSfxId3, lowPitchSfxId4, echoSfxId5, nAudioEventId,
-        volumeChange, speed1, speed2);
+    if (OrcTryReplaceFire(self, weaponType, entity, audioEventId))
+        return;
+
+    // Arizona forwards ordinary weapons to the already hooked GTA entry.
+    const bool previous = g_forwardingArizonaFire;
+    g_forwardingArizonaFire = true;
+    g_ArizonaWeaponFire_Orig(self, weaponType, entity, audioEventId);
+    g_forwardingArizonaFire = previous;
 }
 
 static const char* OrcReloadSuffixForEvent(int audioEventId) {
@@ -342,7 +353,7 @@ static void __fastcall WeaponReload_Detour(CAEWeaponAudioEntity* self, void* /*e
     if (!g_WeaponReload_Orig)
         return;
 
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled) {
+    if (!OrcWeaponAudioCanPlayCustom() || !entity || (audioEventId != AE_WEAPON_RELOAD_A && audioEventId != AE_WEAPON_RELOAD_B)) {
         g_WeaponReload_Orig(self, weaponType, entity, audioEventId);
         return;
     }
@@ -375,151 +386,186 @@ static void __fastcall WeaponReload_Detour(CAEWeaponAudioEntity* self, void* /*e
 }
 
 static void __fastcall HandlePedHit_Detour(CAEPedAudioEntity* self, void* /*edx*/, int audioEvent, CPhysical* victim,
-    uint8_t surface, float volume, uint32_t maxVolume) {
-    if (!g_HandlePedHit_Orig) {
-        return;
+    uint8_t surface, float volume, uint32_t delayMs) {
+    if (OrcWeaponAudioCanPlayCustom() && OrcWeaponAudioIsMeleeHitAudioEvent(audioEvent)) {
+        CPed* ped = OrcWeaponAudioPedFromPedAudio(self, "pedAudio.hit.m_pPed");
+        if (ped && OrcTryMeleeSuffixForPed(ped, OrcMeleeHitSuffix(audioEvent, surface), delayMs))
+            return;
     }
-
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled) {
-        g_HandlePedHit_Orig(self, audioEvent, victim, surface, volume, maxVolume);
-        return;
-    }
-
-    CPed* ped = OrcWeaponAudioPedFromPedAudio(self, "pedAudio.hit.m_pPed");
-    if (!ped || !OrcWeaponAudioIsMeleeHitAudioEvent(audioEvent)) {
-        g_HandlePedHit_Orig(self, audioEvent, victim, surface, volume, maxVolume);
-        return;
-    }
-
-    if (OrcTryMeleeSuffixForPed(ped, OrcMeleeHitSuffix(audioEvent, surface), OrcWeaponAudioCloseGain()))
-        return;
-
-    g_HandlePedHit_Orig(self, audioEvent, victim, surface, volume, maxVolume);
+    g_HandlePedHit_Orig(self, audioEvent, victim, surface, volume, delayMs);
 }
 
-static char __fastcall HandlePedSwing_Detour(CAEPedAudioEntity* self, void* /*edx*/, int a2, int a3, int a4) {
-    if (!g_HandlePedSwing_Orig)
-        return 0;
-
-    if (!g_weaponCustomSounds || !g_weaponReplacementEnabled) {
-        return g_HandlePedSwing_Orig(self, a2, a3, a4);
+static void __fastcall HandlePedSwing_Detour(CAEPedAudioEntity* self, void* /*edx*/, int audioEvent, int attackType,
+    uint32_t delayMs) {
+    if (OrcWeaponAudioCanPlayCustom() && audioEvent == AE_PED_SWING) {
+        CPed* ped = OrcWeaponAudioPedFromPedAudio(self, "pedAudio.swing.m_pPed");
+        if (ped && OrcTryMeleeSuffixForPed(ped, "_swing", delayMs))
+            return;
     }
-
-    CPed* ped = OrcWeaponAudioPedFromPedAudio(self, "pedAudio.swing.m_pPed");
-    if (ped && OrcTryMeleeSuffixForPed(ped, "_swing", OrcWeaponAudioCloseGain()))
-        return 1;
-
-    return g_HandlePedSwing_Orig(self, a2, a3, a4);
+    g_HandlePedSwing_Orig(self, audioEvent, attackType, delayMs);
 }
 
-void OrcWeaponAudioSetPluginModule(void* module) {
-    g_pluginModule = reinterpret_cast<HMODULE>(module);
+namespace {
+
+struct AudioHook {
+    uintptr_t address;
+    const char* name;
+    std::array<uint8_t, 8> prologue;
+    void* detour;
+    void** original;
+    bool installed = false;
+};
+
+AudioHook g_audioHooks[] = {
+    {0x504F80, "WeaponFire", {0x8B, 0x44, 0x24, 0x08, 0x85, 0xC0, 0x56, 0x8B},
+        reinterpret_cast<void*>(&WeaponFire_Detour), reinterpret_cast<void**>(&g_WeaponFire_Orig)},
+    {0x503690, "WeaponReload", {0x51, 0x53, 0x55, 0x56, 0x57, 0x8B, 0x7C, 0x24},
+        reinterpret_cast<void*>(&WeaponReload_Detour), reinterpret_cast<void**>(&g_WeaponReload_Orig)},
+    {0x4E1CC0, "HandlePedHit", {0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x8B, 0xF1},
+        reinterpret_cast<void*>(&HandlePedHit_Detour), reinterpret_cast<void**>(&g_HandlePedHit_Orig)},
+    {0x4E1A40, "HandlePedSwing", {0x83, 0xEC, 0x08, 0x53, 0x55, 0x56, 0x8B, 0xF1},
+        reinterpret_cast<void*>(&HandlePedSwing_Detour), reinterpret_cast<void**>(&g_HandlePedSwing_Orig)},
+};
+
+AudioHook g_arizonaHook = {0, "Arizona WeaponFire", {0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0xED, 0x5F},
+    reinterpret_cast<void*>(&ArizonaWeaponFire_Detour), reinterpret_cast<void**>(&g_ArizonaWeaponFire_Orig)};
+
+bool MatchesPrologue(const AudioHook& hook) {
+    __try {
+        return std::memcmp(reinterpret_cast<const void*>(hook.address), hook.prologue.data(), hook.prologue.size()) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
-void OrcWeaponAudioEnsureHooksInstalled() {
-    if (g_hooksInstalled)
-        return;
-    MH_STATUS st = MH_Initialize();
-    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
-        OrcLogError("weapon audio hooks: MH_Initialize -> %s", MH_StatusToString(st));
-        return;
+bool InstallHook(AudioHook& hook) {
+    if (!MatchesPrologue(hook)) {
+        OrcLogError("weapon audio: %s at 0x%08X has an unexpected prologue", hook.name, static_cast<unsigned>(hook.address));
+        return false;
     }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CAEWeaponAudioEntity_WeaponFire), reinterpret_cast<void*>(&WeaponFire_Detour),
-            reinterpret_cast<void**>(&g_WeaponFire_Orig)) != MH_OK) {
-        OrcLogError("weapon audio: MH_CreateHook WeaponFire failed");
-        return;
+    void* entry = reinterpret_cast<void*>(hook.address);
+    const MH_STATUS create = MH_CreateHook(entry, hook.detour, hook.original);
+    if (create != MH_OK) {
+        OrcLogError("weapon audio: MH_CreateHook %s -> %s", hook.name, MH_StatusToString(create));
+        return false;
     }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CAEWeaponAudioEntity_WeaponReload),
-            reinterpret_cast<void*>(&WeaponReload_Detour), reinterpret_cast<void**>(&g_WeaponReload_Orig)) != MH_OK) {
-        OrcLogError("weapon audio: MH_CreateHook WeaponReload failed");
-        return;
+    const MH_STATUS enable = MH_EnableHook(entry);
+    if (enable != MH_OK) {
+        MH_RemoveHook(entry);
+        *hook.original = nullptr;
+        OrcLogError("weapon audio: MH_EnableHook %s -> %s", hook.name, MH_StatusToString(enable));
+        return false;
     }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CAEPedAudioEntity_HandlePedHit), reinterpret_cast<void*>(&HandlePedHit_Detour),
-            reinterpret_cast<void**>(&g_HandlePedHit_Orig)) != MH_OK) {
-        OrcLogError("weapon audio: MH_CreateHook HandlePedHit failed");
-        return;
-    }
-    if (MH_CreateHook(reinterpret_cast<void*>(kAddr_CAEPedAudioEntity_HandlePedSwing),
-            reinterpret_cast<void*>(&HandlePedSwing_Detour), reinterpret_cast<void**>(&g_HandlePedSwing_Orig)) != MH_OK) {
-        OrcLogError("weapon audio: MH_CreateHook HandlePedSwing failed");
-        return;
-    }
-    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CAEWeaponAudioEntity_WeaponFire));
-    if (st != MH_OK)
-        OrcLogError("weapon audio: MH_EnableHook WeaponFire -> %s", MH_StatusToString(st));
-    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CAEWeaponAudioEntity_WeaponReload));
-    if (st != MH_OK)
-        OrcLogError("weapon audio: MH_EnableHook WeaponReload -> %s", MH_StatusToString(st));
-    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CAEPedAudioEntity_HandlePedHit));
-    if (st != MH_OK)
-        OrcLogError("weapon audio: MH_EnableHook HandlePedHit -> %s", MH_StatusToString(st));
-    st = MH_EnableHook(reinterpret_cast<void*>(kAddr_CAEPedAudioEntity_HandlePedSwing));
-    if (st != MH_OK)
-        OrcLogError("weapon audio: MH_EnableHook HandlePedSwing -> %s", MH_StatusToString(st));
-    g_hitHookInstalled = true;
-    g_swingHookInstalled = true;
+    hook.installed = true;
+    return true;
+}
 
-    if (!g_playGunSoundsRedirectInstalled) {
-        const uintptr_t playGunTarget = OrcResolveCallTarget(kCallSite_PlayGunSounds);
-        if (playGunTarget) {
-            g_PlayGunSounds_Orig = reinterpret_cast<CAEWeaponAudioEntity_PlayGunSounds_t>(playGunTarget);
-            patch::RedirectCall(kCallSite_PlayGunSounds, reinterpret_cast<void*>(&PlayGunSounds_Detour));
-            g_playGunSoundsRedirectInstalled = true;
-            OrcLogInfo("weapon audio: PlayGunSounds redirect callSite=0x%08X target=0x%08X", (unsigned)kCallSite_PlayGunSounds,
-                (unsigned)playGunTarget);
-        } else {
-            OrcLogError("weapon audio: PlayGunSounds call site 0x%08X is not E8", (unsigned)kCallSite_PlayGunSounds);
-        }
+void RemoveHook(AudioHook& hook) {
+    if (!hook.installed)
+        return;
+    const MH_STATUS remove = MH_RemoveHook(reinterpret_cast<void*>(hook.address));
+    if (remove == MH_OK) {
+        hook.installed = false;
+        *hook.original = nullptr;
+    } else {
+        OrcLogError("weapon audio: MH_RemoveHook %s -> %s", hook.name, MH_StatusToString(remove));
+    }
+}
+
+bool IsCallTo(uintptr_t site, uintptr_t target) {
+    const auto* bytes = reinterpret_cast<const uint8_t*>(site);
+    int32_t displacement;
+    if (bytes[0] != 0xE8)
+        return false;
+    std::memcpy(&displacement, bytes + 1, sizeof(displacement));
+    return site + 5u + displacement == target;
+}
+
+bool IsVerifiedArizonaFire(uintptr_t base, uintptr_t target) {
+    __try {
+        if (!IsCallTo(0x4E6A3D, target) || !IsCallTo(0x4DFAC6, target))
+            return false;
+        uint32_t exceptionHandler;
+        const auto* code = reinterpret_cast<const uint8_t*>(target);
+        std::memcpy(&exceptionHandler, code + 6, sizeof(exceptionHandler));
+        const uint8_t fsLoad[] = {0x64, 0xA1, 0, 0, 0, 0};
+        return exceptionHandler == base + 0x175FED && std::memcmp(code + 10, fsLoad, sizeof(fsLoad)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void ProbeArizonaFire() {
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_nextArizonaProbe)
+        return;
+    g_nextArizonaProbe = now + 1000;
+    const auto base = reinterpret_cast<uintptr_t>(g_arizonaCore);
+    const uintptr_t target = base + 0x3B300;
+    if (!IsVerifiedArizonaFire(base, target))
+        return;
+    g_arizonaCore = nullptr;
+    g_arizonaHook.address = target;
+    if (InstallHook(g_arizonaHook))
+        OrcLogInfo("weapon audio: Arizona weapon sound dispatch hooked");
+}
+
+void InstallHooks() {
+    g_hooksInstallAttempted = true;
+    const MH_STATUS init = MH_Initialize();
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
+        OrcLogError("weapon audio: MH_Initialize -> %s", MH_StatusToString(init));
+        return;
     }
 
+    unsigned installed = 0;
+    for (AudioHook& hook : g_audioHooks)
+        installed += InstallHook(hook);
     OrcWeaponAudioLoopsEnsureInstalled();
+    g_arizonaCore = GetModuleHandleW(L"core.asi");
+    OrcLogInfo("weapon audio: installed %u/%u event hooks", installed, static_cast<unsigned>(std::size(g_audioHooks)));
+}
 
-    g_hooksInstalled = true;
-    OrcLogInfo("weapon audio hooks installed");
+}  // namespace
+
+void OrcWeaponAudioStopPlayback() {
+    OrcWeaponAudioStopEphemeralSources();
+    OrcWeaponAudioLoopsStopAll();
+    OrcWeaponAudioHooksClearShootThrottleState();
 }
 
 void OrcWeaponAudioOnGameProcess() {
-    if (!g_weaponCustomSounds || !OrcWeaponAudioHasActiveContext())
+    if (!g_hooksInstallAttempted && IsCustomAudioEnabled()) {
+        g_gameThreadId = GetCurrentThreadId();
+        InstallHooks();
+    }
+
+    static bool wasActive = false;
+    const bool active = IsCustomAudioEnabled() && !IsPaused();
+    if (active && g_arizonaCore)
+        ProbeArizonaFire();
+    if (!active && !wasActive)
         return;
-
-    if (!OrcWeaponAudioEnsureAlContextCurrent())
-        return;
-
-    const bool paused = FrontEndMenuManager.m_bMenuActive != false || CTimer::m_UserPause || CTimer::m_CodePause ||
-                        CTimer::ms_fTimeScale <= 0.0f;
-
-    if (paused) {
-        OrcWeaponAudioStopEphemeralSources();
-        OrcWeaponAudioLoopsStopAll();
+    if (!OrcWeaponAudioHasActiveContext()) {
+        wasActive = active;
         return;
     }
+    const bool canProcess = active && OrcWeaponAudioEnsureAlContextCurrent();
+    if (!canProcess && wasActive)
+        OrcWeaponAudioStopPlayback();
+    wasActive = canProcess;
+    if (!canProcess)
+        return;
 
     OrcWeaponAudioPruneEphemeralSources();
     OrcWeaponAudioLoopsOnGameProcess();
 }
 
 void OrcWeaponAudioShutdown() {
-    if (g_hooksInstalled) {
-        MH_DisableHook(reinterpret_cast<void*>(kAddr_CAEWeaponAudioEntity_WeaponFire));
-        MH_DisableHook(reinterpret_cast<void*>(kAddr_CAEWeaponAudioEntity_WeaponReload));
-        if (g_hitHookInstalled)
-            MH_DisableHook(reinterpret_cast<void*>(kAddr_CAEPedAudioEntity_HandlePedHit));
-        if (g_swingHookInstalled)
-            MH_DisableHook(reinterpret_cast<void*>(kAddr_CAEPedAudioEntity_HandlePedSwing));
-        MH_RemoveHook(reinterpret_cast<void*>(kAddr_CAEWeaponAudioEntity_WeaponFire));
-        MH_RemoveHook(reinterpret_cast<void*>(kAddr_CAEWeaponAudioEntity_WeaponReload));
-        if (g_hitHookInstalled)
-            MH_RemoveHook(reinterpret_cast<void*>(kAddr_CAEPedAudioEntity_HandlePedHit));
-        if (g_swingHookInstalled)
-            MH_RemoveHook(reinterpret_cast<void*>(kAddr_CAEPedAudioEntity_HandlePedSwing));
-        g_hooksInstalled = false;
-        g_hitHookInstalled = false;
-        g_swingHookInstalled = false;
-        g_WeaponFire_Orig = nullptr;
-        g_WeaponReload_Orig = nullptr;
-        g_HandlePedHit_Orig = nullptr;
-        g_HandlePedSwing_Orig = nullptr;
-    }
+    RemoveHook(g_arizonaHook);
+    for (AudioHook& hook : g_audioHooks)
+        RemoveHook(hook);
     OrcWeaponAudioLoopsShutdown();
     OrcWeaponAudioOpenAlShutdown();
+    OrcWeaponAudioHooksClearShootThrottleState();
 }

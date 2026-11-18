@@ -5,16 +5,19 @@
 #include "CPools.h"
 #include "CClumpModelInfo.h"
 #include "CVisibilityPlugins.h"
-#include "CWeaponInfo.h"
 #include "CModelInfo.h"
 #include "CTxdStore.h"
 #include "RenderWare.h"
 #include "eWeaponType.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -41,8 +44,8 @@
 
 using namespace plugin;
 
-void OrcClearAllWeaponReplacementInstances();
 static std::vector<WeaponReplacementAsset> g_weaponReplacementAssets;
+static std::unordered_map<std::string, int> g_weaponReplacementByKey;
 static std::unordered_map<std::string, int> g_weaponReplacementByNick;
 static std::unordered_map<std::string, std::vector<int>> g_weaponReplacementRandomBySkin;
 static std::unordered_map<std::string, std::vector<int>> g_weaponReplacementRandomByWeapon;
@@ -53,8 +56,6 @@ static std::unordered_map<std::string, int> g_weaponReplacementRandomChoiceByPed
 static WeaponReplacementStats g_weaponReplacementStats;
 
 static constexpr int kWeaponReplacementVanillaChoice = -1;
-
-std::string OrcGetWeaponModelBaseNameLower(int wt);
 
 static std::string MakeWeaponReplacementKey(const std::string& weaponLower, const std::string& matchLower) {
     return weaponLower + "|" + matchLower;
@@ -107,9 +108,33 @@ static void AppendUniqueLower(std::vector<std::string>& out, const std::string& 
         out.push_back(lower);
 }
 
-static std::vector<std::string> WeaponLookupNamesLower(int wt) {
-    std::vector<std::string> names;
-    AppendUniqueLower(names, OrcGetWeaponModelBaseNameLower(wt));
+static std::string_view WeaponModelBaseName(int wt) {
+    if (wt > 0 && wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[(size_t)wt].empty())
+        return g_weaponDatIdeName[(size_t)wt];
+    if (wt > 0 && wt < (int)g_cfg.size() && g_cfg[(size_t)wt].name && g_cfg[(size_t)wt].name[0])
+        return g_cfg[(size_t)wt].name;
+    return {};
+}
+
+static const std::vector<std::string>& WeaponLookupNamesLower(int wt) {
+    struct CacheEntry {
+        std::string rawBase;
+        std::vector<std::string> names;
+        bool initialized = false;
+    };
+    static std::array<CacheEntry, 256> cache;
+    static const std::vector<std::string> empty;
+    if (wt <= 0 || (size_t)wt >= cache.size())
+        return empty;
+    const std::string_view base = WeaponModelBaseName(wt);
+    CacheEntry& entry = cache[(size_t)wt];
+    if (entry.initialized && entry.rawBase == base)
+        return entry.names;
+    entry.initialized = true;
+    entry.rawBase = base;
+    auto& names = entry.names;
+    names.clear();
+    AppendUniqueLower(names, entry.rawBase);
     switch (wt) {
     case WEAPONTYPE_SHOTGUN:
         AppendUniqueLower(names, "chromegun");
@@ -132,24 +157,14 @@ struct WeaponReplacementStickyChoiceSnapshot {
 
 static std::unordered_map<std::string, WeaponReplacementStickyChoiceSnapshot> g_weaponReplacementRerollAvoidChoiceByPed;
 
-static WeaponReplacementAsset* FindWeaponReplacementAssetByKey(const std::string& keyLower) {
-    if (keyLower.empty())
-        return nullptr;
-    for (WeaponReplacementAsset& asset : g_weaponReplacementAssets) {
-        if (OrcToLowerAscii(asset.key) == keyLower)
-            return &asset;
-    }
-    return nullptr;
+static int FindWeaponReplacementAssetIndexByKeyLower(const std::string& keyLower) {
+    const auto found = g_weaponReplacementByKey.find(keyLower);
+    return found == g_weaponReplacementByKey.end() ? -1 : found->second;
 }
 
-static int FindWeaponReplacementAssetIndexByKeyLower(const std::string& keyLower) {
-    if (keyLower.empty())
-        return -1;
-    for (int i = 0; i < (int)g_weaponReplacementAssets.size(); ++i) {
-        if (OrcToLowerAscii(g_weaponReplacementAssets[(size_t)i].key) == keyLower)
-            return i;
-    }
-    return -1;
+static WeaponReplacementAsset* FindWeaponReplacementAssetByKey(const std::string& keyLower) {
+    const int index = FindWeaponReplacementAssetIndexByKeyLower(keyLower);
+    return index >= 0 ? &g_weaponReplacementAssets[(size_t)index] : nullptr;
 }
 
 static std::unordered_map<std::string, WeaponReplacementStickyChoiceSnapshot> SnapshotWeaponReplacementStickyChoices() {
@@ -164,7 +179,7 @@ static std::unordered_map<std::string, WeaponReplacementStickyChoiceSnapshot> Sn
         }
         if (kv.second < 0 || kv.second >= (int)g_weaponReplacementAssets.size())
             continue;
-        choice.assetKeyLower = OrcToLowerAscii(g_weaponReplacementAssets[(size_t)kv.second].key);
+        choice.assetKeyLower = g_weaponReplacementAssets[(size_t)kv.second].key;
         if (!choice.assetKeyLower.empty())
             snapshot.emplace(kv.first, std::move(choice));
     }
@@ -187,21 +202,12 @@ static void RestoreWeaponReplacementStickyChoices(
     }
 }
 
-static bool WeaponReplacementChoiceMatchesSnapshot(int choice, const WeaponReplacementStickyChoiceSnapshot& snapshot) {
+static std::string_view WeaponReplacementChoiceSortKey(int choice) {
     if (choice == kWeaponReplacementVanillaChoice)
-        return snapshot.vanilla;
-    if (choice < 0 || choice >= (int)g_weaponReplacementAssets.size())
-        return false;
-    return !snapshot.assetKeyLower.empty() &&
-        OrcToLowerAscii(g_weaponReplacementAssets[(size_t)choice].key) == snapshot.assetKeyLower;
-}
-
-static std::string WeaponReplacementChoiceSortKey(int choice) {
-    if (choice == kWeaponReplacementVanillaChoice)
-        return std::string{};
+        return {};
     if (choice < 0 || choice >= (int)g_weaponReplacementAssets.size())
         return "~";
-    return OrcToLowerAscii(g_weaponReplacementAssets[(size_t)choice].key);
+    return g_weaponReplacementAssets[(size_t)choice].key;
 }
 
 static void SortWeaponReplacementRandomPools() {
@@ -245,11 +251,7 @@ static std::string StripSampColorCodes(std::string value) {
 }
 
 std::string OrcGetWeaponModelBaseNameLower(int wt) {
-    if (wt > 0 && wt < (int)g_weaponDatIdeName.size() && !g_weaponDatIdeName[(size_t)wt].empty())
-        return OrcToLowerAscii(g_weaponDatIdeName[(size_t)wt]);
-    if (wt > 0 && wt < (int)g_cfg.size() && g_cfg[(size_t)wt].name && g_cfg[(size_t)wt].name[0])
-        return OrcToLowerAscii(g_cfg[(size_t)wt].name);
-    return {};
+    return OrcToLowerAscii(std::string(WeaponModelBaseName(wt)));
 }
 
 static std::vector<std::string> KnownWeaponModelNamesLower() {
@@ -270,15 +272,55 @@ static std::vector<std::string> KnownWeaponModelNamesLower() {
 
 
 
-static void ClearWeaponHudIconCache(int txdSlot = -1);
+static void ClearWeaponHudIconCache();
+static void OrcInitializeReplacementGunflashHidden(RpClump* clump);
+
+static RwTexture* DetachReferencedWeaponTexture(RwTexture* texture, void*) {
+    // Match CTxdStore::RemoveTxd: external material owners keep a live texture, but no dictionary link.
+    if (texture->refCount > 1) {
+        RwTextureDestroy(texture);
+        RwTexDictionaryRemoveTexture(texture);
+    }
+    return texture;
+}
+
+static void DestroyWeaponTxd(RwTexDictionary*& dict) {
+    if (!dict)
+        return;
+    RwTexDictionaryForAllTextures(dict, DetachReferencedWeaponTexture, nullptr);
+    RwTexDictionaryDestroy(dict);
+    dict = nullptr;
+}
+
+static RwTexDictionary* ReadWeaponTxd(const char* path) {
+    // CTxdStore::LoadTxd uses this GTA reader after the dictionary chunk header. It accepts the same
+    // native TXD formats without allocating a streaming slot or overwriting a global dictionary.
+    using ReadGtaTxd = RwTexDictionary*(__cdecl*)(RwStream*);
+    RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)path);
+    if (!stream)
+        return nullptr;
+    RwTexDictionary* dict = nullptr;
+    __try {
+        __try {
+            if (RwStreamFindChunk(stream, rwID_TEXDICTIONARY, nullptr, nullptr))
+                dict = reinterpret_cast<ReadGtaTxd>(0x730FC0)(stream);
+        } __finally {
+            RwStreamClose(stream, nullptr);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("weapon TXD: read SEH ex=0x%08X path=%s", GetExceptionCode(), path);
+    }
+    return dict;
+}
 
 static void DestroyWeaponReplacementAssets() {
     ClearWeaponHudIconCache();
     for (auto& asset : g_weaponReplacementAssets) {
         OrcDestroyRwObjectInstance(asset.rwObject);
-        asset.txdSlot = -1;
+        DestroyWeaponTxd(asset.txd);
     }
     g_weaponReplacementAssets.clear();
+    g_weaponReplacementByKey.clear();
     g_weaponReplacementByNick.clear();
     g_weaponReplacementRandomBySkin.clear();
     g_weaponReplacementRandomByWeapon.clear();
@@ -290,6 +332,70 @@ static void DestroyWeaponReplacementAssets() {
 }
 
 
+static RwObject* ReadWeaponDffChunk(const char* path, RwUInt32 chunk) {
+    RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)path);
+    if (!stream)
+        return nullptr;
+    RwObject* object = nullptr;
+    __try {
+        if (RwStreamFindChunk(stream, chunk, nullptr, nullptr)) {
+            object = chunk == rwID_CLUMP
+                ? reinterpret_cast<RwObject*>(RpClumpStreamRead(stream))
+                : reinterpret_cast<RwObject*>(RpAtomicStreamRead(stream));
+        }
+    } __finally {
+        RwStreamClose(stream, nullptr);
+    }
+    return object;
+}
+
+static RpAtomic* InitWeaponReplacementAtomic(RpAtomic* atomic, void* data) {
+    // The geometry already owns its materials and RpAtomicClone retains the geometry.
+    CVisibilityPlugins::SetAtomicRenderCallback(atomic, nullptr);
+    if ((RpAtomicGetFlags(atomic) & rpATOMICRENDER) && atomic->geometry && atomic->geometry->numTriangles > 0)
+        *static_cast<bool*>(data) = true;
+    return atomic;
+}
+
+static bool PrepareWeaponReplacementObject(RwObject* object) {
+    bool hasMesh = false;
+    if (object->type == rpCLUMP) {
+        auto* clump = reinterpret_cast<RpClump*>(object);
+        if (!RpClumpGetFrame(clump))
+            return false;
+        OrcInitializeReplacementGunflashHidden(clump);
+        RpClumpForAllAtomics(clump, InitWeaponReplacementAtomic, &hasMesh);
+    } else {
+        auto* atomic = reinterpret_cast<RpAtomic*>(object);
+        if (!RpAtomicGetFrame(atomic)) {
+            RwFrame* frame = RwFrameCreate();
+            if (!frame)
+                return false;
+            RpAtomicSetFrame(atomic, frame);
+        }
+        InitWeaponReplacementAtomic(atomic, &hasMesh);
+    }
+    return hasMesh;
+}
+
+static bool ReadWeaponReplacementObject(WeaponReplacementAsset& asset) {
+    RwTexDictionary* previous = RwTexDictionaryGetCurrent();
+    __try {
+        __try {
+            RwTexDictionarySetCurrent(asset.txd);
+            asset.rwObject = ReadWeaponDffChunk(asset.dffPath.c_str(), rwID_CLUMP);
+            if (!asset.rwObject)
+                asset.rwObject = ReadWeaponDffChunk(asset.dffPath.c_str(), rwID_ATOMIC);
+            return asset.rwObject && PrepareWeaponReplacementObject(asset.rwObject);
+        } __finally {
+            RwTexDictionarySetCurrent(previous);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("weapon DFF: read SEH ex=0x%08X path=%s", GetExceptionCode(), asset.dffPath.c_str());
+        return false;
+    }
+}
+
 static bool EnsureWeaponReplacementAssetLoaded(WeaponReplacementAsset& asset) {
     if (asset.rwObject)
         return true;
@@ -298,92 +404,21 @@ static bool EnsureWeaponReplacementAssetLoaded(WeaponReplacementAsset& asset) {
     asset.loadAttempted = true;
 
     if (!OrcFileExistsA(asset.dffPath.c_str())) {
-        if (!asset.loadFailedLogged) {
-            asset.loadFailedLogged = true;
-            OrcLogError("weapon replacement \"%s\": DFF missing %s", asset.displayName.c_str(), asset.dffPath.c_str());
-        }
+        OrcLogError("weapon replacement \"%s\": DFF missing %s", asset.displayName.c_str(), asset.dffPath.c_str());
         return false;
     }
-    if (asset.txdPath.empty() || !OrcFileExistsA(asset.txdPath.c_str())) {
-        if (!asset.loadFailedLogged) {
-            asset.loadFailedLogged = true;
-            OrcLogError("weapon replacement \"%s\": TXD missing or invalid path", asset.displayName.c_str());
-        }
+    asset.txd = asset.txdPath.empty() ? nullptr : ReadWeaponTxd(asset.txdPath.c_str());
+    if (!asset.txd) {
+        OrcLogError("weapon replacement \"%s\": TXD unreadable path=%s", asset.displayName.c_str(), asset.txdPath.c_str());
         return false;
     }
-
-    std::string txdName = "orc_wr_" + asset.key;
-    for (char& c : txdName) {
-        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
-            c = '_';
-    }
-    int txdSlot = CTxdStore::FindTxdSlot(txdName.c_str());
-    if (txdSlot == -1)
-        txdSlot = CTxdStore::AddTxdSlot(txdName.c_str());
-    if (txdSlot == -1) {
-        OrcLogError("weapon replacement \"%s\": CTxdStore::AddTxdSlot failed", asset.displayName.c_str());
+    if (!ReadWeaponReplacementObject(asset)) {
+        OrcLogError("weapon replacement \"%s\": DFF has no usable mesh", asset.displayName.c_str());
+        OrcDestroyRwObjectInstance(asset.rwObject);
+        DestroyWeaponTxd(asset.txd);
         return false;
     }
 
-    bool txdOk = false;
-    RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.txdPath.c_str());
-    if (txdStream) {
-        ClearWeaponHudIconCache(txdSlot);
-        txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
-        RwStreamClose(txdStream, nullptr);
-    }
-    if (!txdOk) {
-        OrcLogError("weapon replacement \"%s\": LoadTxd failed", asset.displayName.c_str());
-        return false;
-    }
-    asset.txdSlot = txdSlot;
-
-    CTxdStore::PushCurrentTxd();
-    CTxdStore::SetCurrentTxd(txdSlot);
-    RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.dffPath.c_str());
-    if (!stream) {
-        CTxdStore::PopCurrentTxd();
-        OrcLogError("weapon replacement \"%s\": RwStreamOpen DFF failed", asset.displayName.c_str());
-        return false;
-    }
-
-    bool ok = false;
-    if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr)) {
-        RpClump* c = RpClumpStreamRead(stream);
-        if (c) {
-            asset.rwObject = reinterpret_cast<RwObject*>(c);
-            RpClumpForAllAtomics(c, OrcInitAtomicCB, nullptr);
-            ok = true;
-        }
-    }
-    RwStreamClose(stream, nullptr);
-
-    if (!ok) {
-        stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.dffPath.c_str());
-        if (stream) {
-            if (RwStreamFindChunk(stream, rwID_ATOMIC, nullptr, nullptr)) {
-                RpAtomic* a = RpAtomicStreamRead(stream);
-                if (a) {
-                    if (!RpAtomicGetFrame(a)) {
-                        RwFrame* frame = RwFrameCreate();
-                        if (frame) RpAtomicSetFrame(a, frame);
-                    }
-                    OrcInitAtomicCB(a, nullptr);
-                    asset.rwObject = reinterpret_cast<RwObject*>(a);
-                    ok = true;
-                }
-            }
-            RwStreamClose(stream, nullptr);
-        }
-    }
-    CTxdStore::PopCurrentTxd();
-
-    if (!ok) {
-        OrcLogError("weapon replacement \"%s\": DFF has no readable clump/atomic", asset.displayName.c_str());
-        return false;
-    }
-
-    asset.loadFailedLogged = false;
     OrcLogInfo("weapon replacement \"%s\": loaded", asset.displayName.c_str());
     return true;
 }
@@ -429,21 +464,18 @@ RwObject* OrcCloneWeaponReplacementObject(WeaponReplacementAsset& asset) {
     if (!EnsureWeaponReplacementAssetLoaded(asset) || !asset.rwObject)
         return nullptr;
     if (asset.rwObject->type == rpCLUMP) {
-        RpClump* clone = RpClumpClone(reinterpret_cast<RpClump*>(asset.rwObject));
-        if (!clone) return nullptr;
-        RpClumpForAllAtomics(clone, OrcInitAtomicCB, nullptr);
-        // A DFF may ship with its gunflash atomic visible. A fresh clone can be rendered before GTA's
-        // end-of-batch ClearGunFlash, producing a one-frame muzzle flash while selecting the weapon.
-        // Start hidden; vanilla SetGunFlashAlpha enables the same atomic on an actual shot.
-        OrcInitializeReplacementGunflashHidden(clone);
-        return reinterpret_cast<RwObject*>(clone);
+        // RpAtomicClone preserves the template's callback and initial gunflash flags.
+        return reinterpret_cast<RwObject*>(RpClumpClone(reinterpret_cast<RpClump*>(asset.rwObject)));
     }
     if (asset.rwObject->type == rpATOMIC) {
         RpAtomic* clone = RpAtomicClone(reinterpret_cast<RpAtomic*>(asset.rwObject));
         if (!clone) return nullptr;
         RwFrame* frame = RwFrameCreate();
-        if (frame) RpAtomicSetFrame(clone, frame);
-        OrcInitAtomicCB(clone, nullptr);
+        if (!frame) {
+            RpAtomicDestroy(clone);
+            return nullptr;
+        }
+        RpAtomicSetFrame(clone, frame);
         return reinterpret_cast<RwObject*>(clone);
     }
     return nullptr;
@@ -467,6 +499,7 @@ static void AddWeaponReplacementAsset(const std::string& key,
     asset.txdPath = txdPath;
     const int index = (int)g_weaponReplacementAssets.size();
     g_weaponReplacementAssets.push_back(std::move(asset));
+    g_weaponReplacementByKey.emplace(key, index);
 
     const std::string mapKey = MakeWeaponReplacementKey(weaponLower, matchLower);
     if (directMap) {
@@ -481,6 +514,7 @@ static void AddWeaponReplacementAsset(const std::string& key,
 
 void DiscoverWeaponReplacements(bool rerollStickyChoices) {
     const auto stickyChoices = SnapshotWeaponReplacementStickyChoices();
+    OrcInvalidateHeldWeaponDrawPreparation();
     OrcClearAllWeaponReplacementInstances();
     DestroyWeaponReplacementAssets();
 
@@ -648,20 +682,10 @@ static std::unordered_map<std::string, OrcSequentialPickState> g_weaponTextureSe
 static std::unordered_map<std::string, OrcRandomNoRepeatPickState> g_weaponTextureNoRepeatStates;
 static std::unordered_map<std::string, int> g_weaponTextureRandomChoiceByPed;
 static std::vector<WeaponTextureRestoreEntry> g_weaponTextureRestoreEntries;
-static std::vector<WeaponTextureRestoreEntry> g_weaponTextureHeldRestoreEntries;
-static int g_weaponTextureHeldDeferDepth = 0;
 static WeaponTextureStats g_weaponTextureStats;
 
-static bool WeaponTextureRestoreUsingHeldDeferBucket() {
-    return g_weaponTextureHeldDeferDepth > 0;
-}
-
 static void WeaponTextureRecordMaterialRestore(RpMaterial* material, RwTexture* oldTex) {
-    if (!material)
-        return;
-    if (WeaponTextureRestoreUsingHeldDeferBucket())
-        g_weaponTextureHeldRestoreEntries.push_back({ material, oldTex });
-    else
+    if (material)
         g_weaponTextureRestoreEntries.push_back({ material, oldTex });
 }
 
@@ -676,30 +700,41 @@ static RwTexDictionary* GetTxdDictionaryByIndexMain(int txdIndex) {
 static constexpr size_t kWeaponStockRemapMaxSlots = 8;
 
 struct WeaponStockRemapSlot {
-    /// Resolved base texture when present (optional). Materials may reference a different RwTexture* with same name — apply uses baseTexName.
-    RwTexture* original = nullptr;
     std::string baseTexName;
     std::vector<RwTexture*> remaps;
 };
 
 struct WeaponStockRemapCatalog {
-    int wt = -1;
     int txdIndex = -1;
+    RwTexDictionary* dictionary = nullptr;
     std::vector<WeaponStockRemapSlot> slots;
+    std::unordered_map<std::uint64_t, std::vector<int>> selections;
+    DWORD lastPrune = 0;
 };
 
 static std::unordered_map<int, WeaponStockRemapCatalog> g_weaponStockRemapCatalogByWt;
-static std::unordered_map<std::string, std::vector<int>> g_weaponStockRemapSelectionByPedWt;
 
 // Remap variants (*_suffix_remap…) inside Orc loaded Guns/GunsNick TXDs (distinct from game's model TXD).
 static std::unordered_map<std::string, WeaponStockRemapCatalog> g_weaponTextureAssetRemapCatalogByKey;
-static std::unordered_map<std::string, std::vector<int>> g_weaponTextureAssetRemapSelectionByKey;
+
+static void ReleaseStockRemapCatalog(const WeaponStockRemapCatalog& catalog) {
+    if (catalog.slots.empty())
+        return;
+    __try {
+        if (GetTxdDictionaryByIndexMain(catalog.txdIndex) == catalog.dictionary &&
+            CTxdStore::GetNumRefs(catalog.txdIndex) != 0) {
+            CTxdStore::RemoveRefWithoutDelete(catalog.txdIndex);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("weapon stock remap: TXD release SEH ex=0x%08X slot=%d", GetExceptionCode(), catalog.txdIndex);
+    }
+}
 
 static void ClearWeaponStockRemapRuntime() {
+    for (const auto& entry : g_weaponStockRemapCatalogByWt)
+        ReleaseStockRemapCatalog(entry.second);
     g_weaponStockRemapCatalogByWt.clear();
-    g_weaponStockRemapSelectionByPedWt.clear();
     g_weaponTextureAssetRemapCatalogByKey.clear();
-    g_weaponTextureAssetRemapSelectionByKey.clear();
 }
 
 static int WeaponStockRemapFindSlotIndex(WeaponStockRemapCatalog& cat, const std::string& originalBaseName) {
@@ -718,7 +753,7 @@ static bool WeaponStockRemapHasRemap(const WeaponStockRemapSlot& slot, RwTexture
     return false;
 }
 
-static int WeaponStockRemapGetOrAddSlot(WeaponStockRemapCatalog& cat, RwTexDictionary* dict, const std::string& originalBaseNameFromRemapSuffix) {
+static int WeaponStockRemapGetOrAddSlot(WeaponStockRemapCatalog& cat, const std::string& originalBaseNameFromRemapSuffix) {
     const int existing = WeaponStockRemapFindSlotIndex(cat, originalBaseNameFromRemapSuffix);
     if (existing >= 0)
         return existing;
@@ -726,36 +761,30 @@ static int WeaponStockRemapGetOrAddSlot(WeaponStockRemapCatalog& cat, RwTexDicti
         return -1;
     WeaponStockRemapSlot slot;
     slot.baseTexName = originalBaseNameFromRemapSuffix;
-    if (dict && !originalBaseNameFromRemapSuffix.empty())
-        slot.original = RwTexDictionaryFindNamedTexture(dict, originalBaseNameFromRemapSuffix.c_str());
     cat.slots.push_back(std::move(slot));
     return (int)cat.slots.size() - 1;
 }
 
-struct WeaponStockRemapScanCtx {
-    WeaponStockRemapCatalog* catalog = nullptr;
-    RwTexDictionary* dict = nullptr;
-};
-
 static RwTexture* WeaponStockRemapCollectTextureCB(RwTexture* texture, void* data) {
-    if (!texture || !texture->name[0] || !data)
+    if (!texture || !texture->raster || !texture->name[0] || !data)
         return texture;
-    WeaponStockRemapScanCtx* ctx = reinterpret_cast<WeaponStockRemapScanCtx*>(data);
-    if (!ctx->catalog || !ctx->dict)
+    const size_t len = strnlen_s(texture->name, sizeof(texture->name));
+    if (len == sizeof(texture->name))
         return texture;
 
-    const std::string name = texture->name;
+    auto& catalog = *static_cast<WeaponStockRemapCatalog*>(data);
+    const std::string name(texture->name, len);
     const std::string lower = OrcToLowerAscii(name);
     const size_t remapPos = lower.find("_remap");
     if (remapPos == std::string::npos || remapPos == 0)
         return texture;
 
     const std::string originalName = name.substr(0, remapPos);
-    const int slotIdx = WeaponStockRemapGetOrAddSlot(*ctx->catalog, ctx->dict, originalName);
+    const int slotIdx = WeaponStockRemapGetOrAddSlot(catalog, originalName);
     if (slotIdx < 0)
         return texture;
 
-    WeaponStockRemapSlot& slot = ctx->catalog->slots[(size_t)slotIdx];
+    WeaponStockRemapSlot& slot = catalog.slots[(size_t)slotIdx];
     if (WeaponStockRemapHasRemap(slot, texture))
         return texture;
     slot.remaps.push_back(texture);
@@ -771,83 +800,67 @@ static void WeaponRemapPruneEmptyRemapSlots(WeaponStockRemapCatalog& out) {
     }
 }
 
-/// Fills `out` with slots from any TXD (game model or Orc-loaded Guns/GunsNick). Does not clear `out` first.
-static bool WeaponRemapScanDictIntoCatalog(RwTexDictionary* dict, WeaponStockRemapCatalog& out) {
-    if (!dict)
-        return false;
-    WeaponStockRemapScanCtx ctx;
-    ctx.catalog = &out;
-    ctx.dict = dict;
-    RwTexDictionaryForAllTextures(dict, WeaponStockRemapCollectTextureCB, &ctx);
-    WeaponRemapPruneEmptyRemapSlots(out);
-    return true;
-}
-
-static bool OrcTryBuildWeaponStockRemapCatalog(int wt, WeaponStockRemapCatalog& out) {
-    out = WeaponStockRemapCatalog{};
-    out.wt = wt;
-    if (wt <= 0)
-        return true;
-
-    CWeaponInfo* wi = CWeaponInfo::GetWeaponInfo(static_cast<eWeaponType>(wt), 1);
-    if (!wi || wi->m_nModelId <= 0)
-        return true;
-
-    CBaseModelInfo* mi = CModelInfo::GetModelInfo(wi->m_nModelId);
-    if (!mi)
-        return true;
-
-    out.txdIndex = mi->m_nTxdIndex;
-    RwTexDictionary* dict = GetTxdDictionaryByIndexMain(out.txdIndex);
-    if (!dict)
-        return false;
-
+static void WeaponRemapScanDictIntoCatalog(WeaponStockRemapCatalog& out, const char* label) {
     __try {
-        WeaponRemapScanDictIntoCatalog(dict, out);
+        RwTexDictionaryForAllTextures(out.dictionary, WeaponStockRemapCollectTextureCB, &out);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogError("weapon stock remap scan: SEH ex=0x%08X wt=%d txd=%d", GetExceptionCode(), wt, out.txdIndex);
+        OrcLogError("weapon remap scan: SEH ex=0x%08X asset=%s txd=%d", GetExceptionCode(), label, out.txdIndex);
         out.slots.clear();
-        return true;
     }
-    return true;
+    WeaponRemapPruneEmptyRemapSlots(out);
 }
 
-static const WeaponStockRemapCatalog* OrcGetWeaponStockRemapCatalog(int wt) {
+static WeaponStockRemapCatalog* OrcGetWeaponStockRemapCatalog(int wt) {
+    if (wt <= 0 || wt >= (int)g_weaponModelId.size() || g_weaponModelId[(size_t)wt] <= 0)
+        return nullptr;
+    const CBaseModelInfo* model = CModelInfo::GetModelInfo(g_weaponModelId[(size_t)wt]);
+    if (!model)
+        return nullptr;
+    const int txdIndex = model->m_nTxdIndex;
+    RwTexDictionary* const dictionary = GetTxdDictionaryByIndexMain(txdIndex);
     auto it = g_weaponStockRemapCatalogByWt.find(wt);
-    if (it != g_weaponStockRemapCatalogByWt.end())
-        return &it->second;
+    if (it != g_weaponStockRemapCatalogByWt.end()) {
+        if (it->second.txdIndex == txdIndex && it->second.dictionary == dictionary)
+            return &it->second;
+        ReleaseStockRemapCatalog(it->second);
+        g_weaponStockRemapCatalogByWt.erase(it);
+    }
+    if (!dictionary)
+        return nullptr;
 
     WeaponStockRemapCatalog cat;
-    if (!OrcTryBuildWeaponStockRemapCatalog(wt, cat))
-        return nullptr;
-    const auto ins = g_weaponStockRemapCatalogByWt.insert({ wt, std::move(cat) });
+    cat.txdIndex = txdIndex;
+    cat.dictionary = dictionary;
+    WeaponRemapScanDictIntoCatalog(cat, "stock");
+    const auto ins = g_weaponStockRemapCatalogByWt.emplace(wt, std::move(cat));
+    // The catalog borrows remap textures. Keep their streaming dictionary live until invalidation.
+    if (!ins.first->second.slots.empty())
+        CTxdStore::AddRef(txdIndex);
     return &ins.first->second;
 }
 
-static void WeaponRemapEnsureSelectionsForCatalog(CPed* ped,
-                                                  const WeaponStockRemapCatalog& cat,
-                                                  std::unordered_map<std::string, std::vector<int>>& selectionStore,
-                                                  const std::string& selectionKeyTailAfterPedPipe) {
-    if (!ped || cat.slots.empty())
-        return;
-    const int pedRef = CPools::GetPedRef(ped);
-    if (pedRef <= 0)
-        return;
-    const std::string key = std::to_string(pedRef) + "|" + selectionKeyTailAfterPedPipe;
-    auto it = selectionStore.find(key);
-    if (it != selectionStore.end() && it->second.size() == cat.slots.size())
-        return;
+static const std::vector<int>& WeaponRemapSelectionsForCatalog(WeaponStockRemapCatalog& cat, int pedRef, int wt) {
+    const auto key = (static_cast<std::uint64_t>(pedRef) << 32) | static_cast<std::uint32_t>(wt);
+    const auto found = cat.selections.find(key);
+    if (found != cat.selections.end())
+        return found->second;
+
+    const DWORD now = GetTickCount();
+    if (now - cat.lastPrune >= 5000u) {
+        cat.lastPrune = now;
+        for (auto it = cat.selections.begin(); it != cat.selections.end();) {
+            if (!OrcSafeGetPed(static_cast<int>(it->first >> 32)))
+                it = cat.selections.erase(it);
+            else
+                ++it;
+        }
+    }
 
     std::vector<int> sel;
     sel.reserve(cat.slots.size());
-    for (const auto& slot : cat.slots) {
-        const int n = (int)slot.remaps.size();
-        if (n <= 0)
-            sel.push_back(-1);
-        else
-            sel.push_back(rand() % n);
-    }
-    selectionStore[key] = std::move(sel);
+    for (const auto& slot : cat.slots)
+        sel.push_back(rand() % (int)slot.remaps.size());
+    return cat.selections.emplace(key, std::move(sel)).first->second;
 }
 
 struct WeaponStockRemapApplyCtx {
@@ -866,11 +879,7 @@ static RpMaterial* WeaponStockRemapApplyMaterialCB(RpMaterial* material, void* d
         return material;
     for (int i = 0; i < (int)ctx->catalog->slots.size(); ++i) {
         const WeaponStockRemapSlot& slot = ctx->catalog->slots[(size_t)i];
-        bool baseMatch =
-            slot.baseTexName.empty()
-                ? (slot.original != nullptr && material->texture == slot.original)
-                : (_stricmp(mName, slot.baseTexName.c_str()) == 0);
-        if (!baseMatch)
+        if (_stricmp(mName, slot.baseTexName.c_str()) != 0)
             continue;
         const int varIdx = (i < (int)ctx->selections->size()) ? (*ctx->selections)[(size_t)i] : -1;
         if (varIdx < 0 || varIdx >= (int)slot.remaps.size())
@@ -893,25 +902,19 @@ static RpAtomic* WeaponStockRemapApplyAtomicCB(RpAtomic* atomic, void* data) {
 }
 
 static void OrcApplyWeaponRemapCatalogToRwObject(CPed* ped,
+                                                 int wt,
                                                  RwObject* object,
-                                                 const WeaponStockRemapCatalog* cat,
-                                                 std::unordered_map<std::string, std::vector<int>>& selectionStore,
-                                                 const std::string& selectionKeyTailAfterPedPipe) {
+                                                 WeaponStockRemapCatalog* cat) {
     if (!g_enabled || !g_weaponTexturesEnabled || !ped || !object || !cat || cat->slots.empty())
         return;
 
-    WeaponRemapEnsureSelectionsForCatalog(ped, *cat, selectionStore, selectionKeyTailAfterPedPipe);
     const int pedRef = CPools::GetPedRef(ped);
     if (pedRef <= 0)
-        return;
-    const std::string key = std::to_string(pedRef) + "|" + selectionKeyTailAfterPedPipe;
-    auto sit = selectionStore.find(key);
-    if (sit == selectionStore.end() || sit->second.size() != cat->slots.size())
         return;
 
     WeaponStockRemapApplyCtx ctx;
     ctx.catalog = cat;
-    ctx.selections = &sit->second;
+    ctx.selections = &WeaponRemapSelectionsForCatalog(*cat, pedRef, wt);
     __try {
         if (object->type == rpCLUMP) {
             RpClumpForAllAtomics(reinterpret_cast<RpClump*>(object), WeaponStockRemapApplyAtomicCB, &ctx);
@@ -926,35 +929,22 @@ static void OrcApplyWeaponRemapCatalogToRwObject(CPed* ped,
 static void OrcApplyWeaponStockRemapToObject(CPed* ped, int wt, RwObject* object) {
     if (!g_enabled || !g_weaponTexturesEnabled || !g_weaponTextureStandardRemap || wt <= 0)
         return;
-    const WeaponStockRemapCatalog* cat = OrcGetWeaponStockRemapCatalog(wt);
-    if (!cat || cat->slots.empty())
-        return;
-    OrcApplyWeaponRemapCatalogToRwObject(ped, object, cat, g_weaponStockRemapSelectionByPedWt, std::to_string(wt));
+    OrcApplyWeaponRemapCatalogToRwObject(ped, wt, object, OrcGetWeaponStockRemapCatalog(wt));
 }
 
 static bool EnsureWeaponTextureAssetLoaded(WeaponTextureAsset& asset);
 
 /// Cached *_remap catalogue for an Orc Guns/GunsNick weapon texture TXD.
-static const WeaponStockRemapCatalog* OrcGetCachedWeaponTexAssetRemapCatalog(WeaponTextureAsset& asset) {
+static WeaponStockRemapCatalog* OrcGetCachedWeaponTexAssetRemapCatalog(WeaponTextureAsset& asset) {
     if (!EnsureWeaponTextureAssetLoaded(asset))
-        return nullptr;
-    RwTexDictionary* dict = GetTxdDictionaryByIndexMain(asset.txdSlot);
-    if (!dict)
         return nullptr;
     auto it = g_weaponTextureAssetRemapCatalogByKey.find(asset.key);
     if (it != g_weaponTextureAssetRemapCatalogByKey.end())
         return &it->second;
 
     WeaponStockRemapCatalog built{};
-    built.wt = -1;
-    built.txdIndex = asset.txdSlot;
-    __try {
-        WeaponRemapScanDictIntoCatalog(dict, built);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogError("weapon Guns TXD remap scan: SEH asset=%s ex=0x%08X", asset.displayName.c_str(),
-            GetExceptionCode());
-        built.slots.clear();
-    }
+    built.dictionary = asset.txd;
+    WeaponRemapScanDictIntoCatalog(built, asset.displayName.c_str());
     if (!built.slots.empty()) {
         OrcLogInfo("weapon texture \"%s\": Guns/GunsNick TXD has %zu remap slot(s)",
             asset.displayName.c_str(), built.slots.size());
@@ -969,55 +959,30 @@ static void OrcApplyWeaponTextureAssetTxdRemapVariants(CPed* ped,
                                                        WeaponTextureAsset* asset) {
     if (!g_enabled || !g_weaponTexturesEnabled || !asset || wt <= 0 || !ped || !object)
         return;
-    const WeaponStockRemapCatalog* cat = OrcGetCachedWeaponTexAssetRemapCatalog(*asset);
-    if (!cat || cat->slots.empty())
-        return;
-    const std::string tail = std::to_string(wt) + "|" + asset->key;
-    OrcApplyWeaponRemapCatalogToRwObject(ped, object, cat, g_weaponTextureAssetRemapSelectionByKey, tail);
+    OrcApplyWeaponRemapCatalogToRwObject(ped, wt, object, OrcGetCachedWeaponTexAssetRemapCatalog(*asset));
 }
 
-void OrcRestoreWeaponTextureOverrides() {
-    if (g_weaponTextureRestoreEntries.empty())
-        return;
-    for (auto it = g_weaponTextureRestoreEntries.rbegin(); it != g_weaponTextureRestoreEntries.rend(); ++it) {
-        if (!it->material) continue;
+std::size_t OrcWeaponTextureRestorePoint() {
+    return g_weaponTextureRestoreEntries.size();
+}
+
+void OrcRestoreWeaponTextureOverrides(std::size_t restorePoint) {
+    while (g_weaponTextureRestoreEntries.size() > restorePoint) {
+        const WeaponTextureRestoreEntry entry = g_weaponTextureRestoreEntries.back();
+        g_weaponTextureRestoreEntries.pop_back();
         __try {
-            it->material->texture = it->texture;
+            entry.material->texture = entry.texture;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
-    g_weaponTextureRestoreEntries.clear();
-}
-
-void OrcRestoreWeaponHeldTextureOverrides() {
-    if (g_weaponTextureHeldRestoreEntries.empty())
-        return;
-    for (auto it = g_weaponTextureHeldRestoreEntries.rbegin(); it != g_weaponTextureHeldRestoreEntries.rend(); ++it) {
-        if (!it->material) continue;
-        __try {
-            it->material->texture = it->texture;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
-    g_weaponTextureHeldRestoreEntries.clear();
-}
-
-void OrcWeaponHeldTextureDeferBegin() {
-    ++g_weaponTextureHeldDeferDepth;
-}
-
-void OrcWeaponHeldTextureDeferEnd() {
-    if (g_weaponTextureHeldDeferDepth > 0)
-        --g_weaponTextureHeldDeferDepth;
 }
 
 static void DestroyWeaponTextureAssets() {
     ClearWeaponHudIconCache();
     OrcRestoreWeaponTextureOverrides();
-    OrcRestoreWeaponHeldTextureOverrides();
-    g_weaponTextureHeldDeferDepth = 0;
     g_weaponTextureAssetRemapCatalogByKey.clear();
-    g_weaponTextureAssetRemapSelectionByKey.clear();
+    for (auto& asset : g_weaponTextureAssets)
+        DestroyWeaponTxd(asset.txd);
     g_weaponTextureAssets.clear();
     g_weaponTextureByNick.clear();
     g_weaponTextureBySkin.clear();
@@ -1030,57 +995,14 @@ static void DestroyWeaponTextureAssets() {
 }
 
 static bool EnsureWeaponTextureAssetLoaded(WeaponTextureAsset& asset) {
-    if (asset.txdSlot >= 0 && GetTxdDictionaryByIndexMain(asset.txdSlot))
-        return true;
-    // GTA may flush `RwTexDictionary*` while leaving the CTxdStore slot — HUD TryGet kept seeing nullptr and
-    // `loadAttempted` blocked reload forever.
-    if (asset.txdSlot >= 0 && asset.loadAttempted && !GetTxdDictionaryByIndexMain(asset.txdSlot)) {
-        OrcLogInfoThrottled(411,
-            8000u,
-            "weapon texture \"%s\": TXD RwDictionary evicted (slot=%d); reloading",
-            asset.displayName.c_str(),
-            asset.txdSlot);
-        asset.loadAttempted = false;
-    }
     if (asset.loadAttempted)
-        return false;
+        return asset.txd != nullptr;
     asset.loadAttempted = true;
-
-    if (asset.txdPath.empty() || !OrcFileExistsA(asset.txdPath.c_str())) {
-        if (!asset.loadFailedLogged) {
-            asset.loadFailedLogged = true;
-            OrcLogError("weapon texture \"%s\": TXD missing %s", asset.displayName.c_str(), asset.txdPath.c_str());
-        }
+    asset.txd = asset.txdPath.empty() ? nullptr : ReadWeaponTxd(asset.txdPath.c_str());
+    if (!asset.txd) {
+        OrcLogError("weapon texture \"%s\": TXD unreadable path=%s", asset.displayName.c_str(), asset.txdPath.c_str());
         return false;
     }
-
-    std::string txdName = "orc_wtex_" + asset.key;
-    for (char& c : txdName) {
-        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
-            c = '_';
-    }
-    int txdSlot = CTxdStore::FindTxdSlot(txdName.c_str());
-    if (txdSlot == -1)
-        txdSlot = CTxdStore::AddTxdSlot(txdName.c_str());
-    if (txdSlot == -1) {
-        OrcLogError("weapon texture \"%s\": CTxdStore::AddTxdSlot failed", asset.displayName.c_str());
-        return false;
-    }
-
-    bool txdOk = false;
-    RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)asset.txdPath.c_str());
-    if (txdStream) {
-        ClearWeaponHudIconCache(txdSlot);
-        txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
-        RwStreamClose(txdStream, nullptr);
-    }
-    if (!txdOk) {
-        OrcLogError("weapon texture \"%s\": LoadTxd failed", asset.displayName.c_str());
-        return false;
-    }
-
-    asset.txdSlot = txdSlot;
-    asset.loadFailedLogged = false;
     OrcLogInfo("weapon texture \"%s\": loaded", asset.displayName.c_str());
     return true;
 }
@@ -1125,6 +1047,7 @@ static void SortWeaponTextureRandomPools() {
 }
 
 void DiscoverWeaponTextures() {
+    OrcInvalidateHeldWeaponDrawPreparation();
     ClearWeaponStockRemapRuntime();
     DestroyWeaponTextureAssets();
     const std::string gunsDir = g_gameWeaponGunsDir;
@@ -1263,35 +1186,21 @@ WeaponTextureStats OrcGetWeaponTextureStats() {
     return g_weaponTextureStats;
 }
 
-static WeaponTextureAsset* PickRandomWeaponTextureAsset(const std::string& mapKey) {
-    auto it = g_weaponTextureRandomBySkin.find(mapKey);
-    if (it == g_weaponTextureRandomBySkin.end() || it->second.empty())
-        return nullptr;
+static int PopWeaponTextureRandomChoice(const std::string& mapKey, const std::vector<int>& pool) {
     std::vector<int>& bag = g_weaponTextureRandomBags[mapKey];
     if (bag.empty()) {
-        bag = it->second;
-        for (int i = (int)bag.size() - 1; i > 0; --i) {
-            const int j = rand() % (i + 1);
-            std::swap(bag[(size_t)i], bag[(size_t)j]);
-        }
+        bag = pool;
+        OrcRandomNoRepeatShuffle(bag);
     }
     const int assetIndex = bag.back();
     bag.pop_back();
-    if (assetIndex < 0 || assetIndex >= (int)g_weaponTextureAssets.size())
-        return nullptr;
-    return &g_weaponTextureAssets[(size_t)assetIndex];
+    return assetIndex;
 }
 
-static WeaponTextureAsset* PickStickyRandomWeaponTextureAsset(CPed* ped, const std::string& mapKey) {
-    if (!ped)
-        return nullptr;
-    PruneRandomChoicesForDeadPeds(
-        g_weaponTextureRandomChoiceByPed,
-        g_weaponTextureSequentialStates,
-        g_weaponTextureNoRepeatStates);
+static int PickStickyWeaponTextureChoice(CPed* ped, const std::string& mapKey, const std::vector<int>& pool) {
     const int pedRef = OrcSafeGetPedRef(ped);
     if (pedRef <= 0)
-        return PickRandomWeaponTextureAsset(mapKey);
+        return PopWeaponTextureRandomChoice(mapKey, pool);
 
     const std::string choiceKey = std::to_string(pedRef) + "|" + mapKey;
     auto chosen = g_weaponTextureRandomChoiceByPed.find(choiceKey);
@@ -1302,87 +1211,85 @@ static WeaponTextureAsset* PickStickyRandomWeaponTextureAsset(CPed* ped, const s
                 g_weaponTextureSequentialStates[mapKey].activeChoiceKeys.insert(choiceKey);
             else if (g_weaponTextureRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT)
                 g_weaponTextureNoRepeatStates[mapKey].activeChoiceKeys.insert(choiceKey);
-            return &g_weaponTextureAssets[(size_t)assetIndex];
+            return assetIndex;
         }
     }
-
-    int assetIndex = -1;
+    PruneRandomChoicesForDeadPeds(
+        g_weaponTextureRandomChoiceByPed,
+        g_weaponTextureSequentialStates,
+        g_weaponTextureNoRepeatStates);
     if (g_weaponTextureRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL) {
-        auto poolIt = g_weaponTextureRandomBySkin.find(mapKey);
-        if (poolIt == g_weaponTextureRandomBySkin.end() || poolIt->second.empty())
-            return nullptr;
-        assetIndex = OrcSequentialPickSticky(
+        return OrcSequentialPickSticky(
             g_weaponTextureSequentialStates[mapKey],
             g_weaponTextureRandomChoiceByPed,
             choiceKey,
-            poolIt->second,
+            pool,
             -1);
-    } else if (g_weaponTextureRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT) {
-        auto poolIt = g_weaponTextureRandomBySkin.find(mapKey);
-        if (poolIt == g_weaponTextureRandomBySkin.end() || poolIt->second.empty())
-            return nullptr;
-        assetIndex = OrcRandomNoRepeatPickSticky(
+    }
+    if (g_weaponTextureRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT) {
+        return OrcRandomNoRepeatPickSticky(
             g_weaponTextureNoRepeatStates[mapKey],
             g_weaponTextureRandomChoiceByPed,
             choiceKey,
-            poolIt->second,
+            pool,
             -1);
-    } else {
-        WeaponTextureAsset* asset = PickRandomWeaponTextureAsset(mapKey);
-        if (!asset)
-            return nullptr;
-        assetIndex = (int)(asset - g_weaponTextureAssets.data());
-        if (assetIndex >= 0)
-            g_weaponTextureRandomChoiceByPed[choiceKey] = assetIndex;
     }
-    if (assetIndex < 0 || assetIndex >= (int)g_weaponTextureAssets.size())
+    const int assetIndex = PopWeaponTextureRandomChoice(mapKey, pool);
+    g_weaponTextureRandomChoiceByPed[choiceKey] = assetIndex;
+    return assetIndex;
+}
+
+static void ForgetFailedWeaponChoice(int failedIndex,
+    std::vector<int>& sourcePool,
+    const std::string& poolKey,
+    std::unordered_map<std::string, std::vector<int>>& bags,
+    std::unordered_map<std::string, int>& choices,
+    std::unordered_map<std::string, OrcSequentialPickState>& sequentialStates,
+    std::unordered_map<std::string, OrcRandomNoRepeatPickState>& noRepeatStates);
+
+static WeaponTextureAsset* PickUsableWeaponTexture(CPed* ped, const std::string& poolKey, std::vector<int>& pool) {
+    while (!pool.empty()) {
+        const int pick = PickStickyWeaponTextureChoice(ped, poolKey, pool);
+        if (pick < 0 || pick >= (int)g_weaponTextureAssets.size())
+            return nullptr;
+        WeaponTextureAsset& asset = g_weaponTextureAssets[(size_t)pick];
+        if (EnsureWeaponTextureAssetLoaded(asset))
+            return &asset;
+        ForgetFailedWeaponChoice(pick, pool, poolKey, g_weaponTextureRandomBags, g_weaponTextureRandomChoiceByPed,
+            g_weaponTextureSequentialStates, g_weaponTextureNoRepeatStates);
+    }
+    return nullptr;
+}
+
+static WeaponTextureAsset* FindUsableWeaponTexture(const std::unordered_map<std::string, int>& index,
+    const std::string& key) {
+    const auto found = index.find(key);
+    if (found == index.end())
         return nullptr;
-    return &g_weaponTextureAssets[(size_t)assetIndex];
+    WeaponTextureAsset& asset = g_weaponTextureAssets[(size_t)found->second];
+    return EnsureWeaponTextureAssetLoaded(asset) ? &asset : nullptr;
 }
 
-/// `wprand:<weapon_folder>:<dff_basename>` (e.g. `wprand:desert_eagle:markvii`) — same match key as
-/// `Weapons\Guns\<weapon>\<basename>.txd` indexed under `weapon|basename`.
-static bool WeaponTextureParseWprandReplacementKey(const std::vector<std::string>& weaponLowerExpected,
-    const std::string& replacementKey,
-    std::string* variantBasenameLowerOut) {
-    static constexpr char kPref[] = "wprand:";
-    if (replacementKey.rfind(kPref, 0) != 0 || !variantBasenameLowerOut)
-        return false;
-    const std::string rest = replacementKey.substr(sizeof(kPref) - 1);
-    const size_t col = rest.find(':');
-    if (col == std::string::npos || col == 0 || col + 1 >= rest.size())
-        return false;
-    const std::string weaponPart = OrcToLowerAscii(rest.substr(0, col));
-    const std::string basePartRaw = rest.substr(col + 1);
-    if (std::find(weaponLowerExpected.begin(), weaponLowerExpected.end(), weaponPart) == weaponLowerExpected.end())
-        return false;
-    *variantBasenameLowerOut = OrcToLowerAscii(OrcBaseNameNoExt(basePartRaw));
-    return !variantBasenameLowerOut->empty();
-}
-
-static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped,
+WeaponTextureAsset* OrcResolveUsableWeaponTextureAssetForPed(CPed* ped,
     int wt,
     bool allowRandom,
     const std::string* replacementKeyHint) {
     if (!g_enabled || !g_weaponTexturesEnabled || !ped || wt <= 0)
         return nullptr;
-    std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    const auto& weaponNames = WeaponLookupNamesLower(wt);
     if (weaponNames.empty())
         return nullptr;
 
-    if (g_weaponTextureNickMode && samp_bridge::IsSampBuildKnown()) {
+    if (g_weaponTextureNickMode && !g_weaponTextureByNick.empty() && samp_bridge::IsSampBuildKnown()) {
         char nick[64] = {};
         bool isLocal = false;
         if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocal)) {
             const std::string nickLower = OrcToLowerAscii(StripSampColorCodes(nick));
             if (!nickLower.empty()) {
                 for (const std::string& weaponName : weaponNames) {
-                    const std::string nickKey = MakeWeaponReplacementKey(weaponName, nickLower);
-                    auto nickIt = g_weaponTextureByNick.find(nickKey);
-                    if (nickIt != g_weaponTextureByNick.end() &&
-                        nickIt->second >= 0 && nickIt->second < (int)g_weaponTextureAssets.size()) {
-                        return &g_weaponTextureAssets[(size_t)nickIt->second];
-                    }
+                    if (WeaponTextureAsset* asset = FindUsableWeaponTexture(g_weaponTextureByNick,
+                            MakeWeaponReplacementKey(weaponName, nickLower)))
+                        return asset;
                 }
             }
         }
@@ -1390,27 +1297,20 @@ static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped,
 
     const std::string* wprandKeyPtr = replacementKeyHint;
     std::string resolvedReplKeyBuf;
-    if ((!wprandKeyPtr || wprandKeyPtr->empty()) && g_weaponReplacementEnabled) {
+    if (!replacementKeyHint && g_weaponReplacementEnabled) {
         resolvedReplKeyBuf = OrcResolveUsableWeaponReplacementKeyForPed(ped, wt, allowRandom);
         if (!resolvedReplKeyBuf.empty())
             wprandKeyPtr = &resolvedReplKeyBuf;
     }
-    if (wprandKeyPtr && !wprandKeyPtr->empty()) {
-        std::string variantLower;
-        if (WeaponTextureParseWprandReplacementKey(weaponNames, *wprandKeyPtr, &variantLower)) {
-            const std::string replWeaponLower = OrcToLowerAscii(wprandKeyPtr->substr(7, wprandKeyPtr->find(':', 7) - 7));
-            const std::string replTexKey = MakeWeaponReplacementKey(replWeaponLower, variantLower);
-            auto replIt = g_weaponTextureBySkin.find(replTexKey);
-            if (replIt != g_weaponTextureBySkin.end() &&
-                replIt->second >= 0 && replIt->second < (int)g_weaponTextureAssets.size()) {
-                OrcLogInfoThrottled(402, 10000u,
-                    "weapon texture: Guns\\%s\\%s.txd via replacement key \"%s\" (wt=%d)",
-                    replWeaponLower.c_str(),
-                    variantLower.c_str(),
-                    wprandKeyPtr->c_str(),
-                    wt);
-                return &g_weaponTextureAssets[(size_t)replIt->second];
-            }
+    if (wprandKeyPtr && wprandKeyPtr->compare(0, 7, "wprand:") == 0) {
+        std::string variant = wprandKeyPtr->substr(7);
+        const size_t separator = variant.find(':');
+        if (separator != std::string::npos &&
+            std::find(weaponNames.begin(), weaponNames.end(), variant.substr(0, separator)) != weaponNames.end()) {
+            // The key already contains the DFF stem, which can itself contain dots.
+            variant[separator] = '|';
+            if (WeaponTextureAsset* asset = FindUsableWeaponTexture(g_weaponTextureBySkin, variant))
+                return asset;
         }
     }
 
@@ -1418,15 +1318,18 @@ static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped,
 
     if (!skinLowerRaw.empty()) {
         for (const std::string& weaponName : weaponNames) {
-            const std::string skinKey = MakeWeaponReplacementKey(weaponName, skinLowerRaw);
-            auto skinIt = g_weaponTextureBySkin.find(skinKey);
-            if (skinIt != g_weaponTextureBySkin.end() &&
-                skinIt->second >= 0 && skinIt->second < (int)g_weaponTextureAssets.size()) {
-                return &g_weaponTextureAssets[(size_t)skinIt->second];
-            }
-            if (allowRandom && g_weaponTextureRandomMode) {
-                if (WeaponTextureAsset* picked = PickStickyRandomWeaponTextureAsset(ped, skinKey))
-                    return picked;
+            if (WeaponTextureAsset* asset = FindUsableWeaponTexture(g_weaponTextureBySkin,
+                    MakeWeaponReplacementKey(weaponName, skinLowerRaw)))
+                return asset;
+        }
+        if (allowRandom && g_weaponTextureRandomMode) {
+            for (const std::string& weaponName : weaponNames) {
+                const std::string skinKey = MakeWeaponReplacementKey(weaponName, skinLowerRaw);
+                const auto found = g_weaponTextureRandomBySkin.find(skinKey);
+                if (found != g_weaponTextureRandomBySkin.end()) {
+                    if (WeaponTextureAsset* asset = PickUsableWeaponTexture(ped, skinKey, found->second))
+                        return asset;
+                }
             }
         }
     }
@@ -1434,42 +1337,9 @@ static WeaponTextureAsset* ResolveWeaponTextureAssetForPed(CPed* ped,
     // `Weapons\Guns\<weapon>\<weapon>.txd` is indexed as match key `<weapon>|<weapon>` (same string twice).
     // Used when ped skin has no `<weapon>\<dff>.txd` entry (many packs ship one bundle as desert_eagle\desert_eagle.txd).
     for (const std::string& weaponName : weaponNames) {
-        const std::string defaultWeaponSkinKey = MakeWeaponReplacementKey(weaponName, weaponName);
-        auto defIt = g_weaponTextureBySkin.find(defaultWeaponSkinKey);
-        if (defIt != g_weaponTextureBySkin.end() &&
-            defIt->second >= 0 && defIt->second < (int)g_weaponTextureAssets.size()) {
-            OrcLogInfoThrottled(401, 8000u,
-                "weapon texture: using default Guns\\%s\\%s.txd (wt=%d pedSkin=\"%s\")",
-                weaponName.c_str(),
-                weaponName.c_str(),
-                wt,
-                GetPedStdSkinDffName(ped).c_str());
-            return &g_weaponTextureAssets[(size_t)defIt->second];
-        }
-    }
-    return nullptr;
-}
-
-WeaponTextureAsset* OrcResolveUsableWeaponTextureAssetForPed(CPed* ped,
-    int wt,
-    bool allowRandom,
-    const std::string* replacementKeyHint) {
-    WeaponTextureAsset* asset = ResolveWeaponTextureAssetForPed(ped, wt, allowRandom, replacementKeyHint);
-    if (!asset)
-        return nullptr;
-    if (EnsureWeaponTextureAssetLoaded(*asset))
-        return asset;
-    if (asset->key.rfind("skinrandom:", 0) == 0) {
-        const int failedIndex = (int)(asset - g_weaponTextureAssets.data());
-        for (auto it = g_weaponTextureRandomChoiceByPed.begin(); it != g_weaponTextureRandomChoiceByPed.end();) {
-            if (it->second == failedIndex) {
-                EraseSequentialChoiceKeyFromStates(g_weaponTextureSequentialStates, it->first);
-                ReleaseNoRepeatChoiceKeyFromStates(g_weaponTextureNoRepeatStates, g_weaponTextureRandomChoiceByPed, it->first, false);
-                it = g_weaponTextureRandomChoiceByPed.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        if (WeaponTextureAsset* asset = FindUsableWeaponTexture(g_weaponTextureBySkin,
+                MakeWeaponReplacementKey(weaponName, weaponName)))
+            return asset;
     }
     return nullptr;
 }
@@ -1480,7 +1350,6 @@ struct WeaponHudIconCacheEntry {
     const std::string* replacementKey = nullptr;
     RwTexDictionary* dict = nullptr;
     unsigned int stockHash = 0;
-    int txdSlot = -1;
     int weaponType = 0;
     RwTexture* texture = nullptr;
 };
@@ -1492,6 +1361,7 @@ struct HudIconCandidates {
     std::string vanillaIcon;
     std::string folderIcon;
     std::string matchIcon;
+    std::string variantIcon;
     std::string_view replacementBasename;
     std::string_view folder;
     std::string_view match;
@@ -1503,7 +1373,7 @@ struct HudIconCandidates {
 };
 
 std::string_view HudReplacementBasename(std::string_view key) {
-    if (key.compare(0, 7, "wprand:") != 0)
+    if (key.compare(0, 7, "wprand:") != 0 && key.compare(0, 11, "skinrandom:") != 0)
         return {};
     const size_t separator = key.rfind(':');
     return separator > 6 ? key.substr(separator + 1) : std::string_view{};
@@ -1525,8 +1395,10 @@ RwTexture* CollectHudIconCandidate(RwTexture* texture, void* data) {
 
     int score = -1;
     if (!candidates.vanillaIcon.empty() && name == candidates.vanillaIcon)
-        score = 6;
+        score = 7;
     else if (!candidates.folderIcon.empty() && name == candidates.folderIcon)
+        score = 6;
+    else if (!candidates.variantIcon.empty() && name == candidates.variantIcon)
         score = 5;
     else if (!candidates.matchIcon.empty() && name == candidates.matchIcon)
         score = 4;
@@ -1549,26 +1421,27 @@ RwTexture* CollectHudIconCandidate(RwTexture* texture, void* data) {
 template <typename Asset>
 RwTexture* FindHudIconForAsset(WeaponHudIconCacheEntry& cache, const Asset& asset,
     int weaponType, unsigned int stockHash, const std::string& replacementKey) {
-    // Only reuse the borrowed texture while its slot still owns the same dictionary.
-    // Our loaders invalidate this slot before replacing the dictionary, including address reuse.
-    RwTexDictionary* dict = GetTxdDictionaryByIndexMain(asset.txdSlot);
-    if (cache.asset == &asset && cache.txdSlot == asset.txdSlot && cache.dict == dict && cache.stockHash == stockHash &&
+    // Rescans invalidate the borrowed pointers before destroying the private dictionaries.
+    RwTexDictionary* dict = asset.txd;
+    if (cache.asset == &asset && cache.dict == dict && cache.stockHash == stockHash &&
         cache.weaponType == weaponType && cache.replacementKey == &replacementKey) {
         return cache.texture;
     }
 
-    cache = { &asset, &replacementKey, dict, stockHash, asset.txdSlot, weaponType, nullptr };
+    cache = { &asset, &replacementKey, dict, stockHash, weaponType, nullptr };
     if (!dict)
         return nullptr;
 
     RwTexture* texture = RwTexDictionaryFindHashNamedTexture(dict, stockHash);
     if (!texture || !texture->raster) {
         const std::string vanilla = OrcGetWeaponModelBaseNameLower(weaponType);
+        const std::string_view variant = HudReplacementBasename(replacementKey);
         HudIconCandidates candidates{
             vanilla.empty() ? std::string{} : vanilla + "icon",
             asset.weaponNameLower.empty() ? std::string{} : asset.weaponNameLower + "icon",
             asset.matchNameLower.empty() ? std::string{} : asset.matchNameLower + "icon",
-            HudReplacementBasename(replacementKey), asset.weaponNameLower, asset.matchNameLower
+            variant.empty() ? std::string{} : std::string(variant) + "icon",
+            variant, asset.weaponNameLower, asset.matchNameLower
         };
         RwTexDictionaryForAllTextures(dict, &CollectHudIconCandidate, &candidates);
         texture = candidates.best;
@@ -1577,17 +1450,15 @@ RwTexture* FindHudIconForAsset(WeaponHudIconCacheEntry& cache, const Asset& asse
     }
 
     cache.texture = texture;
-    OrcLogInfoThrottled(430, 4000u, "hud icon: wt=%d hash=%08X txd=%d asset=%s texture=%s", weaponType, stockHash,
-        asset.txdSlot, asset.displayName.c_str(), texture ? texture->name : "-");
+    OrcLogInfoThrottled(430, 4000u, "hud icon: wt=%d hash=%08X asset=%s texture=%s", weaponType, stockHash,
+        asset.displayName.c_str(), texture ? texture->name : "-");
     return texture;
 }
 }  // namespace
 
-static void ClearWeaponHudIconCache(int txdSlot) {
-    if (txdSlot < 0 || g_textureHudIcon.txdSlot == txdSlot)
-        g_textureHudIcon = {};
-    if (txdSlot < 0 || g_replacementHudIcon.txdSlot == txdSlot)
-        g_replacementHudIcon = {};
+static void ClearWeaponHudIconCache() {
+    g_textureHudIcon = {};
+    g_replacementHudIcon = {};
 }
 
 RwTexture* OrcWeaponHudResolveIconTexture(CPed* ped, int weaponType, unsigned int stockHash) {
@@ -1598,8 +1469,9 @@ RwTexture* OrcWeaponHudResolveIconTexture(CPed* ped, int weaponType, unsigned in
         ? OrcResolveUsableWeaponReplacementAssetForPed(ped, weaponType, true)
         : nullptr;
     if (g_weaponTexturesEnabled) {
-        const std::string* hint = replacement ? &replacement->key : nullptr;
-        if (WeaponTextureAsset* asset = OrcResolveUsableWeaponTextureAssetForPed(ped, weaponType, true, hint)) {
+        static const std::string stockKey;
+        const std::string& hint = replacement ? replacement->key : stockKey;
+        if (WeaponTextureAsset* asset = OrcResolveUsableWeaponTextureAssetForPed(ped, weaponType, true, &hint)) {
             if (RwTexture* texture = FindHudIconForAsset(g_textureHudIcon, *asset, weaponType, stockHash,
                     replacement ? replacement->key : asset->key)) {
                 return texture;
@@ -1622,7 +1494,7 @@ static RpMaterial* WeaponTextureApplyMaterialCB(RpMaterial* material, void* data
     if (!ctx->dict)
         return material;
     RwTexture* replacement = RwTexDictionaryFindNamedTexture(ctx->dict, material->texture->name);
-    if (!replacement || replacement == material->texture)
+    if (!replacement || !replacement->raster || replacement == material->texture)
         return material;
     WeaponTextureRecordMaterialRestore(material, material->texture);
     material->texture = replacement;
@@ -1636,13 +1508,11 @@ static RpAtomic* WeaponTextureApplyAtomicCB(RpAtomic* atomic, void* data) {
     return atomic;
 }
 
-void OrcApplyWeaponTextureToRwObject(RwObject* object, WeaponTextureAsset* asset) {
+static void OrcApplyWeaponTextureToRwObject(RwObject* object, WeaponTextureAsset* asset) {
     if (!object || !asset || !EnsureWeaponTextureAssetLoaded(*asset))
         return;
     WeaponTextureApplyCtx ctx;
-    ctx.dict = GetTxdDictionaryByIndexMain(asset->txdSlot);
-    if (!ctx.dict)
-        return;
+    ctx.dict = asset->txd;
     __try {
         if (object->type == rpCLUMP) {
             RpClumpForAllAtomics(reinterpret_cast<RpClump*>(object), WeaponTextureApplyAtomicCB, &ctx);
@@ -1659,6 +1529,8 @@ void OrcApplyWeaponTexturesCombined(CPed* ped,
     RwObject* object,
     WeaponTextureAsset* customAsset,
     bool weaponMeshIsReplacement) {
+    if (!g_enabled || !g_weaponTexturesEnabled || !object)
+        return;
     if (!weaponMeshIsReplacement)
         OrcApplyWeaponStockRemapToObject(ped, wt, object);
     if (customAsset && weaponMeshIsReplacement)
@@ -1666,17 +1538,34 @@ void OrcApplyWeaponTexturesCombined(CPed* ped,
     OrcApplyWeaponTextureToRwObject(object, customAsset);
 }
 
-static int PopWeaponReplacementRandomChoice(const std::string& bagPoolKey, const std::vector<int>& sourcePool) {
+static int PopWeaponReplacementRandomChoice(const std::string& bagPoolKey, const std::vector<int>& sourcePool,
+    int avoidChoice = -2) {
     if (sourcePool.empty())
         return -2;
     std::vector<int>& bag = g_weaponReplacementRandomBags[bagPoolKey];
-    if (bag.empty()) {
+    auto refill = [&]() {
         bag = sourcePool;
         if (g_weaponReplacementRandomIncludeVanilla)
             bag.push_back(kWeaponReplacementVanillaChoice);
-        for (int i = (int)bag.size() - 1; i > 0; --i) {
-            const int j = rand() % (i + 1);
-            std::swap(bag[(size_t)i], bag[(size_t)j]);
+        OrcRandomNoRepeatShuffle(bag);
+    };
+    if (bag.empty())
+        refill();
+    if (!g_weaponReplacementRandomIncludeVanilla && bag.back() == kWeaponReplacementVanillaChoice) {
+        bag.pop_back();
+        if (bag.empty())
+            refill();
+    }
+    if (bag.back() == avoidChoice) {
+        if (bag.size() == 1 && sourcePool.size() + (g_weaponReplacementRandomIncludeVanilla ? 1u : 0u) > 1)
+            refill();
+        auto it = std::find_if(bag.rbegin(), bag.rend(), [avoidChoice](int value) {
+            return value != avoidChoice && (g_weaponReplacementRandomIncludeVanilla || value != kWeaponReplacementVanillaChoice);
+        });
+        if (it != bag.rend()) {
+            const int picked = *it;
+            bag.erase(std::prev(it.base()));
+            return picked;
         }
     }
     const int v = bag.back();
@@ -1699,21 +1588,36 @@ static int PickStickyWeaponReplacementChoice(CPed* ped,
     const std::vector<int>& sourcePool) {
     if (!ped || sourcePool.empty())
         return -2;
-    PruneRandomChoicesForDeadPeds(
-        g_weaponReplacementRandomChoiceByPed,
-        g_weaponReplacementSequentialStates,
-        g_weaponReplacementNoRepeatStates);
     const int pedRef = OrcSafeGetPedRef(ped);
     if (pedRef <= 0)
         return PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool);
     const std::string choiceKey = std::to_string(pedRef) + "|" + stickySuffix;
     auto chosen = g_weaponReplacementRandomChoiceByPed.find(choiceKey);
     if (chosen != g_weaponReplacementRandomChoiceByPed.end()) {
-        if (g_weaponReplacementRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL)
-            g_weaponReplacementSequentialStates[bagPoolKey].activeChoiceKeys.insert(choiceKey);
-        else if (g_weaponReplacementRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT)
-            g_weaponReplacementNoRepeatStates[bagPoolKey].activeChoiceKeys.insert(choiceKey);
-        return chosen->second;
+        if (chosen->second != kWeaponReplacementVanillaChoice || g_weaponReplacementRandomIncludeVanilla) {
+            if (g_weaponReplacementRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL)
+                g_weaponReplacementSequentialStates[bagPoolKey].activeChoiceKeys.insert(choiceKey);
+            else if (g_weaponReplacementRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT)
+                g_weaponReplacementNoRepeatStates[bagPoolKey].activeChoiceKeys.insert(choiceKey);
+            return chosen->second;
+        }
+        EraseSequentialChoiceKeyFromStates(g_weaponReplacementSequentialStates, choiceKey);
+        ReleaseNoRepeatChoiceKeyFromStates(g_weaponReplacementNoRepeatStates, g_weaponReplacementRandomChoiceByPed,
+            choiceKey, false);
+        g_weaponReplacementRandomChoiceByPed.erase(chosen);
+    }
+    PruneRandomChoicesForDeadPeds(
+        g_weaponReplacementRandomChoiceByPed,
+        g_weaponReplacementSequentialStates,
+        g_weaponReplacementNoRepeatStates);
+
+    std::optional<int> avoidChoice;
+    const auto avoidIt = g_weaponReplacementRerollAvoidChoiceByPed.find(choiceKey);
+    if (avoidIt != g_weaponReplacementRerollAvoidChoiceByPed.end()) {
+        if (avoidIt->second.vanilla)
+            avoidChoice = kWeaponReplacementVanillaChoice;
+        else if (const int index = FindWeaponReplacementAssetIndexByKeyLower(avoidIt->second.assetKeyLower); index >= 0)
+            avoidChoice = index;
     }
     if (g_weaponReplacementRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL) {
         const std::vector<int> sequentialPool = BuildWeaponReplacementSequentialPool(sourcePool);
@@ -1722,7 +1626,8 @@ static int PickStickyWeaponReplacementChoice(CPed* ped,
             g_weaponReplacementRandomChoiceByPed,
             choiceKey,
             sequentialPool,
-            -2);
+            -2,
+            avoidChoice);
     }
     if (g_weaponReplacementRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT) {
         const std::vector<int> noRepeatPool = BuildWeaponReplacementSequentialPool(sourcePool);
@@ -1731,37 +1636,60 @@ static int PickStickyWeaponReplacementChoice(CPed* ped,
             g_weaponReplacementRandomChoiceByPed,
             choiceKey,
             noRepeatPool,
-            -2);
+            -2,
+            avoidChoice);
     }
-    const int pick = PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool);
-    int finalPick = pick;
-    auto avoidIt = g_weaponReplacementRerollAvoidChoiceByPed.find(choiceKey);
-    if (avoidIt != g_weaponReplacementRerollAvoidChoiceByPed.end() &&
-        WeaponReplacementChoiceMatchesSnapshot(finalPick, avoidIt->second)) {
-        std::vector<int> skipped;
-        skipped.push_back(finalPick);
-        const size_t maxAttempts = sourcePool.size() + (g_weaponReplacementRandomIncludeVanilla ? 1u : 0u);
-        for (size_t attempt = 0; attempt < maxAttempts; ++attempt) {
-            const int alt = PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool);
-            if (alt == -2)
-                break;
-            if (!WeaponReplacementChoiceMatchesSnapshot(alt, avoidIt->second)) {
-                finalPick = alt;
-                break;
-            }
-            skipped.push_back(alt);
-        }
-        std::vector<int>& bag = g_weaponReplacementRandomBags[bagPoolKey];
-        for (int skippedPick : skipped)
-            bag.push_back(skippedPick);
-        g_weaponReplacementRerollAvoidChoiceByPed.erase(avoidIt);
-    }
-    if (finalPick != -2)
-        g_weaponReplacementRandomChoiceByPed[choiceKey] = finalPick;
-    return finalPick;
+    const int picked = PopWeaponReplacementRandomChoice(bagPoolKey, sourcePool, avoidChoice.value_or(-2));
+    if (picked != -2)
+        g_weaponReplacementRandomChoiceByPed[choiceKey] = picked;
+    return picked;
 }
 
-WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom) {
+static void ForgetFailedWeaponChoice(int failedIndex,
+    std::vector<int>& sourcePool,
+    const std::string& poolKey,
+    std::unordered_map<std::string, std::vector<int>>& bags,
+    std::unordered_map<std::string, int>& choices,
+    std::unordered_map<std::string, OrcSequentialPickState>& sequentialStates,
+    std::unordered_map<std::string, OrcRandomNoRepeatPickState>& noRepeatStates) {
+    sourcePool.erase(std::remove(sourcePool.begin(), sourcePool.end(), failedIndex), sourcePool.end());
+    const auto bag = bags.find(poolKey);
+    if (bag != bags.end())
+        bag->second.erase(std::remove(bag->second.begin(), bag->second.end(), failedIndex), bag->second.end());
+    for (auto it = choices.begin(); it != choices.end();) {
+        if (it->second != failedIndex) {
+            ++it;
+            continue;
+        }
+        EraseSequentialChoiceKeyFromStates(sequentialStates, it->first);
+        ReleaseNoRepeatChoiceKeyFromStates(noRepeatStates, choices, it->first, false);
+        it = choices.erase(it);
+    }
+}
+
+static WeaponReplacementAsset* PickUsableWeaponReplacement(CPed* ped, const std::string& stickySuffix,
+    const std::string& poolKey, std::vector<int>& pool, bool& choseVanilla) {
+    while (!pool.empty()) {
+        const int pick = PickStickyWeaponReplacementChoice(ped, stickySuffix, poolKey, pool);
+        if (pick < kWeaponReplacementVanillaChoice || pick >= (int)g_weaponReplacementAssets.size())
+            return nullptr;
+        choseVanilla = pick == kWeaponReplacementVanillaChoice;
+        WeaponReplacementAsset* asset = choseVanilla ? nullptr : &g_weaponReplacementAssets[(size_t)pick];
+        if (choseVanilla || EnsureWeaponReplacementAssetLoaded(*asset)) {
+            if (!g_weaponReplacementRerollAvoidChoiceByPed.empty()) {
+                const int pedRef = OrcSafeGetPedRef(ped);
+                if (pedRef > 0)
+                    g_weaponReplacementRerollAvoidChoiceByPed.erase(std::to_string(pedRef) + "|" + stickySuffix);
+            }
+            return asset;
+        }
+        ForgetFailedWeaponChoice(pick, pool, poolKey, g_weaponReplacementRandomBags, g_weaponReplacementRandomChoiceByPed,
+            g_weaponReplacementSequentialStates, g_weaponReplacementNoRepeatStates);
+    }
+    return nullptr;
+}
+
+WeaponReplacementAsset* OrcResolveUsableWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom) {
     if (!g_weaponReplacementEnabled || !ped || wt <= 0)
         return nullptr;
     if (g_livePreviewHeldBaseForceVanilla && wt == g_livePreviewHeldBaseWeaponType &&
@@ -1776,14 +1704,14 @@ WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt
         if (local && ped == local) {
             WeaponReplacementAsset* forced = FindWeaponReplacementAssetByKey(g_livePreviewHeldCustomKey);
             if (forced)
-                return forced;
+                return EnsureWeaponReplacementAssetLoaded(*forced) ? forced : nullptr;
         }
     }
-    const std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    const auto& weaponNames = WeaponLookupNamesLower(wt);
     if (weaponNames.empty())
         return nullptr;
 
-    if (samp_bridge::IsSampBuildKnown()) {
+    if (!g_weaponReplacementByNick.empty() && samp_bridge::IsSampBuildKnown()) {
         char nick[64] = {};
         bool isLocal = false;
         if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocal)) {
@@ -1794,7 +1722,9 @@ WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt
                     auto nickIt = g_weaponReplacementByNick.find(nickKey);
                     if (nickIt != g_weaponReplacementByNick.end() &&
                         nickIt->second >= 0 && nickIt->second < (int)g_weaponReplacementAssets.size()) {
-                        return &g_weaponReplacementAssets[(size_t)nickIt->second];
+                        WeaponReplacementAsset& asset = g_weaponReplacementAssets[(size_t)nickIt->second];
+                        if (EnsureWeaponReplacementAssetLoaded(asset))
+                            return &asset;
                     }
                 }
             }
@@ -1802,54 +1732,36 @@ WeaponReplacementAsset* OrcResolveWeaponReplacementAssetForPed(CPed* ped, int wt
     }
 
     if (allowRandom) {
-        const std::string skinLower = OrcToLowerAscii(GetPedStdSkinDffName(ped));
-        for (const std::string& weaponName : weaponNames) {
-            // CJ can have no base skin DFF. The weapon pool only needs the weapon name.
-            if (!skinLower.empty()) {
+        bool choseVanilla = false;
+        if (!g_weaponReplacementRandomBySkin.empty()) {
+            const std::string skinLower = OrcToLowerAscii(GetPedStdSkinDffName(ped));
+            for (const std::string& weaponName : weaponNames) {
+                if (skinLower.empty())
+                    break;
                 const std::string skinKey = MakeWeaponReplacementKey(weaponName, skinLower);
                 auto skinIt = g_weaponReplacementRandomBySkin.find(skinKey);
-                if (skinIt != g_weaponReplacementRandomBySkin.end() && !skinIt->second.empty()) {
-                    const int pick = PickStickyWeaponReplacementChoice(ped, "sr|" + skinKey, skinKey, skinIt->second);
-                    if (pick == kWeaponReplacementVanillaChoice)
+                if (skinIt != g_weaponReplacementRandomBySkin.end()) {
+                    if (WeaponReplacementAsset* picked = PickUsableWeaponReplacement(ped, "sr|" + skinKey,
+                            skinKey, skinIt->second, choseVanilla))
+                        return picked;
+                    if (choseVanilla)
                         return nullptr;
-                    if (pick >= 0 && pick < (int)g_weaponReplacementAssets.size())
-                        return &g_weaponReplacementAssets[(size_t)pick];
                 }
             }
+        }
+        // CJ can have no base skin DFF. The weapon pool only needs the weapon name.
+        for (const std::string& weaponName : weaponNames) {
             auto wIt = g_weaponReplacementRandomByWeapon.find(weaponName);
-            if (wIt != g_weaponReplacementRandomByWeapon.end() && !wIt->second.empty()) {
-                const std::string bagKey = std::string("w|") + weaponName;
-                const int pick = PickStickyWeaponReplacementChoice(ped, "wr|" + weaponName, bagKey, wIt->second);
-                if (pick == kWeaponReplacementVanillaChoice)
+            if (wIt != g_weaponReplacementRandomByWeapon.end()) {
+                if (WeaponReplacementAsset* picked = PickUsableWeaponReplacement(ped, "wr|" + weaponName,
+                        "w|" + weaponName, wIt->second, choseVanilla))
+                    return picked;
+                if (choseVanilla)
                     return nullptr;
-                if (pick >= 0 && pick < (int)g_weaponReplacementAssets.size())
-                    return &g_weaponReplacementAssets[(size_t)pick];
             }
         }
     }
     return nullptr;
-}
-
-WeaponReplacementAsset* OrcResolveUsableWeaponReplacementAssetForPed(CPed* ped, int wt, bool allowRandom) {
-    WeaponReplacementAsset* asset = OrcResolveWeaponReplacementAssetForPed(ped, wt, allowRandom);
-    if (!asset)
-        return nullptr;
-    if (!EnsureWeaponReplacementAssetLoaded(*asset)) {
-        if (asset->key.rfind("skinrandom:", 0) == 0 || asset->key.rfind("wprand:", 0) == 0) {
-            const int failedIndex = (int)(asset - g_weaponReplacementAssets.data());
-            for (auto it = g_weaponReplacementRandomChoiceByPed.begin(); it != g_weaponReplacementRandomChoiceByPed.end();) {
-                if (it->second == failedIndex) {
-                    EraseSequentialChoiceKeyFromStates(g_weaponReplacementSequentialStates, it->first);
-                    ReleaseNoRepeatChoiceKeyFromStates(g_weaponReplacementNoRepeatStates, g_weaponReplacementRandomChoiceByPed, it->first, false);
-                    it = g_weaponReplacementRandomChoiceByPed.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-        return nullptr;
-    }
-    return asset;
 }
 
 std::string OrcResolveUsableWeaponReplacementKeyForPed(CPed* ped, int wt, bool allowRandom) {
@@ -1863,19 +1775,16 @@ bool OrcPinWeaponReplacementChoiceForPed(CPed* ped, int wt, const std::string& r
     const int pedRef = CPools::GetPedRef(ped);
     if (pedRef <= 0)
         return false;
-    const std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    const auto& weaponNames = WeaponLookupNamesLower(wt);
     if (weaponNames.empty())
         return false;
 
     const std::string keyLower = OrcToLowerAscii(replacementKey);
-    int assetIndex = -1;
-    for (int i = 0; i < (int)g_weaponReplacementAssets.size(); ++i) {
-        if (OrcToLowerAscii(g_weaponReplacementAssets[(size_t)i].key) == keyLower) {
-            assetIndex = i;
-            break;
-        }
-    }
+    const int assetIndex = FindWeaponReplacementAssetIndexByKeyLower(keyLower);
     if (assetIndex < 0)
+        return false;
+    const auto& asset = g_weaponReplacementAssets[(size_t)assetIndex];
+    if (std::find(weaponNames.begin(), weaponNames.end(), asset.weaponNameLower) == weaponNames.end())
         return false;
 
     bool pinned = false;
@@ -1901,7 +1810,7 @@ bool OrcPinWeaponReplacementChoiceForPed(CPed* ped, int wt, const std::string& r
 
 void OrcCollectWeaponReplacementVariantKeys(int wt, std::vector<std::string>& outKeys) {
     outKeys.clear();
-    const std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    const auto& weaponNames = WeaponLookupNamesLower(wt);
     if (weaponNames.empty())
         return;
     outKeys.reserve(g_weaponReplacementAssets.size());
@@ -1919,18 +1828,19 @@ void OrcCollectWeaponReplacementVariantKeys(int wt, std::vector<std::string>& ou
 
 
 void OrcWeaponAssetsShutdown() {
+    OrcRestoreWeaponTextureOverrides();
     ClearWeaponStockRemapRuntime();
     DestroyWeaponReplacementAssets();
     DestroyWeaponTextureAssets();
 }
 
 bool OrcWeaponReplacementIsStickyVanillaChoice(CPed* ped, int wt) {
-    if (!ped || wt <= 0)
+    if (!g_weaponReplacementRandomIncludeVanilla || !ped || wt <= 0)
         return false;
     const int pedRef = CPools::GetPedRef(ped);
     if (pedRef <= 0)
         return false;
-    const std::vector<std::string> weaponNames = WeaponLookupNamesLower(wt);
+    const auto& weaponNames = WeaponLookupNamesLower(wt);
     if (weaponNames.empty())
         return false;
     const std::string pedPrefix = std::to_string(pedRef) + "|";

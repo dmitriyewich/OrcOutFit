@@ -27,10 +27,10 @@
     X(TabWeaponSounds, "Звуки", "Sounds") \
     X(EnableCustomWeaponSounds, "Кастомные звуки оружия (OpenAL)", "Custom weapon sounds (OpenAL)") \
     X(CustomWeaponSoundGain, "Громкость (близко / loop)", "Volume (close / loop)") \
-    X(CustomWeaponSoundDistantThreshold, "Порог distant от игрока (м)", "Distant threshold from player (m)") \
+    X(CustomWeaponSoundDistantThreshold, "Порог distant от камеры (м)", "Distant threshold from camera (m)") \
     X(CustomWeaponSoundMaxAlternatives, "Макс. альтернатив (_shootN)", "Max alternatives (_shootN)") \
     X(CustomWeaponSoundDistantGain, "Громкость distant", "Distant volume") \
-    X(WeaponSoundHint, "Файлы рядом с DFF замены: <stem>_suffix (приоритет над bare shoot.wav и т.п.). Локальный ped звучит как 2D, остальные ped — 3D из позиции ped; MaxDist отсекает слышимость. Расширения .wav / .mp3 / .flac / .ogg. Настройки: [WeaponAudio] и <stem>.audio.", "Files beside the replacement DFF: <stem>_suffix (over bare shoot.wav etc.). Local ped stays 2D; other peds play as 3D sources at ped position, with MaxDist culling. Extensions .wav / .mp3 / .flac / .ogg. Settings: [WeaponAudio] and <stem>.audio.") \
+    X(WeaponSoundHint, "Файлы рядом с DFF замены: <stem>_suffix, затем короткое имя (например shoot.wav). Для выстрела также подходит <stem>.wav. Расширения .wav / .mp3 / .flac / .ogg. Близкие одиночные звуки игрока звучат в 2D, остальные звуки и циклы — в 3D. MaxDist отсчитывается от камеры.", "Files beside the replacement DFF: <stem>_suffix, then the short name (e.g. shoot.wav). Gunshots also accept <stem>.wav. Extensions: .wav / .mp3 / .flac / .ogg. Local close one-shots are 2D. Other sounds and loops use 3D with MaxDist measured from the camera.") \
     X(WeaponSoundDistantGainHint, "0 — та же громкость, что «Громкость (близко / loop)».", "0 — same volume as «Volume (close / loop)».") \
     X(WeaponAudioEfxReverb, "Reverb (OpenAL EFX) для world-источников", "Reverb (OpenAL EFX) for world sources") \
     X(WeaponAudioEfxInteriorOnly, "Reverb только в интерьерах (currArea)", "Reverb in interiors only (currArea)") \

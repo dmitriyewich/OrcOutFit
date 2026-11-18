@@ -1008,10 +1008,14 @@ void LoadConfig() {
     g_weaponTextureStandardRemap = v_weaponTextureStandardRemap;
     g_weaponHudIconFromGunsTxd = v_weaponHudIconFromGunsTxd;
     g_weaponCustomSounds = v_weaponCustomSounds;
-    g_weaponCustomSoundGain = std::max(0.0f, v_weaponCustomSoundGain);
-    g_weaponCustomSoundDistantThreshold = std::max(1.0f, v_weaponCustomSoundDistantThreshold);
+    g_weaponCustomSoundGain = std::isfinite(v_weaponCustomSoundGain) ? std::max(0.0f, v_weaponCustomSoundGain) : 1.0f;
+    g_weaponCustomSoundDistantThreshold = std::isfinite(v_weaponCustomSoundDistantThreshold)
+        ? std::max(1.0f, v_weaponCustomSoundDistantThreshold)
+        : 50.0f;
     g_weaponCustomSoundMaxAlternatives = v_weaponCustomSoundMaxAlternatives;
-    g_weaponCustomSoundDistantGain = v_weaponCustomSoundDistantGain;
+    g_weaponCustomSoundDistantGain = std::isfinite(v_weaponCustomSoundDistantGain)
+        ? std::max(0.0f, v_weaponCustomSoundDistantGain)
+        : 0.0f;
     g_heldPoseDebug = v_heldPoseDebug;
     g_heldWeaponTrace = v_heldWeaponTrace;
     g_heldWeaponStatusIntervalMs = v_heldWeaponStatusIntervalMs;
@@ -1455,6 +1459,11 @@ std::string GetWeaponSkinIniLookupName(CPed* ped) {
     const bool isLocal = ped && pl && ped == pl;
 
     if (isLocal && g_skinLocalPreferSelected) {
+        if (g_skinModeEnabled) {
+            if (const char* selected = OrcGetSelectedManualSkinDffName())
+                return selected;
+            return dff;
+        }
         if (g_skinSelectedSource == SKIN_SELECTED_CUSTOM) {
             if (!g_skinSelectedName.empty())
                 return g_skinSelectedName;
@@ -1741,7 +1750,8 @@ const WeaponCfg& GetWeaponCfg2ForPed(CPed* ped, int wt) {
 
 static HeldWeaponPoseCfg g_heldPoseFallback{};
 
-const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
+const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary,
+    const std::string* drawKey) {
     g_heldPoseFallback = HeldWeaponPoseCfg{};
     g_heldPoseFallback.scale = 1.0f;
     if (!ped || wt < 0 || wt >= (int)g_cfg.size())
@@ -1760,12 +1770,19 @@ const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
             pose ? (pose->rx / D2R) : 0.0f, pose ? (pose->ry / D2R) : 0.0f, pose ? (pose->rz / D2R) : 0.0f,
             pose ? pose->scale : 0.0f);
     };
+    std::string capturedKey;
+    if (!drawKey) {
+        OrcGetHeldReplacementKeyForPed(ped, wt, capturedKey);
+        drawKey = &capturedKey;
+    }
+    const std::string& activeReplKeyLower = *drawKey;
     if (g_livePreviewHeldActive &&
         OrcWeaponUiPickerMatchesPedWeaponsIni(ped, g_livePreviewHeldSkinDff.c_str())) {
         const bool liveCustomForced =
             g_livePreviewHeldCustomForceActive &&
             wt == g_livePreviewHeldCustomWeaponType &&
-            !g_livePreviewHeldCustomKey.empty();
+            !g_livePreviewHeldCustomKey.empty() &&
+            g_livePreviewHeldCustomKey == activeReplKeyLower;
         if (liveCustomForced) {
             const HeldWeaponCustomOverridesByWeapon& tbl =
                 g_livePreviewHeldUseSecondary ? g_livePreviewHeldCustom2 : g_livePreviewHeldCustom1;
@@ -1800,12 +1817,6 @@ const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
         secondary ? g_weaponSkinHeldOv2 : g_weaponSkinHeldOv1;
     const std::unordered_map<std::string, HeldWeaponCustomOverridesByWeapon>& customMap =
         secondary ? g_weaponSkinHeldCustomOv2 : g_weaponSkinHeldCustomOv1;
-    std::string activeReplKeyLower;
-    bool activeKeyFromHeldCapture = OrcGetHeldReplacementKeyForPed(ped, wt, activeReplKeyLower);
-    if (!activeKeyFromHeldCapture && g_weaponReplacementEnabled) {
-        if (WeaponReplacementAsset* repl = OrcResolveWeaponReplacementAssetForPed(ped, wt, true))
-            activeReplKeyLower = OrcToLowerAscii(repl->key);
-    }
     if (!activeReplKeyLower.empty()) {
         auto itCustom = customMap.find(presetKey);
         if (itCustom != customMap.end() && wt < (int)itCustom->second.size()) {
@@ -1815,9 +1826,9 @@ const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
                     OrcLogInfoThrottled(968, 5000u,
                         "held pose: custom match pedRef=%d wt=%d secondary=%d key=%s src=%s",
                         CPools::GetPedRef(ped), wt, secondary ? 1 : 0, activeReplKeyLower.c_str(),
-                        activeKeyFromHeldCapture ? "heldCapture" : "resolver");
+                        "draw");
                 }
-                logPoseDecision(974, "diskCustom", activeKeyFromHeldCapture ? "custom hit via heldCapture" : "custom hit via resolver",
+                logPoseDecision(974, "diskCustom", "custom hit for drawn mesh",
                     activeReplKeyLower.c_str(), &itPose->second);
                 return itPose->second;
             }
@@ -1825,7 +1836,7 @@ const HeldWeaponPoseCfg& GetHeldPoseForPed(CPed* ped, int wt, bool secondary) {
                 OrcLogInfoThrottled(969, 5000u,
                     "held pose: custom miss -> base fallback pedRef=%d wt=%d secondary=%d key=%s src=%s",
                     CPools::GetPedRef(ped), wt, secondary ? 1 : 0, activeReplKeyLower.c_str(),
-                    activeKeyFromHeldCapture ? "heldCapture" : "resolver");
+                    "draw");
             }
         }
     }
@@ -1855,53 +1866,6 @@ void OrcClearWeaponUiLivePreviewWhenMenuClosed() {
     g_livePreviewHeldBaseWeaponType = 0;
     g_livePreviewHeldBaseForceVanilla = false;
     g_livePreviewHeldUseSecondary = false;
-}
-
-void OrcLogHeldPoseCfgDisabled(CPed* ped, int wt) {
-    if (!ped)
-        return;
-    if (!g_heldPoseDebug)
-        return;
-    CPlayerPed* pl = FindPlayerPed(0);
-    const int isLocal = (pl && ped == pl) ? 1 : 0;
-    const std::string dffRaw = GetPedStdSkinDffName(ped);
-    const std::string dff = GetWeaponSkinIniLookupName(ped);
-    std::string activeReplKey;
-    const bool activeReplCapture = OrcGetHeldReplacementKeyForPed(ped, wt, activeReplKey);
-    if (!activeReplCapture && g_weaponReplacementEnabled) {
-        if (WeaponReplacementAsset* repl = OrcResolveWeaponReplacementAssetForPed(ped, wt, true))
-            activeReplKey = OrcToLowerAscii(repl->key);
-    }
-    char wpath[MAX_PATH] = {};
-    std::string presetKey;
-    const bool hasIni = ResolveWeaponsPresetIniForPed(ped, wpath, sizeof(wpath), &presetKey);
-    size_t heldCacheSz = 0;
-    int diskWtEnabled = -1; // -1: нет строки / кеш не загружен
-    if (hasIni) {
-        EnsureWeaponSkinOverrideLoaded(presetKey, wpath);
-        auto it = g_weaponSkinHeldOv1.find(presetKey);
-        if (it != g_weaponSkinHeldOv1.end()) {
-            heldCacheSz = it->second.size();
-            if (wt >= 0 && wt < (int)it->second.size())
-                diskWtEnabled = it->second[(size_t)wt].enabled ? 1 : 0;
-        }
-    }
-    int liveMatch = 0;
-    if (g_livePreviewHeldActive)
-        liveMatch = OrcWeaponUiPickerMatchesPedWeaponsIni(ped, g_livePreviewHeldSkinDff.c_str()) ? 1 : 0;
-    const char* wsec = (wt > 0 && wt < (int)g_cfg.size() && g_cfg[(size_t)wt].name) ? g_cfg[(size_t)wt].name : "";
-    const int pedRef = CPools::GetPedRef(ped);
-    const int modelId = ped ? (int)ped->m_nModelIndex : -1;
-    OrcLogInfoThrottled(
-        436, g_heldPoseDebug ? 800u : 2200u,
-        "held pose: cfg disabled pedRef=%d isLocal=%d modelId=%d prefSel=%d skinRaw=%s skinIni=%s wt=%d wsec=%s wpnMid=%d slot=%d savedWt=%d liveAct=%d liveMatch=%d liveBuf=%u "
-        "hasIni=%d heldCacheSz=%zu diskWtHeldEn=%d replKey=%s replSrc=%s ini=%s",
-        pedRef, isLocal, modelId, g_skinLocalPreferSelected ? 1 : 0, dffRaw.c_str(), dff.c_str(), wt, wsec,
-        ped->m_nWeaponModelId, (int)ped->m_nSelectedWepSlot, (int)ped->m_nSavedWeapon, g_livePreviewHeldActive ? 1 : 0,
-        liveMatch, (unsigned)g_livePreviewHeld1.size(), hasIni ? 1 : 0, heldCacheSz, diskWtEnabled,
-        activeReplKey.empty() ? "-" : activeReplKey.c_str(),
-        activeReplCapture ? "heldCapture" : (activeReplKey.empty() ? "-" : "resolver"),
-        hasIni ? wpath : "(none)");
 }
 
 // Queued from UI; applied at the start of drawingEvent (see ApplyPendingLocalPlayerModel).
@@ -2284,22 +2248,18 @@ static void ApplyPendingLocalPlayerModel() {
 
 
 static void ReleaseRuntimeAttachmentInstances() {
+    OrcRestoreWeaponTextureOverrides();
     OrcTextureRemapClearRuntimeState();
     OrcWeaponClearLocalRendered();
     OrcWeaponClearOtherPedsRendered();
-    OrcRestoreWeaponHeldTextureOverrides();
     OrcDestroyAllHeldWeaponReplacementInstances();
-    OrcRestoreWeaponTextureOverrides();
     OrcSkinsReleaseAllInstancesAndPreview();
     OrcSkinNativeClearRuntimeState();
     OrcObjectsReleaseAllInstances();
 }
 
 static void MaintainHeldWeaponInstances() {
-    if (!g_weaponReplacementEnabled || !g_weaponReplacementInHands)
-        OrcDestroyAllHeldWeaponReplacementInstances();
-    else
-        OrcPruneHeldWeaponReplacementInstances();
+    OrcPruneHeldWeaponReplacementInstances();
 }
 
 static void CollectNearbyPeds(CPlayerPed* player, std::vector<CPed*>& outPeds) {
@@ -2392,11 +2352,9 @@ static const char* g_attachmentScenePhase = "idle";
 
 static void RenderAttachmentScene(CPlayerPed* player,
     const std::vector<CPed*>& nearbyPeds,
+    bool renderBodyWeapons,
     bool renderObjectsAndSkins) {
     static std::vector<char> objectUsed;
-    const bool renderBodyWeapons = OrcShouldRenderWeaponBodyInDrawingEvent(
-        g_enabled,
-        OrcWeaponHasCachedBodyWeapons());
 
     int active = renderBodyWeapons ? 1 : 0;
     if (renderObjectsAndSkins) {
@@ -2406,13 +2364,7 @@ static void RenderAttachmentScene(CPlayerPed* player,
         g_attachmentScenePhase = "objectsPrepass";
         OrcObjectsBeginFrame();
         OrcObjectsPrepassLocalPlayer(player, active, objectUsed);
-        if (OrcSkinsLocalSelectionAddsActiveWork())
-            active++;
-        if (g_skinRandomFromPools && g_skinRandomPoolVariants > 0)
-            active++;
         if (g_renderStandardObjects && !g_standardObjects.empty())
-            active++;
-        if (g_skinNickMode && samp_bridge::IsSampBuildKnown() && (!g_customSkins.empty() || !g_standardSkins.empty()))
             active++;
         if (g_renderAllPedsObjects && CPools::ms_pPedPool)
             active++;
@@ -2481,8 +2433,6 @@ static void RenderAttachmentScene(CPlayerPed* player,
         if (renderObjectsAndSkins) {
             g_attachmentScenePhase = "objectsLocal";
             OrcObjectsRenderLocalPlayer(player, objectUsed);
-            g_attachmentScenePhase = "skins";
-            OrcSkinsRenderForPeds(player);
             if (g_renderAllPedsObjects) {
                 g_attachmentScenePhase = "objectsRemote";
                 for (CPed* ped : nearbyPeds)
@@ -2537,7 +2487,9 @@ static void OnInitRw() {
     // Stabilize that binding before a generated inline CALL can be misread as a pointer.
     (void)OrcSilentPatchCompatPoll();
     // DllMain других ASI уже завершились: цепляемся после их ранних hooks, а не даём им затереть наш entry.
-    OrcWeaponRenderEnsureBatchHookInstalled();
+    OrcWeaponEnsureHeldHooksInstalled();
+    OrcWeaponEnsureFireFxHooksInstalled();
+    OrcSkinsInstallOverlayRenderHook();
 }
 static void OnDrawingEvent();
 static void OnPedRenderBefore(CPed* ped);
@@ -2545,14 +2497,12 @@ static void OnPedRenderAfter(CPed* ped);
 static void OnGameProcessBegin();
 static void OnD3dLost() {
     OrcRestoreWeaponTextureOverrides();
-    OrcRestoreWeaponHeldTextureOverrides();
-    OrcTextureRemapRestoreAfter();
+    OrcTextureRemapRestoreAll();
     overlay::OnResetBefore();
 }
 static void OnD3dReset() {
     OrcRestoreWeaponTextureOverrides();
-    OrcRestoreWeaponHeldTextureOverrides();
-    OrcTextureRemapRestoreAfter();
+    OrcTextureRemapRestoreAll();
     overlay::OnResetBefore();
     overlay::OnResetAfter();
 }
@@ -2735,6 +2685,7 @@ static void OnDrawingEvent() {
     OrcWeaponSkinRuntimeCachesPrewarmOnIdle();
 
     static std::vector<CPed*> nearbyPeds;
+    static bool attachmentInstancesReleased = false;
     CPlayerPed* player = nullptr;
     if (g_enabled && !g_localPlayerLookupDisabledAfterSeh) {
         __try {
@@ -2743,12 +2694,14 @@ static void OnDrawingEvent() {
     }
     if (!g_enabled || (!player && !g_localPlayerLookupDisabledAfterSeh)) {
         nearbyPeds.clear();
-        if (!g_runtimeAttachmentReleaseDisabledAfterSeh) {
+        if (!attachmentInstancesReleased && !g_runtimeAttachmentReleaseDisabledAfterSeh) {
             __try {
                 ReleaseRuntimeAttachmentInstances();
+                attachmentInstancesReleased = true;
             } __except (OrcRuntimeAttachmentReleaseSehFilter(GetExceptionInformation())) {}
         }
     } else if (player) {
+        attachmentInstancesReleased = false;
         const DWORD collectionNowMs = GetTickCount();
         const bool remoteCollectionRetryWindowOpen =
             OrcRuntimeRetryWindowOpen(g_remotePedCollectionRetryAfterMs, collectionNowMs);
@@ -2781,13 +2734,13 @@ static void OnDrawingEvent() {
             } __except (OrcWeaponBodyCacheSyncSehFilter(GetExceptionInformation())) {}
         }
 
+        const bool renderBodyWeapons =
+            OrcShouldRenderWeaponBodyInDrawingEvent(g_enabled, OrcWeaponHasCachedBodyWeapons());
         const bool renderObjectsAndSkins =
             OrcRuntimeRetryWindowOpen(g_attachmentSceneRetryAfterMs, nowMs);
-        if (OrcShouldEnterAttachmentScene(
-                OrcWeaponHasCachedBodyWeapons(),
-                renderObjectsAndSkins)) {
+        if (OrcShouldEnterAttachmentScene(renderBodyWeapons, renderObjectsAndSkins)) {
             __try {
-                RenderAttachmentScene(player, nearbyPeds, renderObjectsAndSkins);
+                RenderAttachmentScene(player, nearbyPeds, renderBodyWeapons, renderObjectsAndSkins);
                 if (renderObjectsAndSkins) {
                     g_attachmentSceneRendererHealthy = true;
                     g_attachmentSceneRetryAfterMs = 0u;
@@ -2810,11 +2763,7 @@ static void OnPedRenderBefore(CPed* ped) {
         return;
 
     OrcTextureRemapApplyBefore(ped);
-    // Replacement must run first: PrepareHeldWeaponTextureBefore targets `m_pWeaponObject`.
-    // If we textured the stock mesh then swapped the slot to the replacement clone,
-    // the held model would render without Guns/GunsNick TXD / stock remap.
-    OrcPrepareHeldWeaponReplacementBefore(ped);
-    OrcPrepareHeldWeaponTextureBefore(ped);
+    OrcPrepareHeldWeaponBeforeRender(ped);
     OrcSkinsOnPedRenderBefore(ped);
 }
 
@@ -2823,9 +2772,6 @@ static void OnPedRenderAfter(CPed* ped) {
         return;
 
     OrcTextureRemapRestoreAfter();
-    OrcRestoreHeldWeaponReplacementAfter(ped);
-    // Held weapon RwMaterial swaps are deferred to EndScene (see OrcFlushDeferredHeldWeaponSlotRestore): this
-    // hook runs before CPed draws the held mesh, so immediate restore would revert textures before GPU draw.
     OrcSkinsOnPedRenderAfter(ped);
 }
 
@@ -2837,11 +2783,15 @@ static void OnGameProcessBegin() {
     if (pollSilentPatchCompat)
         pollSilentPatchCompat = OrcSilentPatchCompatPoll();
     overlay::ReleaseInputCaptureIfClosed();
-    OrcFlushDeferredHeldWeaponSlotRestore();
     OrcHeldPoseBeginSimFrame();
     OrcHeldWeaponTraceGameProcessTick();
     OrcWeaponAudioOnGameProcess();
     OrcTextureRemapOnGameProcess();
+    OrcSkinsPruneRandomSelections();
+    OrcSkinsPruneUnusedAssets();
+    // An unsafe local ped can defer restoration beyond the one-time release.
+    if (!g_enabled)
+        OrcSkinNativeUpdateForPeds(nullptr);
 }
 
 static void OnShutdownRw() {
@@ -2851,6 +2801,16 @@ static void OnShutdownRw() {
     OrcLogInfo("shutdownRw: releasing hooks and instances");
     overlay::Shutdown();
     samp_bridge::Shutdown();
+    // The game has already released textures used by some environment-map material plugins.
+    DWORD oldProt;
+    BYTE* p = reinterpret_cast<BYTE*>(0x5D95B0);
+    if (VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        *p = 0xC3;
+        FlushInstructionCache(GetCurrentProcess(), p, 1);
+        DWORD tmp;
+        VirtualProtect(p, 1, oldProt, &tmp);
+    }
+    OrcRestoreWeaponTextureOverrides();
     for (int i = 0; i < OrcWeaponSlotMax; i++) g_rendered[i] = {};
     OrcWeaponClearOtherPedsRendered();
     OrcDestroyAllHeldWeaponReplacementInstances();
@@ -2859,13 +2819,6 @@ static void OnShutdownRw() {
     OrcSkinsShutdown();
     OrcObjectsShutdown();
     OrcWeaponAudioShutdown();
-    // CCustomCarEnvMapPipeline::pluginEnvMatDestructorCB @ 0x5D95B0 -> ret.
-    DWORD oldProt;
-    BYTE* p = reinterpret_cast<BYTE*>(0x5D95B0);
-    if (VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
-        *p = 0xC3;
-        DWORD tmp; VirtualProtect(p, 1, oldProt, &tmp);
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -2880,6 +2833,7 @@ public:
         Events::gameProcessEvent += &OnGameProcessBegin;
         Events::drawingEvent += &OnDrawingEvent;
         Events::initGameEvent += &OrcTextureRemapRefreshAdditionalTxds;
+        Events::reInitGameEvent += &OrcWeaponAudioStopPlayback;
         Events::reInitGameEvent += &OrcTextureRemapRefreshAdditionalTxds;
         Events::pedSetModelEvent += &OrcTextureRemapOnPedSetModel;
         Events::pedSetModelEvent += &OrcSkinNativeOnPedSetModel;
@@ -2906,13 +2860,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         OrcWeaponsEnsureWeaponDatHookInstalled();
         EnsurePedDatHookInstalled();
         EnsureRenderWareShutdownGuardsInstalled();
-        OrcWeaponEnsurePedModelHooksInstalled();
-        OrcWeaponEnsureFireFxHooksInstalled();
         OrcWeaponHudEnsureDrawWeaponIconHookInstalled();
         OrcTextureRemapInstallHooks();
         OrcSkinNativeInstallHooks();
-        OrcWeaponAudioSetPluginModule(module);
-        OrcWeaponAudioEnsureHooksInstalled();
     }
     return TRUE;
 }

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -79,11 +80,21 @@ inline void OrcRandomNoRepeatEraseChoice(OrcRandomNoRepeatPickState& state,
     assignments.erase(choiceKey);
 }
 
+inline bool OrcCanSkipPreviousChoice(const std::vector<int>& pool,
+    const std::unordered_map<int, int>& activeCounts, int previousChoice) {
+    const bool previousChoiceIsTaken = activeCounts.find(previousChoice) != activeCounts.end();
+    return std::any_of(pool.begin(), pool.end(), [&](int choice) {
+        return choice != previousChoice &&
+            (previousChoiceIsTaken || activeCounts.find(choice) == activeCounts.end());
+    });
+}
+
 inline int OrcSequentialPickSticky(OrcSequentialPickState& state,
     std::unordered_map<std::string, int>& assignments,
     const std::string& choiceKey,
     const std::vector<int>& pool,
-    int invalidChoice = -2) {
+    int invalidChoice = -2,
+    std::optional<int> avoidChoice = std::nullopt) {
     const size_t n = pool.size();
     if (n == 0 || choiceKey.empty())
         return invalidChoice;
@@ -111,19 +122,22 @@ inline int OrcSequentialPickSticky(OrcSequentialPickState& state,
     if (state.cursor >= n)
         state.cursor = 0;
 
-    size_t pickedIndex = state.cursor;
-    bool foundFree = false;
+    if (avoidChoice && !OrcCanSkipPreviousChoice(pool, activeCounts, *avoidChoice))
+        avoidChoice.reset();
+    size_t pickedIndex = n;
     for (size_t attempt = 0; attempt < n; ++attempt) {
         const size_t idx = (state.cursor + attempt) % n;
+        if (avoidChoice && pool[idx] == *avoidChoice)
+            continue;
+        if (pickedIndex == n)
+            pickedIndex = idx;
         if (activeCounts.find(pool[idx]) == activeCounts.end()) {
             pickedIndex = idx;
-            foundFree = true;
             break;
         }
     }
-
-    if (!foundFree)
-        pickedIndex = state.cursor;
+    if (pickedIndex == n)
+        return invalidChoice;
 
     const int picked = pool[pickedIndex];
     state.cursor = (pickedIndex + 1) % n;
@@ -163,7 +177,8 @@ inline int OrcRandomNoRepeatPickSticky(OrcRandomNoRepeatPickState& state,
     std::unordered_map<std::string, int>& assignments,
     const std::string& choiceKey,
     const std::vector<int>& pool,
-    int invalidChoice = -2) {
+    int invalidChoice = -2,
+    std::optional<int> avoidChoice = std::nullopt) {
     if (pool.empty() || choiceKey.empty())
         return invalidChoice;
 
@@ -189,8 +204,17 @@ inline int OrcRandomNoRepeatPickSticky(OrcRandomNoRepeatPickState& state,
         ++it;
     }
 
+    std::vector<int> filteredPool;
+    if (avoidChoice && OrcSequentialPoolContains(pool, *avoidChoice) &&
+        OrcCanSkipPreviousChoice(pool, activeCounts, *avoidChoice)) {
+        for (int value : pool) {
+            if (value != *avoidChoice)
+                filteredPool.push_back(value);
+        }
+    }
+    const std::vector<int>& eligiblePool = filteredPool.empty() ? pool : filteredPool;
     bool hasFreeChoice = false;
-    for (int value : pool) {
+    for (int value : eligiblePool) {
         if (activeCounts.find(value) == activeCounts.end()) {
             hasFreeChoice = true;
             break;
@@ -199,7 +223,7 @@ inline int OrcRandomNoRepeatPickSticky(OrcRandomNoRepeatPickState& state,
 
     const int picked = OrcRandomNoRepeatPopFromBag(
         state,
-        pool,
+        eligiblePool,
         activeCounts,
         hasFreeChoice,
         invalidChoice);

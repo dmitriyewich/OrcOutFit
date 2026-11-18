@@ -19,9 +19,8 @@
 #include "extensions/ScriptCommands.h"
 
 #include <algorithm>
-#include <cmath>
+#include <array>
 #include <cstdint>
-#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -51,25 +50,27 @@ std::vector<StandardSkinCfg> g_standardSkins;
 static bool g_customSkinLookupDirty = true;
 static std::unordered_map<std::string, int> g_customSkinNickLookup;
 static int g_selectedSkinCacheIdx = -1;
-static std::string g_selectedSkinCacheNameLower;
+static std::string g_selectedSkinCacheName;
 
-static bool g_skinCanAnimate = false;
-static int g_skinBindCount = 0;
+namespace {
+struct OverlaySkeleton {
+    RpHAnimHierarchy* hierarchy = nullptr;
+    RpHAnimHierarchy alternate{};
+    bool useAlternate = false;
+    bool drawing = false;
+};
 
-static CPed* g_hiddenPed = nullptr;
-static RpClump* g_hiddenClump = nullptr;
-static bool g_hideSnapshotValid = false;
+std::unordered_map<RpClump*, OverlaySkeleton> g_overlaySkeletons;
+OverlaySkeleton* g_drawingOverlaySkeleton = nullptr;
+std::unordered_set<CustomSkinCfg*> g_loadedCustomSkins;
+bool g_skinTxdPoolFull = false;
+std::vector<CPed*> g_overlayRenderPeds;
+bool g_overlayRenderHookInstalled = false;
+}
 
 void InvalidateCustomSkinLookupCache() {
-    for (const auto& s : g_customSkins) {
-        if (!s.iniPath.empty())
-            OrcIniCacheInvalidatePath(s.iniPath.c_str());
-    }
-    OrcIniCacheInvalidatePath(StandardSkinsIniPath().c_str());
     g_customSkinLookupDirty = true;
     g_customSkinNickLookup.clear();
-    g_selectedSkinCacheIdx = -1;
-    g_selectedSkinCacheNameLower.clear();
 }
 
 static std::string ToLowerAscii(std::string s) {
@@ -105,59 +106,45 @@ static std::vector<std::string> ParseCsvTokens(const char* csv) {
     return out;
 }
 
-static void CreateDefaultSkinIniIfMissing(const std::string& iniPath, const std::string& baseName) {
-    if (OrcFileExistsA(iniPath.c_str())) return;
-    FILE* f = fopen(iniPath.c_str(), "w");
-    if (!f) return;
-    fprintf(f,
-            "; OrcOutFit custom skin config for %s\n"
-            "; Nicks: one per line and/or comma-separated (case-insensitive).\n\n"
-            "[NickBinding]\n"
-            "Enabled=0\n"
-            "Nicks=\n",
-            baseName.c_str());
-    fclose(f);
+static constexpr char kCustomSkinIniHeader[] =
+    "; OrcOutFit custom skin config.\n"
+    "; Nicks: comma-separated (case-insensitive).\n\n";
+
+static void CreateDefaultSkinIniIfMissing(const std::string& iniPath) {
+    if (OrcFileExistsA(iniPath.c_str()))
+        return;
+    const std::vector<OrcIniValue> values = {
+        {"NickBinding", "Enabled", "0"},
+        {"NickBinding", "Nicks", ""},
+    };
+    if (!OrcIniWriteValues(iniPath.c_str(), kCustomSkinIniHeader, values))
+        OrcLogInfoThrottled(948u, 5000u, "skin: cannot create default INI %s", iniPath.c_str());
 }
 
 struct SkinRandomPool {
-    int modelId = -1;
     std::string folderName;
     std::vector<CustomSkinCfg> variants;
+    std::vector<int> choices;
+    bool choicesDirty = true;
+    bool choicesIncludeVanilla = false;
     std::vector<int> shuffleBag;
-    bool shuffleBagIncludesVanilla = false;
-    std::vector<int> sequentialPool;
-    bool sequentialPoolIncludesVanilla = false;
     OrcSequentialPickState sequentialState;
-    std::unordered_map<std::string, int> sequentialAssignments;
-    std::vector<int> noRepeatPool;
-    bool noRepeatPoolIncludesVanilla = false;
     OrcRandomNoRepeatPickState noRepeatState;
-    std::unordered_map<std::string, int> noRepeatAssignments;
+    std::unordered_map<std::string, int> trackedAssignments;
 };
 
 static constexpr int kSkinRandomVanillaChoice = -1;
 static constexpr int kSkinRandomInvalidChoice = -2;
 
-static std::vector<SkinRandomPool> g_skinRandomPools;
+static std::unordered_map<int, SkinRandomPool> g_skinRandomPools;
 struct PedRandomSkinState {
-    int modelId = -1;
-    int variant = -1;
-    int pickMode = ORC_RANDOM_PICK_RANDOM;
-    std::string trackedChoiceKey;
+    int pedRef;
+    int modelId;
+    int variant;
 };
 static std::unordered_map<CPed*, PedRandomSkinState> g_pedRandomSkinIdx;
-
-static void DestroyCustomSkinInstance(CustomSkinCfg& s);
-static void DestroyStandardSkinInstance(StandardSkinCfg& s);
-static void DestroyAllRandomPoolSkins();
-static SkinRandomPool* FindRandomPoolForModelId(int modelId);
-
-static std::string SkinRandomChoiceKeyForPed(CPed* ped) {
-    const int ref = OrcSafeGetPedRef(ped);
-    if (ref > 0)
-        return "r:" + std::to_string(ref);
-    return "p:" + std::to_string(reinterpret_cast<uintptr_t>(ped));
-}
+static bool g_skinRandomStateEnabled = false;
+static int g_skinRandomStatePickMode = ORC_RANDOM_PICK_RANDOM;
 
 static const char* SkinRandomPickModeToIni(int mode) {
     if (mode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT)
@@ -165,31 +152,49 @@ static const char* SkinRandomPickModeToIni(int mode) {
     return mode == ORC_RANDOM_PICK_SEQUENTIAL ? "sequential" : "random";
 }
 
-static bool SkinRandomPickModeTracksActiveChoices() {
-    return g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL ||
-        g_skinRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT;
+static SkinRandomPool* FindRandomPoolForModelId(int modelId) {
+    const auto it = g_skinRandomPools.find(modelId);
+    return it != g_skinRandomPools.end() ? &it->second : nullptr;
+}
+
+static bool IsValidSkinRandomChoice(const SkinRandomPool& pool, int choice) {
+    if (choice == kSkinRandomVanillaChoice)
+        return g_skinRandomIncludeVanilla;
+    return choice >= 0 && choice < static_cast<int>(pool.variants.size()) &&
+        !pool.variants[static_cast<size_t>(choice)].loadFailed;
+}
+
+static CPed* GetRandomPedByRef(int pedRef) {
+    auto* pool = CPools::ms_pPedPool;
+    // CPool encodes a free slot in the high bit of the reference's low byte.
+    if (!pool || pedRef < 0 || (pedRef & 0x80))
+        return nullptr;
+    __try {
+        // The first pool slot may also have generation zero after the counter wraps.
+        return pool->GetAtRef(pedRef);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
 }
 
 static void ReleasePedRandomSkinTrackedChoice(const PedRandomSkinState& state) {
-    if (state.trackedChoiceKey.empty())
+    if (g_skinRandomStatePickMode == ORC_RANDOM_PICK_RANDOM)
         return;
     SkinRandomPool* pool = FindRandomPoolForModelId(state.modelId);
     if (!pool)
         return;
-    OrcSequentialEraseChoice(pool->sequentialState, pool->sequentialAssignments, state.trackedChoiceKey);
-    OrcRandomNoRepeatEraseChoice(pool->noRepeatState, pool->noRepeatAssignments, state.trackedChoiceKey);
+    const std::string key = std::to_string(state.pedRef);
+    if (g_skinRandomStatePickMode == ORC_RANDOM_PICK_SEQUENTIAL) {
+        OrcSequentialEraseChoice(pool->sequentialState, pool->trackedAssignments, key);
+    } else {
+        OrcRandomNoRepeatEraseChoice(pool->noRepeatState, pool->trackedAssignments, key,
+            IsValidSkinRandomChoice(*pool, state.variant));
+    }
 }
 
 static void PrunePedRandomSkinMap() {
-    std::unordered_set<CPed*> alive;
-    if (CPools::ms_pPedPool) {
-        for (int i = 0; i < CPools::ms_pPedPool->m_nSize; i++) {
-            CPed* p = CPools::ms_pPedPool->GetAt(i);
-            if (p) alive.insert(p);
-        }
-    }
     for (auto it = g_pedRandomSkinIdx.begin(); it != g_pedRandomSkinIdx.end();) {
-        if (alive.find(it->first) == alive.end()) {
+        if (GetRandomPedByRef(it->second.pedRef) != it->first) {
             ReleasePedRandomSkinTrackedChoice(it->second);
             it = g_pedRandomSkinIdx.erase(it);
         } else {
@@ -198,137 +203,118 @@ static void PrunePedRandomSkinMap() {
     }
 }
 
-static SkinRandomPool* FindRandomPoolForModelId(int modelId) {
-    if (modelId < 0) return nullptr;
-    for (auto& p : g_skinRandomPools) {
-        if (p.modelId == modelId && !p.variants.empty())
-            return &p;
+static void ResetRandomSkinSelections() {
+    g_pedRandomSkinIdx.clear();
+    for (auto& entry : g_skinRandomPools) {
+        SkinRandomPool& pool = entry.second;
+        pool.shuffleBag.clear();
+        pool.sequentialState = {};
+        pool.noRepeatState = {};
+        pool.trackedAssignments.clear();
     }
-    return nullptr;
 }
 
-static int FindPedModelIdByDffName(const std::string& dffName) {
-    if (dffName.empty()) return -1;
-    const std::string want = ToLowerAscii(dffName);
-    for (int id = 0; id < (int)g_pedModelNameById.size(); ++id) {
-        if (g_pedModelNameById[id].empty()) continue;
-        if (ToLowerAscii(g_pedModelNameById[id]) == want)
-            return id;
-    }
-    return -1;
+static void SyncRandomSkinSelectionSettings() {
+    const bool enabled = g_enabled && g_skinRandomFromPools;
+    if (g_skinRandomStateEnabled == enabled && g_skinRandomStatePickMode == g_skinRandomPickMode)
+        return;
+    ResetRandomSkinSelections();
+    g_skinRandomStateEnabled = enabled;
+    g_skinRandomStatePickMode = g_skinRandomPickMode;
 }
 
-static void BuildSkinRandomChoicePool(const SkinRandomPool& pool, std::vector<int>& out) {
-    out.clear();
-    out.reserve(pool.variants.size() + (g_skinRandomIncludeVanilla ? 1u : 0u));
+void OrcSkinsPruneRandomSelections() {
+    SyncRandomSkinSelectionSettings();
+    if (g_pedRandomSkinIdx.empty()) return;
+    static DWORD lastPrune = 0;
+    const DWORD now = GetTickCount();
+    if (now - lastPrune >= 500u) {
+        lastPrune = now;
+        PrunePedRandomSkinMap();
+    }
+}
+
+static void PrepareSkinRandomPoolChoices(SkinRandomPool& pool) {
+    if (!pool.choicesDirty && pool.choicesIncludeVanilla == g_skinRandomIncludeVanilla)
+        return;
+    pool.choicesDirty = false;
+    pool.choicesIncludeVanilla = g_skinRandomIncludeVanilla;
+    pool.choices.clear();
+    pool.choices.reserve(pool.variants.size() + (g_skinRandomIncludeVanilla ? 1u : 0u));
     if (g_skinRandomIncludeVanilla)
-        out.push_back(kSkinRandomVanillaChoice);
-    for (int i = 0; i < (int)pool.variants.size(); ++i)
-        out.push_back(i);
-}
-
-static bool IsValidSkinRandomChoice(const SkinRandomPool& pool, int choice) {
-    if (choice == kSkinRandomVanillaChoice)
-        return g_skinRandomIncludeVanilla;
-    return choice >= 0 && choice < (int)pool.variants.size();
-}
-
-static int PopRandomPoolVariant(SkinRandomPool& pool) {
-    if (pool.variants.empty()) return kSkinRandomInvalidChoice;
-    if (pool.shuffleBag.empty() || pool.shuffleBagIncludesVanilla != g_skinRandomIncludeVanilla) {
-        BuildSkinRandomChoicePool(pool, pool.shuffleBag);
-        pool.shuffleBagIncludesVanilla = g_skinRandomIncludeVanilla;
-        const int n = (int)pool.shuffleBag.size();
-        for (int i = n - 1; i > 0; --i) {
-            const int j = rand() % (i + 1);
-            std::swap(pool.shuffleBag[(size_t)i], pool.shuffleBag[(size_t)j]);
-        }
+        pool.choices.push_back(kSkinRandomVanillaChoice);
+    for (int i = 0; i < static_cast<int>(pool.variants.size()); ++i) {
+        if (IsValidSkinRandomChoice(pool, i))
+            pool.choices.push_back(i);
     }
-    if (pool.shuffleBag.empty()) return kSkinRandomInvalidChoice;
-    const int pick = pool.shuffleBag.back();
+    pool.shuffleBag.clear();
+}
+
+static int PickSkinRandomVariant(SkinRandomPool& pool, int pedRef) {
+    PrepareSkinRandomPoolChoices(pool);
+    if (pool.choices.empty())
+        return kSkinRandomInvalidChoice;
+
+    if (g_skinRandomStatePickMode == ORC_RANDOM_PICK_SEQUENTIAL) {
+        return OrcSequentialPickSticky(pool.sequentialState, pool.trackedAssignments,
+            std::to_string(pedRef), pool.choices, kSkinRandomInvalidChoice);
+    }
+    if (g_skinRandomStatePickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT) {
+        return OrcRandomNoRepeatPickSticky(pool.noRepeatState, pool.trackedAssignments,
+            std::to_string(pedRef), pool.choices, kSkinRandomInvalidChoice);
+    }
+    if (pool.shuffleBag.empty()) {
+        pool.shuffleBag = pool.choices;
+        OrcRandomNoRepeatShuffle(pool.shuffleBag);
+    }
+    const int choice = pool.shuffleBag.back();
     pool.shuffleBag.pop_back();
-    return pick;
-}
-
-static int PickSequentialPoolVariant(SkinRandomPool& pool, CPed* ped) {
-    if (pool.variants.empty())
-        return kSkinRandomInvalidChoice;
-    if (pool.sequentialPool.empty() || pool.sequentialPoolIncludesVanilla != g_skinRandomIncludeVanilla) {
-        BuildSkinRandomChoicePool(pool, pool.sequentialPool);
-        pool.sequentialPoolIncludesVanilla = g_skinRandomIncludeVanilla;
-    }
-
-    const std::string choiceKey = SkinRandomChoiceKeyForPed(ped);
-    return OrcSequentialPickSticky(
-        pool.sequentialState,
-        pool.sequentialAssignments,
-        choiceKey,
-        pool.sequentialPool,
-        kSkinRandomInvalidChoice);
-}
-
-static int PickRandomNoRepeatPoolVariant(SkinRandomPool& pool, CPed* ped) {
-    if (pool.variants.empty())
-        return kSkinRandomInvalidChoice;
-    if (pool.noRepeatPool.empty() || pool.noRepeatPoolIncludesVanilla != g_skinRandomIncludeVanilla) {
-        BuildSkinRandomChoicePool(pool, pool.noRepeatPool);
-        pool.noRepeatPoolIncludesVanilla = g_skinRandomIncludeVanilla;
-    }
-
-    const std::string choiceKey = SkinRandomChoiceKeyForPed(ped);
-    return OrcRandomNoRepeatPickSticky(
-        pool.noRepeatState,
-        pool.noRepeatAssignments,
-        choiceKey,
-        pool.noRepeatPool,
-        kSkinRandomInvalidChoice);
+    return choice;
 }
 
 static bool ResolveRandomSkinForPedModel(CPed* ped, int modelId, CustomSkinCfg** outSkin) {
-    if (outSkin) *outSkin = nullptr;
-    if (!g_skinRandomFromPools || !ped)
+    SyncRandomSkinSelectionSettings();
+    if (!g_skinRandomStateEnabled || !ped)
         return false;
+
     SkinRandomPool* pool = FindRandomPoolForModelId(modelId);
-    if (!pool)
-        return false;
     auto it = g_pedRandomSkinIdx.find(ped);
+    if (!pool && it == g_pedRandomSkinIdx.end())
+        return false;
+
+    const int pedRef = OrcSafeGetPedRef(ped);
     if (it != g_pedRandomSkinIdx.end() &&
-        (it->second.modelId != modelId ||
-         it->second.pickMode != g_skinRandomPickMode ||
+        (it->second.pedRef != pedRef || it->second.modelId != modelId || !pool ||
          !IsValidSkinRandomChoice(*pool, it->second.variant))) {
+        if (pool && it->second.modelId == modelId && it->second.variant >= 0 &&
+            !IsValidSkinRandomChoice(*pool, it->second.variant)) {
+            pool->choicesDirty = true;
+        }
         ReleasePedRandomSkinTrackedChoice(it->second);
         g_pedRandomSkinIdx.erase(it);
         it = g_pedRandomSkinIdx.end();
     }
-    if (it != g_pedRandomSkinIdx.end() &&
-        SkinRandomPickModeTracksActiveChoices() &&
-        it->second.trackedChoiceKey.empty()) {
-        g_pedRandomSkinIdx.erase(it);
-        it = g_pedRandomSkinIdx.end();
-    }
+    if (!pool)
+        return false;
     if (it == g_pedRandomSkinIdx.end()) {
-        const bool sequential = g_skinRandomPickMode == ORC_RANDOM_PICK_SEQUENTIAL;
-        const bool noRepeat = g_skinRandomPickMode == ORC_RANDOM_PICK_RANDOM_NO_REPEAT;
-        const int pick = sequential
-            ? PickSequentialPoolVariant(*pool, ped)
-            : (noRepeat ? PickRandomNoRepeatPoolVariant(*pool, ped) : PopRandomPoolVariant(*pool));
-        if (pick == kSkinRandomInvalidChoice) return false;
-        PedRandomSkinState state;
-        state.modelId = modelId;
-        state.variant = pick;
-        state.pickMode = g_skinRandomPickMode;
-        if (sequential || noRepeat)
-            state.trackedChoiceKey = SkinRandomChoiceKeyForPed(ped);
-        g_pedRandomSkinIdx[ped] = std::move(state);
-        it = g_pedRandomSkinIdx.find(ped);
+        if (GetRandomPedByRef(pedRef) != ped)
+            return false;
+        if (g_skinRandomStatePickMode != ORC_RANDOM_PICK_RANDOM)
+            PrunePedRandomSkinMap();
+        int pick = PickSkinRandomVariant(*pool, pedRef);
+        // A different ped may have discovered a broken asset since this pool was built.
+        if (pick != kSkinRandomInvalidChoice && !IsValidSkinRandomChoice(*pool, pick)) {
+            ReleasePedRandomSkinTrackedChoice({pedRef, modelId, pick});
+            pool->choicesDirty = true;
+            pick = PickSkinRandomVariant(*pool, pedRef);
+        }
+        if (pick == kSkinRandomInvalidChoice)
+            return false;
+        it = g_pedRandomSkinIdx.emplace(ped, PedRandomSkinState{pedRef, modelId, pick}).first;
     }
-    if (it == g_pedRandomSkinIdx.end())
-        return false;
-    if (it->second.variant == kSkinRandomVanillaChoice)
-        return true;
-    if (!IsValidSkinRandomChoice(*pool, it->second.variant))
-        return false;
-    if (outSkin) *outSkin = &pool->variants[(size_t)it->second.variant];
+
+    if (it->second.variant != kSkinRandomVanillaChoice)
+        *outSkin = &pool->variants[static_cast<size_t>(it->second.variant)];
     return true;
 }
 
@@ -365,46 +351,132 @@ void OrcReleaseCustomSkinTxd(int txdSlot) {
 }
 
 static void DestroyCustomSkinInstance(CustomSkinCfg& s) {
-    if (s.rwObject && s.rwObject->type == rpCLUMP) {
-        RpClumpDestroy(reinterpret_cast<RpClump*>(s.rwObject));
-    } else if (s.rwObject && s.rwObject->type == rpATOMIC) {
-        auto* a = reinterpret_cast<RpAtomic*>(s.rwObject);
-        RwFrame* f = RpAtomicGetFrame(a);
-        RpAtomicDestroy(a);
-        if (f) RwFrameDestroy(f);
+    if (s.rwObject) {
+        auto* clump = reinterpret_cast<RpClump*>(s.rwObject);
+        OrcTextureRemapForgetOverlayClump(clump, s.txdSlot);
+        g_overlaySkeletons.erase(clump);
+        g_loadedCustomSkins.erase(&s);
     }
-    s.rwObject = nullptr;
+    OrcDestroyRwObjectInstance(s.rwObject);
     OrcReleaseCustomSkinTxd(s.txdSlot);
     s.txdSlot = -1;
+    s.retryLoadAt = 0;
 }
 
 static void DestroyStandardSkinInstance(StandardSkinCfg& s) {
-    if (!s.rwObject) return;
-    if (s.rwObject->type == rpCLUMP) {
-        RpClumpDestroy(reinterpret_cast<RpClump*>(s.rwObject));
-    } else if (s.rwObject->type == rpATOMIC) {
-        auto* a = reinterpret_cast<RpAtomic*>(s.rwObject);
-        RwFrame* f = RpAtomicGetFrame(a);
-        RpAtomicDestroy(a);
-        if (f) RwFrameDestroy(f);
+    if (s.rwObject) {
+        auto* clump = reinterpret_cast<RpClump*>(s.rwObject);
+        OrcTextureRemapForgetOverlayClump(clump, s.loadedModel ? s.loadedModel->m_nTxdIndex : -1);
+        g_overlaySkeletons.erase(clump);
     }
-    s.rwObject = nullptr;
+    OrcDestroyRwObjectInstance(s.rwObject);
+    if (s.loadedModel) {
+        s.loadedModel->RemoveRef();
+        s.loadedModel = nullptr;
+    }
+    s.retryLoadAt = 0;
+}
+
+void OrcSkinsPruneUnusedAssets() {
+    if (g_loadedCustomSkins.empty() && g_standardSkins.empty())
+        return;
+
+    const uint32_t now = GetTickCount();
+    static uint32_t lastPrune = 0;
+    if (!g_skinTxdPoolFull && now - lastPrune < 2000)
+        return;
+    lastPrune = now;
+
+    constexpr uint32_t kTemplateIdleMs = 30000;
+    const uint32_t customIdleMs = g_skinTxdPoolFull ? 1000 : kTemplateIdleMs;
+    g_skinTxdPoolFull = false;
+    auto* pool = CTxdStore::ms_pTxdPool;
+    if (pool) {
+        for (auto it = g_loadedCustomSkins.begin(); it != g_loadedCustomSkins.end();) {
+            auto* skin = *it++;
+            if (now - skin->lastUseAt < customIdleMs)
+                continue;
+            const auto* txd = pool->GetAt(skin->txdSlot);
+            // Native clones own a separate ref to the private dictionary.
+            if (txd && txd->m_wRefsCount == 1)
+                DestroyCustomSkinInstance(*skin);
+        }
+    }
+
+    for (auto& skin : g_standardSkins) {
+        if (skin.rwObject && now - skin.lastUseAt >= kTemplateIdleMs)
+            DestroyStandardSkinInstance(skin);
+    }
+}
+
+static void ReleaseRandomPoolSkinInstances() {
+    for (auto& entry : g_skinRandomPools) {
+        for (auto& variant : entry.second.variants)
+            DestroyCustomSkinInstance(variant);
+    }
+    ResetRandomSkinSelections();
 }
 
 static void DestroyAllRandomPoolSkins() {
-    for (auto& pool : g_skinRandomPools)
-        for (auto& v : pool.variants)
-            DestroyCustomSkinInstance(v);
+    ReleaseRandomPoolSkinInstances();
     g_skinRandomPools.clear();
-    g_pedRandomSkinIdx.clear();
     g_skinRandomPoolModels = 0;
     g_skinRandomPoolVariants = 0;
 }
 
+static bool LoadSkinDictionary(int txdSlot, const char* path) {
+    RwStream* stream = nullptr;
+    bool loaded = false;
+    __try {
+        __try {
+            stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, const_cast<char*>(path));
+            if (stream)
+                loaded = CTxdStore::LoadTxd(txdSlot, stream);
+        } __finally {
+            if (stream)
+                RwStreamClose(stream, nullptr);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("skin: TXD stream SEH ex=0x%08X path=%s", GetExceptionCode(), path);
+    }
+    return loaded;
+}
+
+static RpClump* ReadSkinClump(int txdSlot, const char* path) {
+    RwStream* stream = nullptr;
+    RpClump* clump = nullptr;
+    RwTexDictionary* previous = RwTexDictionaryGetCurrent();
+    __try {
+        __try {
+            CTxdStore::SetCurrentTxd(txdSlot);
+            stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, const_cast<char*>(path));
+            if (stream && RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr))
+                clump = RpClumpStreamRead(stream);
+        } __finally {
+            RwTexDictionarySetCurrent(previous);
+            if (stream)
+                RwStreamClose(stream, nullptr);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        OrcLogError("skin: DFF stream SEH ex=0x%08X path=%s", GetExceptionCode(), path);
+    }
+    return clump;
+}
+
+static bool IsSkinLoadDeferred(uint32_t retryAt, uint32_t now) {
+    return retryAt && static_cast<int32_t>(retryAt - now) > 0;
+}
+
 bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s) {
-    if (s.rwObject)
+    if (s.rwObject) {
+        s.lastUseAt = GetTickCount();
         return true;
+    }
     if (s.loadFailed)
+        return false;
+
+    const uint32_t now = GetTickCount();
+    if (IsSkinLoadDeferred(s.retryLoadAt, now))
         return false;
 
     const auto fail = [&s](const char* reason, const char* path) {
@@ -412,98 +484,69 @@ bool OrcEnsureCustomSkinLoaded(CustomSkinCfg& s) {
         OrcLogError("skin \"%s\": %s (%s)", s.name.c_str(), reason, path);
         return false;
     };
-    if (!OrcFileExistsA(s.dffPath.c_str()))
-        return fail("DFF missing", s.dffPath.c_str());
-    if (s.txdPath.empty() || !OrcFileExistsA(s.txdPath.c_str()))
-        return fail("TXD missing", s.txdPath.c_str());
+    if (s.txdPath.empty())
+        return fail("TXD missing", s.dffPath.c_str());
 
     auto* pool = CTxdStore::ms_pTxdPool;
     if (!pool)
         return false;
-    // The vanilla AddTxdSlot dereferences its allocation even when the pool is full.
-    if (!pool->GetNoOfFreeSpaces())
-        return fail("TXD pool full", s.txdPath.c_str());
-
-    // Never overwrite a game TXD or the previous dictionary still used by a native ped.
-    const int txdSlot = CTxdStore::AddTxdSlot("orcoutfit_skin");
-    if (txdSlot < 0)
-        return fail("AddTxdSlot failed", s.txdPath.c_str());
-
-    bool txdOk = false;
-    RwStream* txdStream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)s.txdPath.c_str());
-    if (txdStream) {
-        txdOk = CTxdStore::LoadTxd(txdSlot, txdStream);
-        RwStreamClose(txdStream, nullptr);
+    // The stock AddTxdSlot dereferences its allocation when the pool is full.
+    if (!pool->GetNoOfFreeSpaces()) {
+        g_skinTxdPoolFull = true;
+        s.retryLoadAt = now + 1000;
+        OrcLogInfoThrottled(945u, 5000u, "skin: TXD pool full; deferred %s", s.name.c_str());
+        return false;
     }
-    if (!txdOk) {
+
+    // This slot belongs to the template and to any native clones referencing it.
+    const int txdSlot = CTxdStore::AddTxdSlot("orcoutfit_skin");
+    if (txdSlot < 0) {
+        s.retryLoadAt = now + 1000;
+        return false;
+    }
+    if (!LoadSkinDictionary(txdSlot, s.txdPath.c_str())) {
         CTxdStore::RemoveTxdSlot(txdSlot);
         return fail("LoadTxd failed", s.txdPath.c_str());
     }
     CTxdStore::AddRef(txdSlot);
     s.txdSlot = txdSlot;
 
-    CTxdStore::PushCurrentTxd();
-    CTxdStore::SetCurrentTxd(txdSlot);
-    RwStream* stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, (void*)s.dffPath.c_str());
-    RpClump* clump = nullptr;
-    if (stream) {
-        if (RwStreamFindChunk(stream, rwID_CLUMP, nullptr, nullptr))
-            clump = RpClumpStreamRead(stream);
-        RwStreamClose(stream, nullptr);
-    }
-    CTxdStore::PopCurrentTxd();
-
-    if (!clump) {
+    RpClump* clump = ReadSkinClump(txdSlot, s.dffPath.c_str());
+    s.rwObject = reinterpret_cast<RwObject*>(clump);
+    if (!clump || !RpClumpGetFrame(clump)) {
         DestroyCustomSkinInstance(s);
         return fail("DFF clump load failed", s.dffPath.c_str());
     }
-    s.rwObject = reinterpret_cast<RwObject*>(clump);
-    RpClumpForAllAtomics(clump, OrcInitAtomicCB, nullptr);
+    s.retryLoadAt = 0;
+    s.lastUseAt = now;
+    g_loadedCustomSkins.insert(&s);
     OrcLogInfo("skin \"%s\": clump loaded", s.name.c_str());
     return true;
 }
 
-// GetExistingStandardModelInfo / OrcIsValidStandardSkinModel вынесены в orc_ped_index.cpp
-// Объявление — в orc_app.h.
-
 static bool EnsureStandardSkinLoaded(StandardSkinCfg& s) {
-    if (s.rwObject && !OrcIsValidStandardSkinModel(s.modelId)) {
+    CBaseModelInfo* model = OrcIsValidStandardSkinModel(s.modelId) ? CModelInfo::GetModelInfo(s.modelId) : nullptr;
+    const uint32_t now = GetTickCount();
+    if (s.rwObject && model == s.loadedModel) {
+        s.lastUseAt = now;
+        return true;
+    }
+    if (s.rwObject)
         DestroyStandardSkinInstance(s);
-        if (!s.loadFailedLogged) {
-            s.loadFailedLogged = true;
-            OrcLogError("standard skin \"%s\" [%d]: model no longer exists", s.dffName.c_str(), s.modelId);
-        }
+    if (!model)
         return false;
-    }
-    if (s.rwObject) return true;
-    if (!OrcIsValidStandardSkinModel(s.modelId)) {
-        if (!s.loadFailedLogged) {
-            s.loadFailedLogged = true;
-            OrcLogError("standard skin \"%s\" [%d]: invalid ped model", s.dffName.c_str(), s.modelId);
-        }
-        return false;
-    }
 
-    if (!CStreaming::HasModelLoaded(s.modelId)) {
+    if (IsSkinLoadDeferred(s.retryLoadAt, now))
+        return false;
+    s.retryLoadAt = now + 250;
+    if (!CStreaming::HasModelLoaded(s.modelId) || !model->m_pRwObject) {
         CStreaming::RequestModel(s.modelId, 0);
-        for (int i = 0; i < 16 && !CStreaming::HasModelLoaded(s.modelId); ++i)
-            CStreaming::LoadAllRequestedModels(false);
-        if (!CStreaming::HasModelLoaded(s.modelId))
-            return false;
+        return false;
     }
 
-    CBaseModelInfo* mi = CModelInfo::GetModelInfo(s.modelId);
-    if (!mi || !mi->m_pRwObject)
-        return false;
-
-    RwObject* inst = mi->CreateInstance();
-    if (!inst || inst->type != rpCLUMP) {
-        if (inst && inst->type == rpATOMIC) {
-            auto* a = reinterpret_cast<RpAtomic*>(inst);
-            RwFrame* f = RpAtomicGetFrame(a);
-            RpAtomicDestroy(a);
-            if (f) RwFrameDestroy(f);
-        }
+    RwObject* instance = model->CreateInstance();
+    if (!instance || instance->type != rpCLUMP) {
+        OrcDestroyRwObjectInstance(instance);
         if (!s.loadFailedLogged) {
             s.loadFailedLogged = true;
             OrcLogError("standard skin \"%s\" [%d]: CreateInstance failed or non-clump", s.dffName.c_str(), s.modelId);
@@ -511,8 +554,10 @@ static bool EnsureStandardSkinLoaded(StandardSkinCfg& s) {
         return false;
     }
 
-    s.rwObject = inst;
-    RpClumpForAllAtomics(reinterpret_cast<RpClump*>(inst), OrcInitAtomicCB, nullptr);
+    model->AddRef();
+    s.loadedModel = model;
+    s.rwObject = instance;
+    s.lastUseAt = now;
     s.loadFailedLogged = false;
     OrcLogInfo("standard skin \"%s\" [%d]: clump loaded", s.dffName.c_str(), s.modelId);
     return true;
@@ -539,22 +584,15 @@ static void LoadSkinCfgFromIni(CustomSkinCfg& s) {
 
 void SaveSkinCfgToIni(const CustomSkinCfg& s) {
     if (s.iniPath.empty()) return;
-    std::string text;
-    text.reserve(128 + s.nickListCsv.size());
-    text += "; OrcOutFit custom skin config for ";
-    text += s.name;
-    text += "\n";
-    text += "; Nicks: one per line and/or comma-separated (case-insensitive).\n\n";
-    text += "[NickBinding]\n";
-    text += "Enabled=";
-    text += s.bindToNick ? "1\n" : "0\n";
-    text += "Nicks=";
-    text += s.nickListCsv;
-    text += "\n";
-    if (!OrcWriteTextFileAtomic(s.iniPath.c_str(), text)) {
+    const std::vector<OrcIniValue> values = {
+        {"NickBinding", "Enabled", s.bindToNick ? "1" : "0"},
+        {"NickBinding", "Nicks", s.nickListCsv},
+    };
+    if (!OrcIniWriteValues(s.iniPath.c_str(), kCustomSkinIniHeader, values)) {
         OrcLogError("SaveSkinCfgToIni: cannot write %s", s.iniPath.c_str());
         return;
     }
+    OrcIniCacheInvalidatePath(s.iniPath.c_str());
     InvalidateCustomSkinLookupCache();
 }
 
@@ -562,7 +600,6 @@ static bool g_standardSkinLookupDirty = true;
 static std::unordered_map<std::string, int> g_standardSkinNickLookup;
 
 void InvalidateStandardSkinLookupCache() {
-    OrcIniCacheInvalidatePath(StandardSkinsIniPath().c_str());
     g_standardSkinLookupDirty = true;
     g_standardSkinNickLookup.clear();
 }
@@ -598,12 +635,14 @@ StandardSkinCfg* OrcGetStandardSkinCfgByModelId(int modelId, bool createIfMissin
 }
 
 void LoadStandardSkinsFromIni() {
+    g_uiStdSkinEditModelId = -1;
     for (auto& s : g_standardSkins)
         DestroyStandardSkinInstance(s);
     g_standardSkins.clear();
     InvalidateStandardSkinLookupCache();
 
     const std::string path = StandardSkinsIniPath();
+    OrcIniCacheInvalidatePath(path.c_str());
     if (!OrcFileExistsA(path.c_str())) return;
 
     const OrcIniDocument* pdoc = OrcIniCacheGet(path.c_str());
@@ -619,12 +658,27 @@ void LoadStandardSkinsFromIni() {
         if (!seen.insert(dffLower).second) continue;
 
         const std::string sec = StandardSkinIniSection(dff.c_str());
-        const int modelId = doc.GetInt(sec.c_str(), "ModelId", -1);
-        if (!OrcIsValidStandardSkinModel(modelId)) continue;
+        int modelId = doc.GetInt(sec.c_str(), "ModelId", -1);
+        const char* modelDff = OrcTryGetPedModelNameById(modelId);
+        if (!modelDff || ToLowerAscii(modelDff) != dffLower || !OrcIsValidStandardSkinModel(modelId)) {
+            modelId = -1;
+            for (int id = 0; id < static_cast<int>(g_pedModelNameById.size()); ++id) {
+                if (ToLowerAscii(g_pedModelNameById[static_cast<size_t>(id)]) == dffLower &&
+                    OrcIsValidStandardSkinModel(id)) {
+                    modelId = id;
+                    break;
+                }
+            }
+            if (modelId < 0) {
+                OrcLogInfo("standard skin: configured DFF unavailable: %s", dff.c_str());
+                continue;
+            }
+            modelDff = OrcTryGetPedModelNameById(modelId);
+        }
 
         StandardSkinCfg cfg;
         cfg.modelId = modelId;
-        cfg.dffName = dff;
+        cfg.dffName = modelDff;
         cfg.bindToNick = doc.GetInt(sec.c_str(), "Enabled", 0) != 0;
         cfg.nickListCsv = doc.GetString(sec.c_str(), "Nicks", "");
         cfg.nicknames = ParseNickCsv(cfg.nickListCsv);
@@ -698,6 +752,8 @@ void SaveStandardSkinCfgToIni(const StandardSkinCfg& s) {
     AddIniValue(values, sec.c_str(), "Nicks", s.nickListCsv.c_str());
     if (!OrcIniWriteValues(path.c_str(), "; OrcOutFit standard game skin config.\n\n", values))
         OrcLogError("SaveStandardSkinCfgToIni: cannot write %s", path.c_str());
+    else
+        OrcIniCacheInvalidatePath(path.c_str());
     InvalidateStandardSkinLookupCache();
 }
 
@@ -734,69 +790,99 @@ void SaveSkinModeIni() {
         OrcLogError("SaveSkinModeIni: cannot write %s", g_iniPath);
 }
 
-static void DiscoverRandomSkinPools() {
-    DestroyAllRandomPoolSkins();
-    const std::string randomDir = OrcJoinPath(std::string(g_gameSkinDir), "Random");
-    DWORD attr = GetFileAttributesA(randomDir.c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
-        return;
+struct SkinFolderFiles {
+    std::vector<std::string> dffs;
+    std::unordered_map<std::string, std::string> txdsByBasename;
+    size_t txdCount = 0;
 
-    std::string mask = OrcJoinPath(randomDir, "*");
-    WIN32_FIND_DATAA fd{};
-    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE)
-        return;
+    std::string FindTxd(const std::string& dir, const std::string& basename) const {
+        const auto it = txdsByBasename.find(ToLowerAscii(basename));
+        if (it != txdsByBasename.end())
+            return OrcJoinPath(dir, it->second);
+        if (txdCount == 1)
+            return OrcJoinPath(dir, txdsByBasename.begin()->second);
+        return {};
+    }
+};
+
+static SkinFolderFiles ReadSkinFolderFiles(const std::string& dir) {
+    SkinFolderFiles files;
+    WIN32_FIND_DATAA data{};
+    const HANDLE handle = FindFirstFileA(OrcJoinPath(dir, "*").c_str(), &data);
+    if (handle == INVALID_HANDLE_VALUE)
+        return files;
 
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        const std::string folder = fd.cFileName;
-        if (folder == "." || folder == "..") continue;
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        std::string name = data.cFileName;
+        const std::string ext = OrcLowerExt(name);
+        if (ext == ".dff") {
+            files.dffs.push_back(std::move(name));
+        } else if (ext == ".txd") {
+            std::string key = ToLowerAscii(OrcBaseNameNoExt(name));
+            files.txdsByBasename.emplace(std::move(key), std::move(name));
+            ++files.txdCount;
+        }
+    } while (FindNextFileA(handle, &data));
+    FindClose(handle);
+    std::sort(files.dffs.begin(), files.dffs.end(), [](const std::string& a, const std::string& b) {
+        constexpr size_t extensionSize = 4; // ".dff"
+        const int compared = _strnicmp(a.c_str(), b.c_str(), std::min(a.size(), b.size()) - extensionSize);
+        if (compared != 0)
+            return compared < 0;
+        if (a.size() != b.size())
+            return a.size() < b.size();
+        return a < b;
+    });
+    return files;
+}
 
-        const int modelId = FindPedModelIdByDffName(folder);
-        if (!OrcIsValidStandardSkinModel(modelId)) continue;
+static void DiscoverRandomSkinPools() {
+    const std::string randomDir = OrcJoinPath(g_gameSkinDir, "Random");
+    WIN32_FIND_DATAA fd{};
+    const HANDLE handle = FindFirstFileA(OrcJoinPath(randomDir, "*").c_str(), &fd);
+    if (handle == INVALID_HANDLE_VALUE)
+        return;
+
+    std::unordered_map<std::string, int> modelIdsByDff;
+    for (int id = 0; id < static_cast<int>(g_pedModelNameById.size()); ++id) {
+        const std::string& dff = g_pedModelNameById[static_cast<size_t>(id)];
+        if (!dff.empty() && OrcIsValidStandardSkinModel(id))
+            modelIdsByDff.emplace(ToLowerAscii(dff), id);
+    }
+
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            continue;
+        const std::string folder = fd.cFileName;
+        const auto model = modelIdsByDff.find(ToLowerAscii(folder));
+        if (model == modelIdsByDff.end())
+            continue;
 
         const std::string poolDir = OrcJoinPath(randomDir, folder);
-        std::string fileMask = OrcJoinPath(poolDir, "*.*");
-        WIN32_FIND_DATAA fileData{};
-        HANDLE hf = FindFirstFileA(fileMask.c_str(), &fileData);
-        if (hf == INVALID_HANDLE_VALUE) continue;
+        const SkinFolderFiles files = ReadSkinFolderFiles(poolDir);
+        if (files.dffs.empty())
+            continue;
 
-        SkinRandomPool pool;
-        pool.modelId = modelId;
+        SkinRandomPool& pool = g_skinRandomPools[model->second];
         pool.folderName = folder;
-
-        do {
-            if (fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            const std::string fname = fileData.cFileName;
-            if (OrcLowerExt(fname) != ".dff") continue;
-            const std::string base = OrcBaseNameNoExt(fname);
-            CustomSkinCfg s;
-            s.name = folder + "/" + base;
-            s.dffPath = OrcJoinPath(poolDir, fname);
-            s.txdPath = OrcFindBestTxdPath(poolDir, base);
-            s.iniPath.clear();
-            s.remapKey = base;
-            s.remapFallbackKey = folder;
-            pool.variants.push_back(std::move(s));
-        } while (FindNextFileA(hf, &fileData));
-        FindClose(hf);
-
-        if (!pool.variants.empty()) {
-            std::sort(pool.variants.begin(), pool.variants.end(), [](const CustomSkinCfg& a, const CustomSkinCfg& b) {
-                return OrcToLowerAscii(a.name) < OrcToLowerAscii(b.name);
-            });
-            pool.sequentialPool.reserve(pool.variants.size());
-            for (int i = 0; i < (int)pool.variants.size(); ++i)
-                pool.sequentialPool.push_back(i);
-            g_skinRandomPools.push_back(std::move(pool));
+        pool.variants.reserve(files.dffs.size());
+        for (const auto& name : files.dffs) {
+            const std::string base = OrcBaseNameNoExt(name);
+            CustomSkinCfg skin;
+            skin.name = folder + "/" + base;
+            skin.dffPath = OrcJoinPath(poolDir, name);
+            skin.txdPath = files.FindTxd(poolDir, base);
+            skin.remapKey = base;
+            skin.remapFallbackKey = folder;
+            pool.variants.push_back(std::move(skin));
         }
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
+        g_skinRandomPoolVariants += static_cast<int>(files.dffs.size());
+    } while (FindNextFileA(handle, &fd));
+    FindClose(handle);
 
-    g_skinRandomPoolModels = (int)g_skinRandomPools.size();
-    g_skinRandomPoolVariants = 0;
-    for (const auto& pool : g_skinRandomPools)
-        g_skinRandomPoolVariants += (int)pool.variants.size();
+    g_skinRandomPoolModels = static_cast<int>(g_skinRandomPools.size());
     OrcLogInfo("DiscoverRandomSkinPools: %d pools, %d variants in %s",
                g_skinRandomPoolModels, g_skinRandomPoolVariants, randomDir.c_str());
 }
@@ -805,61 +891,53 @@ void DiscoverCustomSkins() {
     OrcTextureRemapInvalidateStates();
     OrcTextureRemapRefreshAdditionalTxds();
     OrcSkinNativeOnSkinAssetsReleased();
-    for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+    for (auto& skin : g_customSkins) {
+        OrcIniCacheInvalidatePath(skin.iniPath.c_str());
+        DestroyCustomSkinInstance(skin);
+    }
     g_customSkins.clear();
+    g_selectedSkinCacheIdx = -1;
+    g_selectedSkinCacheName.clear();
     InvalidateCustomSkinLookupCache();
     DestroyAllRandomPoolSkins();
-    DWORD attr = GetFileAttributesA(g_gameSkinDir);
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        static bool s_logged = false;
-        if (!s_logged) {
-            s_logged = true;
-            OrcLogInfo("Skins folder missing or not a directory: %s", g_gameSkinDir);
-        }
+    g_uiSkinIdx = 0;
+    g_uiSkinEditIdx = -1;
+
+    const DWORD attributes = GetFileAttributesA(g_gameSkinDir);
+    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        OrcLogInfo("Skins folder missing or not a directory: %s", g_gameSkinDir);
         return;
     }
-    std::string dir = g_gameSkinDir;
-    std::string mask = OrcJoinPath(dir, "*.*");
-    WIN32_FIND_DATAA fd{};
-    HANDLE h = FindFirstFileA(mask.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        std::string fname = fd.cFileName;
-        if (OrcLowerExt(fname) != ".dff") continue;
-        const std::string base = OrcBaseNameNoExt(fname);
-        CustomSkinCfg s;
-        s.name = base;
-        s.dffPath = OrcJoinPath(dir, base + ".dff");
-        s.txdPath = OrcFindBestTxdPath(dir, base);
-        s.iniPath = OrcJoinPath(dir, base + ".ini");
-        s.remapKey = base;
-        CreateDefaultSkinIniIfMissing(s.iniPath, base);
-        LoadSkinCfgFromIni(s);
-        g_customSkins.push_back(s);
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
+    const std::string dir = g_gameSkinDir;
+    const SkinFolderFiles files = ReadSkinFolderFiles(dir);
+    const std::string selected = ToLowerAscii(g_skinSelectedName);
+    g_customSkins.reserve(files.dffs.size());
+    for (const auto& name : files.dffs) {
+        const std::string base = OrcBaseNameNoExt(name);
+        CustomSkinCfg skin;
+        skin.name = base;
+        skin.dffPath = OrcJoinPath(dir, name);
+        skin.txdPath = files.FindTxd(dir, base);
+        skin.iniPath = OrcJoinPath(dir, base + ".ini");
+        skin.remapKey = base;
+        CreateDefaultSkinIniIfMissing(skin.iniPath);
+        LoadSkinCfgFromIni(skin);
+        if (ToLowerAscii(base) == selected)
+            g_uiSkinIdx = static_cast<int>(g_customSkins.size());
+        g_customSkins.push_back(std::move(skin));
+    }
     OrcLogInfo("DiscoverCustomSkins: %zu skins in %s", g_customSkins.size(), g_gameSkinDir);
     DiscoverRandomSkinPools();
-    if (!g_skinSelectedName.empty()) {
-        for (int i = 0; i < (int)g_customSkins.size(); i++) {
-            if (ToLowerAscii(g_customSkins[i].name) == ToLowerAscii(g_skinSelectedName)) {
-                g_uiSkinIdx = i;
-                break;
-            }
-        }
-    }
-    if (g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
-    g_uiSkinEditIdx = -1;
 }
 
 void OrcCollectRandomSkinPools(std::vector<SkinRandomPoolInfo>& out) {
     out.clear();
-    for (const auto& pool : g_skinRandomPools) {
+    out.reserve(g_skinRandomPools.size());
+    for (const auto& entry : g_skinRandomPools) {
         SkinRandomPoolInfo info;
-        info.dffName = pool.folderName;
-        info.modelId = pool.modelId;
-        info.variants = (int)pool.variants.size();
+        info.dffName = entry.second.folderName;
+        info.modelId = entry.first;
+        info.variants = static_cast<int>(entry.second.variants.size());
         out.push_back(std::move(info));
     }
     std::sort(out.begin(), out.end(), [](const SkinRandomPoolInfo& a, const SkinRandomPoolInfo& b) {
@@ -869,165 +947,102 @@ void OrcCollectRandomSkinPools(std::vector<SkinRandomPoolInfo>& out) {
 
 // OrcCollectPedSkins вынесена в orc_ped_index.cpp.
 
-static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed);
-static void RenderStandardSkinOnPed(CPed* ped, StandardSkinCfg* sel, bool isLocalPed);
 // Skin preview tab/renderer removed.
-void OrcSkinsDestroyPreview() {}
 
 static CustomSkinCfg* GetSelectedSkin() {
-    if (g_customSkins.empty()) return nullptr;
-    if (!g_skinSelectedName.empty()) {
-        const std::string selectedLower = ToLowerAscii(g_skinSelectedName);
-        if (g_selectedSkinCacheIdx >= 0 &&
-            g_selectedSkinCacheIdx < (int)g_customSkins.size() &&
-            g_selectedSkinCacheNameLower == selectedLower &&
-            ToLowerAscii(g_customSkins[(size_t)g_selectedSkinCacheIdx].name) == selectedLower) {
-            return &g_customSkins[(size_t)g_selectedSkinCacheIdx];
-        }
+    if (g_customSkins.empty())
+        return nullptr;
+    if (g_skinSelectedName.empty())
+        return &g_customSkins.front();
 
-        for (int i = 0; i < (int)g_customSkins.size(); ++i) {
-            if (ToLowerAscii(g_customSkins[(size_t)i].name) == selectedLower) {
+    if (g_selectedSkinCacheName != g_skinSelectedName) {
+        g_selectedSkinCacheName = g_skinSelectedName;
+        g_selectedSkinCacheIdx = -1;
+        const std::string want = ToLowerAscii(g_skinSelectedName);
+        for (int i = 0; i < static_cast<int>(g_customSkins.size()); ++i) {
+            if (ToLowerAscii(g_customSkins[static_cast<size_t>(i)].name) == want) {
                 g_selectedSkinCacheIdx = i;
-                g_selectedSkinCacheNameLower = selectedLower;
-                return &g_customSkins[(size_t)i];
+                break;
             }
         }
     }
-    if (g_uiSkinIdx < 0 || g_uiSkinIdx >= (int)g_customSkins.size()) g_uiSkinIdx = 0;
-    g_skinSelectedName = g_customSkins[g_uiSkinIdx].name;
-    g_selectedSkinCacheIdx = g_uiSkinIdx;
-    g_selectedSkinCacheNameLower = ToLowerAscii(g_skinSelectedName);
-    return &g_customSkins[g_uiSkinIdx];
+    return g_selectedSkinCacheIdx < 0 ? nullptr : &g_customSkins[static_cast<size_t>(g_selectedSkinCacheIdx)];
 }
 
-static void CopySkinHierarchyPose(CPed* player, RpClump* skinClump) {
-    RpHAnimHierarchy* src = GetAnimHierarchyFromSkinClump(player->m_pRwClump);
-    RpHAnimHierarchy* dst = GetAnimHierarchyFromSkinClump(skinClump);
-    if (!src || !dst || !src->pMatrixArray || !dst->pMatrixArray) return;
-    for (int i = 0; i < src->numNodes; i++) {
-        int nodeId = src->pNodeInfo ? src->pNodeInfo[i].nodeID : -1;
-        if (nodeId < 0) continue;
-        int di = RpHAnimIDGetIndex(dst, nodeId);
-        if (di < 0 || di >= dst->numNodes) continue;
-        dst->pMatrixArray[di] = src->pMatrixArray[i];
-    }
-    RpHAnimHierarchyUpdateMatrices(dst);
-
-    if (src->pNodeInfo && dst->pNodeInfo) {
-        for (int i = 0; i < src->numNodes; i++) {
-            const int nodeId = src->pNodeInfo[i].nodeID;
-            const int di = RpHAnimIDGetIndex(dst, nodeId);
-            if (di < 0 || di >= dst->numNodes) continue;
-            RwFrame* sf = src->pNodeInfo[i].pFrame;
-            RwFrame* df = dst->pNodeInfo[di].pFrame;
-            if (!sf || !df) continue;
-            std::memcpy(RwFrameGetMatrix(df), RwFrameGetMatrix(sf), sizeof(RwMatrix));
-            RwMatrixUpdate(RwFrameGetMatrix(df));
-        }
-    }
-}
-
-static RpAtomic* BindSkinHierarchyCB(RpAtomic* a, void* data) {
-    if (!a || !data) return a;
-    if (RpSkinAtomicGetSkin(a)) {
-        RpSkinAtomicSetHAnimHierarchy(a, reinterpret_cast<RpHAnimHierarchy*>(data));
-        RpSkinAtomicSetType(a, rpSKINTYPEGENERIC);
-        g_skinBindCount++;
-    }
-    return a;
-}
-
-static bool SkinMatchesNickname(const CustomSkinCfg& s, const std::string& nickLower) {
-    if (!s.bindToNick || s.nicknames.empty()) return false;
-    for (const auto& n : s.nicknames)
-        if (n == nickLower) return true;
-    return false;
-}
-
-static bool StandardSkinMatchesNickname(const StandardSkinCfg& s, const std::string& nickLower) {
-    if (!s.bindToNick || s.nicknames.empty()) return false;
-    for (const auto& n : s.nicknames)
-        if (n == nickLower) return true;
-    return false;
-}
 
 static CustomSkinCfg* FindNickSkin(const std::string& nickLower) {
     if (nickLower.empty()) return nullptr;
     EnsureCustomSkinNickLookup();
-    auto it = g_customSkinNickLookup.find(nickLower);
+    const auto it = g_customSkinNickLookup.find(nickLower);
     if (it == g_customSkinNickLookup.end()) return nullptr;
-    const int idx = it->second;
-    if (idx < 0 || idx >= (int)g_customSkins.size()) return nullptr;
-    if (!SkinMatchesNickname(g_customSkins[(size_t)idx], nickLower)) return nullptr;
-    return &g_customSkins[(size_t)idx];
+    return &g_customSkins[static_cast<size_t>(it->second)];
 }
 
 static StandardSkinCfg* FindNickStandardSkin(const std::string& nickLower) {
     if (nickLower.empty()) return nullptr;
     EnsureStandardSkinNickLookup();
-    auto it = g_standardSkinNickLookup.find(nickLower);
-    if (it == g_standardSkinNickLookup.end()) return nullptr;
-    StandardSkinCfg* skin = OrcGetStandardSkinCfgByModelId(it->second, false);
-    if (!skin || !StandardSkinMatchesNickname(*skin, nickLower)) return nullptr;
-    return skin;
+    const auto it = g_standardSkinNickLookup.find(nickLower);
+    return it == g_standardSkinNickLookup.end() ? nullptr : OrcGetStandardSkinCfgByModelId(it->second, false);
+}
+
+static int GetSelectedStandardSkinModelId() {
+    if (g_standardSkinSelectedModelId >= 0)
+        return g_standardSkinSelectedModelId;
+    for (int id = 0; id < static_cast<int>(g_pedModelNameById.size()); ++id) {
+        if (!g_pedModelNameById[static_cast<size_t>(id)].empty() && OrcIsValidStandardSkinModel(id))
+            return id;
+    }
+    return -1;
 }
 
 static StandardSkinCfg* GetSelectedStandardSkin() {
-    if (g_standardSkinSelectedModelId >= 0) {
-        if (StandardSkinCfg* skin = OrcGetStandardSkinCfgByModelId(g_standardSkinSelectedModelId, true))
-            return skin;
+    return OrcGetStandardSkinCfgByModelId(GetSelectedStandardSkinModelId(), true);
+}
+
+const char* OrcGetSelectedManualSkinDffName() {
+    if (g_skinSelectedSource == SKIN_SELECTED_CUSTOM) {
+        const auto* skin = GetSelectedSkin();
+        return skin ? skin->name.c_str() : nullptr;
     }
-    std::vector<std::pair<std::string, int>> skins;
-    OrcCollectPedSkins(skins);
-    if (skins.empty()) return nullptr;
-    g_standardSkinSelectedModelId = skins.front().second;
-    return OrcGetStandardSkinCfgByModelId(g_standardSkinSelectedModelId, true);
+    const int modelId = GetSelectedStandardSkinModelId();
+    return OrcIsValidStandardSkinModel(modelId) ? OrcTryGetPedModelNameById(modelId) : nullptr;
 }
 
 OrcResolvedPedSkin OrcResolveSkinForPedModel(CPed* ped, CPlayerPed* localPlayer, int baseModelId) {
     OrcResolvedPedSkin result;
     if (!ped || (!g_skinModeEnabled && !g_skinRandomFromPools)) return result;
-    CustomSkinCfg* selectedCustom = (g_skinModeEnabled && g_skinSelectedSource == SKIN_SELECTED_CUSTOM) ? GetSelectedSkin() : nullptr;
-    StandardSkinCfg* selectedStandard = (g_skinModeEnabled && g_skinSelectedSource == SKIN_SELECTED_STANDARD) ? GetSelectedStandardSkin() : nullptr;
-    const bool isLocalByPtr = (localPlayer && ped == localPlayer);
+    result.isLocalPed = ped == localPlayer;
 
-    if (g_skinNickMode && samp_bridge::IsSampBuildKnown()) {
-        char nick[32] = {};
-        bool isLocalBySamp = false;
-        if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocalBySamp)) {
-            const bool isLocal = isLocalBySamp || isLocalByPtr;
-            result.isLocalPed = isLocal;
-            CustomSkinCfg* nickSkin = FindNickSkin(ToLowerAscii(nick));
-            if (nickSkin) {
-                result.custom = nickSkin;
-                return result;
-            }
-            if (StandardSkinCfg* standardNickSkin = FindNickStandardSkin(ToLowerAscii(nick))) {
-                result.standard = standardNickSkin;
-                return result;
-            }
-            if (isLocal && g_skinModeEnabled && g_skinLocalPreferSelected) {
-                result.custom = selectedCustom;
-                result.standard = selectedStandard;
-                return result;
+    if (g_skinModeEnabled && g_skinNickMode && samp_bridge::IsSampBuildKnown()) {
+        // Avoid a player-pool lookup per ped when there are no nick bindings.
+        EnsureCustomSkinNickLookup();
+        EnsureStandardSkinNickLookup();
+        if (!g_customSkinNickLookup.empty() || !g_standardSkinNickLookup.empty()) {
+            char nick[32] = {};
+            bool isLocalBySamp = false;
+            if (samp_bridge::GetPedNickname(ped, nick, sizeof(nick), &isLocalBySamp)) {
+                result.isLocalPed = result.isLocalPed || isLocalBySamp;
+                const std::string nickLower = ToLowerAscii(nick);
+                result.custom = FindNickSkin(nickLower);
+                if (result.custom)
+                    return result;
+                result.standard = FindNickStandardSkin(nickLower);
+                if (result.standard)
+                    return result;
             }
         }
     }
 
-    if (isLocalByPtr && g_skinLocalPreferSelected) {
-        result.isLocalPed = true;
-        result.custom = selectedCustom;
-        result.standard = selectedStandard;
-        return result;
+    if (result.isLocalPed && g_skinModeEnabled && g_skinLocalPreferSelected) {
+        if (g_skinSelectedSource == SKIN_SELECTED_CUSTOM)
+            result.custom = GetSelectedSkin();
+        else
+            result.standard = GetSelectedStandardSkin();
+        if (result.custom || result.standard)
+            return result;
     }
 
-    if (isLocalByPtr) result.isLocalPed = true;
-    CustomSkinCfg* randomSkin = nullptr;
-    if (ResolveRandomSkinForPedModel(ped, baseModelId, &randomSkin)) {
-        result.custom = randomSkin;
-        result.standard = nullptr;
-        result.fromRandomPool = true;
-    }
+    result.fromRandomPool = ResolveRandomSkinForPedModel(ped, baseModelId, &result.custom);
     return result;
 }
 
@@ -1035,226 +1050,297 @@ OrcResolvedPedSkin OrcResolveSkinForPed(CPed* ped, CPlayerPed* localPlayer) {
     return OrcResolveSkinForPedModel(ped, localPlayer, ped ? (int)ped->m_nModelIndex : -1);
 }
 
-bool OrcSkinsGetOverlayTextureRemapInfo(CPed* ped, OrcNativeSkinActiveInfo& out) {
-    if (!g_enabled || !ped || !ped->m_pRwClump)
-        return false;
-    const OrcResolvedPedSkin skin = OrcResolveSkinForPed(ped, FindPlayerPed(0));
-    const bool overlay = g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY;
-    if (skin.custom && skin.custom->rwObject && skin.custom->rwObject->type == rpCLUMP &&
-        (overlay || OrcSkinNativeShouldOverlayFallback(ped, skin.custom))) {
-        const CustomSkinCfg& asset = *skin.custom;
-        out.clump = reinterpret_cast<RpClump*>(asset.rwObject);
-        out.dffName = asset.remapKey.empty() ? asset.name.c_str() : asset.remapKey.c_str();
-        out.fallbackDffName = asset.remapFallbackKey.empty() ? nullptr : asset.remapFallbackKey.c_str();
-        out.txdSlot = asset.txdSlot;
-        return true;
+namespace {
+constexpr uintptr_t kEntityClumpRenderCall = 0x53439C;
+constexpr uintptr_t kRwClumpRender = 0x749B20;
+
+bool IsOverlayModeEnabled() {
+    return g_overlayRenderHookInstalled && !OrcIsRuntimeShuttingDown() && g_enabled &&
+        (g_skinModeEnabled || g_skinRandomFromPools) &&
+        (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY || g_skinNativeFallback == SKIN_NATIVE_FALLBACK_OVERLAY);
+}
+
+RpAtomic* DrawFadedOverlayAtomic(RpAtomic* atomic, int alpha, unsigned char* previousAlphas) {
+    RpGeometry& geometry = *atomic->geometry;
+    const auto savedFlags = geometry.flags;
+    auto& materials = geometry.matList;
+    int saved = 0;
+    RpAtomic* result = nullptr;
+    __try {
+        geometry.flags |= rpGEOMETRYMODULATEMATERIALCOLOR;
+        for (; saved < materials.numMaterials; ++saved) {
+            if (auto* material = materials.materials[saved]) {
+                previousAlphas[saved] = material->color.alpha;
+                if (material->color.alpha > alpha)
+                    material->color.alpha = static_cast<RwUInt8>(alpha);
+            }
+        }
+        result = AtomicDefaultRenderCallBack(atomic);
+    } __finally {
+        while (saved > 0) {
+            --saved;
+            if (auto* material = materials.materials[saved])
+                material->color.alpha = previousAlphas[saved];
+        }
+        geometry.flags = savedFlags;
     }
-    if (skin.standard && skin.standard->rwObject && skin.standard->rwObject->type == rpCLUMP &&
-        (overlay || OrcSkinNativeShouldOverlayFallback(ped, skin.standard))) {
-        const auto* mi = CModelInfo::GetModelInfo(skin.standard->modelId);
-        if (mi) {
-            out.clump = reinterpret_cast<RpClump*>(skin.standard->rwObject);
-            out.dffName = skin.standard->dffName.c_str();
-            out.fallbackDffName = nullptr;
-            out.txdSlot = mi->m_nTxdIndex;
-            return true;
+    return result;
+}
+
+RpAtomic* DrawOverlayAtomic(RpAtomic* atomic) {
+    const int alpha = CVisibilityPlugins::GetClumpAlpha(RpAtomicGetClump(atomic));
+    if (alpha <= 0)
+        return atomic;
+    if (alpha >= 255 || atomic->geometry->matList.numMaterials <= 0)
+        return AtomicDefaultRenderCallBack(atomic);
+
+    std::array<unsigned char, 64> inlineAlphas;
+    const auto count = static_cast<size_t>(atomic->geometry->matList.numMaterials);
+    if (count <= inlineAlphas.size())
+        return DrawFadedOverlayAtomic(atomic, alpha, inlineAlphas.data());
+    std::vector<unsigned char> alphas(count);
+    return DrawFadedOverlayAtomic(atomic, alpha, alphas.data());
+}
+
+RpAtomic* DrawSkinnedOverlayAtomic(RpAtomic* atomic) {
+    auto* skeleton = g_drawingOverlaySkeleton;
+    if (!skeleton)
+        return DrawOverlayAtomic(atomic);
+
+    // D3D9 caches the palette by hierarchy and atomic frame within each camera update.
+    // Consecutive draws of the same template still need a new palette for each ped.
+    skeleton->useAlternate = !skeleton->useAlternate;
+    auto* drawHierarchy = skeleton->useAlternate ? &skeleton->alternate : skeleton->hierarchy;
+    RpSkinAtomicSetHAnimHierarchy(atomic, drawHierarchy);
+    __try {
+        return DrawOverlayAtomic(atomic);
+    } __finally {
+        RpSkinAtomicSetHAnimHierarchy(atomic, skeleton->hierarchy);
+    }
+}
+
+struct OverlaySetup {
+    RpHAnimHierarchy* hierarchy;
+    bool valid = true;
+    bool hasSkinnedAtomic = false;
+};
+
+RpAtomic* PrepareOverlayAtomic(RpAtomic* atomic, void* userData) {
+    auto& setup = *static_cast<OverlaySetup*>(userData);
+    auto* geometry = RpAtomicGetGeometry(atomic);
+    if (!geometry) {
+        setup.valid = false;
+        return atomic;
+    }
+    if (auto* skin = RpSkinGeometryGetSkin(geometry)) {
+        const auto bones = RpSkinGetNumBones(skin);
+        if (bones != static_cast<unsigned>(setup.hierarchy->numNodes) ||
+            !RpSkinGetSkinToBoneMatrices(skin) || !RpSkinAtomicSetType(atomic, rpSKINTYPEGENERIC)) {
+            setup.valid = false;
+            return atomic;
+        }
+        RpSkinAtomicSetHAnimHierarchy(atomic, setup.hierarchy);
+        if (RpAtomicGetFlags(atomic) & rpATOMICRENDER)
+            setup.hasSkinnedAtomic = true;
+        CVisibilityPlugins::SetAtomicRenderCallback(atomic, &DrawSkinnedOverlayAtomic);
+    } else {
+        CVisibilityPlugins::SetAtomicRenderCallback(atomic, &DrawOverlayAtomic);
+    }
+    return atomic;
+}
+
+bool HasSkinPalette(const RpHAnimHierarchy* hierarchy) {
+    return hierarchy && hierarchy->numNodes > 0 && hierarchy->pNodeInfo && hierarchy->pMatrixArray;
+}
+
+OverlaySkeleton* GetOverlaySkeleton(RpClump* clump) {
+    const auto [entry, inserted] = g_overlaySkeletons.try_emplace(clump);
+    auto& skeleton = entry->second;
+    if (inserted) {
+        auto* hierarchy = GetAnimHierarchyFromClump(clump);
+        if (HasSkinPalette(hierarchy)) {
+            OverlaySetup setup{hierarchy};
+            RpClumpForAllAtomics(clump, PrepareOverlayAtomic, &setup);
+            if (setup.valid && setup.hasSkinnedAtomic)
+                skeleton.hierarchy = hierarchy;
+        }
+        if (!skeleton.hierarchy)
+            OrcLogError("skin overlay: clump %p lacks a compatible skinned hierarchy", clump);
+    }
+    return skeleton.hierarchy ? &skeleton : nullptr;
+}
+
+bool MatchOverlayPalette(RpHAnimHierarchy* source, RpHAnimHierarchy* target, bool copy) {
+    if (!HasSkinPalette(source) || !target)
+        return false;
+    for (int i = 0; i < target->numNodes; ++i) {
+        const int bone = target->pNodeInfo[i].nodeID;
+        int sourceIndex = i;
+        if (i >= source->numNodes || source->pNodeInfo[i].nodeID != bone)
+            sourceIndex = RpHAnimIDGetIndex(source, bone);
+        if (sourceIndex < 0 || sourceIndex >= source->numNodes)
+            return false;
+        if (copy)
+            target->pMatrixArray[i] = source->pMatrixArray[sourceIndex];
+    }
+    if (copy) {
+        target->flags = (target->flags & ~rpHANIMHIERARCHYLOCALSPACEMATRICES) |
+            (source->flags & rpHANIMHIERARCHYLOCALSPACEMATRICES);
+    }
+    return true;
+}
+
+bool ResolveOverlaySkin(CPed* ped, bool load, OrcNativeSkinActiveInfo& out) {
+    OrcNativeSkinActiveInfo active;
+    if (OrcSkinNativeGetActiveInfo(ped, active))
+        return false;
+
+    const auto skin = OrcResolveSkinForPed(ped, FindPlayerPed(0));
+    const bool overlay = g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY;
+    if (auto* asset = skin.custom; asset && (overlay || OrcSkinNativeShouldOverlayFallback(ped, asset))) {
+        if (load && !OrcEnsureCustomSkinLoaded(*asset))
+            return false;
+        out.clump = reinterpret_cast<RpClump*>(asset->rwObject);
+        out.dffName = asset->remapKey.empty() ? asset->name.c_str() : asset->remapKey.c_str();
+        out.fallbackDffName = asset->remapFallbackKey.empty() ? nullptr : asset->remapFallbackKey.c_str();
+        out.txdSlot = asset->txdSlot;
+    } else if (auto* asset = skin.standard; asset && (overlay || OrcSkinNativeShouldOverlayFallback(ped, asset))) {
+        if (load && !EnsureStandardSkinLoaded(*asset))
+            return false;
+        if (!asset->loadedModel)
+            return false;
+        out.clump = reinterpret_cast<RpClump*>(asset->rwObject);
+        out.dffName = asset->dffName.c_str();
+        out.txdSlot = asset->loadedModel->m_nTxdIndex;
+    }
+    return out.clump != nullptr;
+}
+
+bool DrawSkinOverlay(CPed* ped, RpClump* sourceClump) {
+    OrcNativeSkinActiveInfo overlay;
+    if (!ResolveOverlaySkin(ped, true, overlay) || ped->m_pRwClump != sourceClump)
+        return false;
+
+    auto* sourceFrame = RpClumpGetFrame(sourceClump);
+    auto* targetFrame = RpClumpGetFrame(overlay.clump);
+    auto* skeleton = GetOverlaySkeleton(overlay.clump);
+    if (skeleton && skeleton->drawing)
+        return false;
+    if (!sourceFrame || !targetFrame || !skeleton ||
+        !MatchOverlayPalette(GetAnimHierarchyFromSkinClump(sourceClump), skeleton->hierarchy, true)) {
+        OrcLogInfoThrottled(946u, 5000u, "skin overlay: incompatible pose model=%d dff=%s",
+            ped->m_nModelIndex, overlay.dffName);
+        return false;
+    }
+
+    const int alpha = CVisibilityPlugins::GetClumpAlpha(sourceClump);
+    if (alpha <= 0)
+        return true;
+    auto* previousSkeleton = g_drawingOverlaySkeleton;
+    bool lit = false;
+    skeleton->drawing = true;
+    __try {
+        CVisibilityPlugins::SetClumpAlpha(overlay.clump, alpha);
+        RwFrameTransform(targetFrame, RwFrameGetMatrix(sourceFrame), rwCOMBINEREPLACE);
+        skeleton->alternate = *skeleton->hierarchy;
+        lit = OrcTryPedSetupLighting(ped);
+        CVector boundCentre{};
+        ped->GetBoundCentre(boundCentre);
+        OrcApplyAttachmentLightingForPed(ped, boundCentre, 1.0f);
+        __try {
+            OrcTextureRemapApplyToClumpBefore(ped, overlay.clump, overlay.dffName, overlay.fallbackDffName, overlay.txdSlot);
+            g_drawingOverlaySkeleton = skeleton;
+            return RpClumpRender(overlay.clump) != nullptr;
+        } __finally {
+            g_drawingOverlaySkeleton = previousSkeleton;
+            OrcTextureRemapRestoreAfter();
+        }
+    } __finally {
+        skeleton->drawing = false;
+        if (lit) {
+            OrcTryPedRemoveLighting(ped, lit);
+            // CEntity::Render returns to CPed::Render, which still draws the held weapon.
+            OrcTryPedSetupLighting(ped);
         }
     }
-    return false;
 }
 
-static void RenderSkinOnPed(CPed* ped, CustomSkinCfg* sel, bool isLocalPed) {
-    if (!ped || !ped->m_pRwClump || !sel) return;
-    RpClump* pedClump = ped->m_pRwClump;
-    if (!OrcEnsureCustomSkinLoaded(*sel)) return;
-    if (!sel->rwObject || sel->rwObject->type != rpCLUMP) return;
-    RpClump* clump = reinterpret_cast<RpClump*>(sel->rwObject);
-    if (!clump) return;
-    RwFrame* srcFrame = RpClumpGetFrame(pedClump);
-    RwFrame* dstFrame = RpClumpGetFrame(clump);
-    if (!srcFrame || !dstFrame) return;
-    std::memcpy(RwFrameGetMatrix(dstFrame), RwFrameGetMatrix(srcFrame), sizeof(RwMatrix));
-    RwMatrixUpdate(RwFrameGetMatrix(dstFrame));
-    RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(pedClump);
-    g_skinBindCount = 0;
-    if (srcH && clump) RpClumpForAllAtomics(clump, BindSkinHierarchyCB, srcH);
-    const bool canAnimate = (srcH && g_skinBindCount > 0);
-    if (isLocalPed) g_skinCanAnimate = canAnimate;
-    if (canAnimate) {
-        if (ped->m_pRwClump != pedClump) return;
-        CopySkinHierarchyPose(ped, clump);
+RpClump* __cdecl RenderClumpWithSkinOverlay(RpClump* clump) {
+    CPed* ped = g_overlayRenderPeds.empty() ? nullptr : g_overlayRenderPeds.back();
+    if (ped && ped->m_pRwClump == clump) {
+        bool rendered = false;
+        __try {
+            rendered = DrawSkinOverlay(ped, clump);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            OrcLogInfoThrottled(947u, 5000u, "skin overlay: draw SEH ex=0x%08X", GetExceptionCode());
+        }
+        if (rendered && g_skinHideBasePed)
+            return clump;
     }
-    RwFrameUpdateObjects(dstFrame);
-    const bool lit = OrcTryPedSetupLighting(ped);
-    static int s_setupLogLeft = 8;
-    if (g_orcLogLevel >= OrcLogLevel::Info && s_setupLogLeft > 0) {
-        OrcLogInfo("SetupLighting skin=%s -> %d ped=%p", sel->name.c_str(), lit ? 1 : 0, ped);
-        s_setupLogLeft--;
-    }
-    CVector boundCentre{};
-    ped->GetBoundCentre(boundCentre);
-    static int s_fallbackLogLeft = 8;
-    if (g_orcLogLevel >= OrcLogLevel::Info && !lit && s_fallbackLogLeft > 0) {
-        OrcLogInfo("skin: SetupLighting false, ApplyAttachment only name=%s", sel->name.c_str());
-        s_fallbackLogLeft--;
-    }
-    OrcApplyAttachmentLightingForPed(ped, boundCentre, 1.0f);
-    const char* remapKey = sel->remapKey.empty() ? sel->name.c_str() : sel->remapKey.c_str();
-    const char* remapFallback = sel->remapFallbackKey.empty() ? nullptr : sel->remapFallbackKey.c_str();
-    OrcTextureRemapApplyToClumpBefore(ped, clump, remapKey, remapFallback, sel->txdSlot);
-    OrcTryRpClumpRender(clump);
-    OrcTextureRemapRestoreAfter();
-    if (lit)
-        OrcTryPedRemoveLighting(ped, lit);
+    return RpClumpRender(clump);
 }
 
-static void RenderStandardSkinOnPed(CPed* ped, StandardSkinCfg* sel, bool isLocalPed) {
-    if (!ped || !ped->m_pRwClump || !sel) return;
-    RpClump* pedClump = ped->m_pRwClump;
-    if (!EnsureStandardSkinLoaded(*sel)) return;
-    if (!sel->rwObject || sel->rwObject->type != rpCLUMP) return;
-    RpClump* clump = reinterpret_cast<RpClump*>(sel->rwObject);
-    if (!clump) return;
-    RwFrame* srcFrame = RpClumpGetFrame(pedClump);
-    RwFrame* dstFrame = RpClumpGetFrame(clump);
-    if (!srcFrame || !dstFrame) return;
-    std::memcpy(RwFrameGetMatrix(dstFrame), RwFrameGetMatrix(srcFrame), sizeof(RwMatrix));
-    RwMatrixUpdate(RwFrameGetMatrix(dstFrame));
-    RpHAnimHierarchy* srcH = GetAnimHierarchyFromSkinClump(pedClump);
-    g_skinBindCount = 0;
-    if (srcH && clump) RpClumpForAllAtomics(clump, BindSkinHierarchyCB, srcH);
-    const bool canAnimate = (srcH && g_skinBindCount > 0);
-    if (isLocalPed) g_skinCanAnimate = canAnimate;
-    if (canAnimate) {
-        if (ped->m_pRwClump != pedClump) return;
-        CopySkinHierarchyPose(ped, clump);
-    }
-    RwFrameUpdateObjects(dstFrame);
-    const bool lit = OrcTryPedSetupLighting(ped);
-    static int s_setupLogLeft = 8;
-    if (g_orcLogLevel >= OrcLogLevel::Info && s_setupLogLeft > 0) {
-        OrcLogInfo("SetupLighting standard skin=%s[%d] -> %d ped=%p",
-                   sel->dffName.c_str(), sel->modelId, lit ? 1 : 0, ped);
-        s_setupLogLeft--;
-    }
-    CVector boundCentre{};
-    ped->GetBoundCentre(boundCentre);
-    OrcApplyAttachmentLightingForPed(ped, boundCentre, 1.0f);
-    int txdIndex = -1;
-    if (CBaseModelInfo* mi = CModelInfo::GetModelInfo(sel->modelId))
-        txdIndex = mi->m_nTxdIndex;
-    OrcTextureRemapApplyToClumpBefore(ped, clump, sel->dffName.c_str(), nullptr, txdIndex);
-    OrcTryRpClumpRender(clump);
-    OrcTextureRemapRestoreAfter();
-    if (lit)
-        OrcTryPedRemoveLighting(ped, lit);
+uintptr_t ReadEntityClumpRenderTarget() {
+    if (plugin::patch::GetUChar(kEntityClumpRenderCall) != 0xE8)
+        return 0;
+    return kEntityClumpRenderCall + 5 + plugin::patch::GetInt(kEntityClumpRenderCall + 1);
+}
 }
 
-void OrcSkinsRenderForPeds(CPlayerPed* localPlayer) {
-    if (!localPlayer || (!g_skinModeEnabled && !g_skinRandomFromPools)) return;
-    g_skinCanAnimate = false;
-    if (g_skinRandomFromPools)
-        PrunePedRandomSkinMap();
-    bool localDone = false;
-    if (!CPools::ms_pPedPool) return;
-    for (int i = 0; i < CPools::ms_pPedPool->m_nSize; i++) {
-        CPed* ped = CPools::ms_pPedPool->GetAt(i);
-        if (!ped || !ped->m_pRwClump) continue;
-        OrcResolvedPedSkin skin = OrcResolveSkinForPed(ped, localPlayer);
-        if (!skin.custom && !skin.standard) continue;
-        if (skin.custom && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
-            OrcSkinNativeShouldOverlayFallback(ped, skin.custom)))
-            RenderSkinOnPed(ped, skin.custom, skin.isLocalPed);
-        else if (skin.standard && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
-            OrcSkinNativeShouldOverlayFallback(ped, skin.standard)))
-            RenderStandardSkinOnPed(ped, skin.standard, skin.isLocalPed);
-        if (skin.isLocalPed) localDone = true;
+void OrcSkinsInstallOverlayRenderHook() {
+    if (g_overlayRenderHookInstalled)
+        return;
+    // CPed::Render's two CEntity::Render calls are enclosed by pedRenderEvent.
+    if (ReadEntityClumpRenderTarget() != kRwClumpRender) {
+        OrcLogError("skin overlay: unexpected CEntity::Render clump call at 0x%08X",
+            static_cast<unsigned>(kEntityClumpRenderCall));
+        return;
     }
-    if (!localDone) {
-        OrcResolvedPedSkin skin = OrcResolveSkinForPed(localPlayer, localPlayer);
-        if (skin.custom && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
-            OrcSkinNativeShouldOverlayFallback(localPlayer, skin.custom)))
-            RenderSkinOnPed(localPlayer, skin.custom, true);
-        else if (skin.standard && (g_skinCustomMode == SKIN_CUSTOM_MODE_OVERLAY ||
-            OrcSkinNativeShouldOverlayFallback(localPlayer, skin.standard)))
-            RenderStandardSkinOnPed(localPlayer, skin.standard, true);
-    }
+    plugin::patch::RedirectCall(kEntityClumpRenderCall, reinterpret_cast<void*>(&RenderClumpWithSkinOverlay));
+    g_overlayRenderHookInstalled =
+        ReadEntityClumpRenderTarget() == reinterpret_cast<uintptr_t>(&RenderClumpWithSkinOverlay);
+    if (g_overlayRenderHookInstalled)
+        OrcLogInfo("skin overlay: using the game's ped clump render pass");
+    else
+        OrcLogError("skin overlay: could not attach to CEntity::Render");
 }
 
-bool OrcSkinsLocalSelectionAddsActiveWork() {
-    if (!g_skinModeEnabled) return false;
-    if (g_skinSelectedSource == SKIN_SELECTED_STANDARD)
-        return GetSelectedStandardSkin() != nullptr;
-    return GetSelectedSkin() != nullptr;
+bool OrcSkinsGetOverlayTextureRemapInfo(CPed* ped, OrcNativeSkinActiveInfo& out) {
+    if (!IsOverlayModeEnabled() || !ped || !ped->m_pRwClump)
+        return false;
+    out = {};
+    if (!ResolveOverlaySkin(ped, false, out))
+        return false;
+    auto* skeleton = GetOverlaySkeleton(out.clump);
+    return skeleton && MatchOverlayPalette(GetAnimHierarchyFromSkinClump(ped->m_pRwClump), skeleton->hierarchy, false);
 }
 
 void OrcSkinsOnPedRenderBefore(CPed* ped) {
-    if ((!g_skinModeEnabled && !g_skinRandomFromPools) || !g_skinHideBasePed) return;
-    CPlayerPed* player = FindPlayerPed(0);
-    if (!ped || !ped->m_pRwClump) return;
-    OrcResolvedPedSkin skin = OrcResolveSkinForPed(ped, player);
-    if (!skin.custom && !skin.standard) return;
-    if (skin.custom) {
-        if (g_skinCustomMode != SKIN_CUSTOM_MODE_OVERLAY &&
-            !OrcSkinNativeShouldOverlayFallback(ped, skin.custom)) {
-            return;
-        }
-        if (!OrcEnsureCustomSkinLoaded(*skin.custom)) return;
-    } else {
-        if (g_skinCustomMode != SKIN_CUSTOM_MODE_OVERLAY &&
-            !OrcSkinNativeShouldOverlayFallback(ped, skin.standard)) {
-            return;
-        }
-        if (!EnsureStandardSkinLoaded(*skin.standard)) return;
-    }
-    g_hiddenPed = ped;
-    g_hiddenClump = ped->m_pRwClump;
-    __try {
-        g_hideSnapshotValid = true;
-        CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 0);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        OrcLogError("OnPedRenderBefore: SetClumpAlpha SEH ex=0x%08X", GetExceptionCode());
-        g_hideSnapshotValid = false;
-        g_hiddenPed = nullptr;
-        g_hiddenClump = nullptr;
-    }
+    if (IsOverlayModeEnabled() || !g_overlayRenderPeds.empty())
+        g_overlayRenderPeds.push_back(ped);
 }
 
 void OrcSkinsOnPedRenderAfter(CPed* ped) {
-    if (!g_hideSnapshotValid) return;
-    if (!ped || ped != g_hiddenPed) return;
-
-    __try {
-        if (g_hiddenClump) CVisibilityPlugins::SetClumpAlpha(g_hiddenClump, 255);
-        if (ped->m_pRwClump && ped->m_pRwClump != g_hiddenClump)
-            CVisibilityPlugins::SetClumpAlpha(ped->m_pRwClump, 255);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    g_hideSnapshotValid = false;
-    g_hiddenPed = nullptr;
-    g_hiddenClump = nullptr;
+    if (!g_overlayRenderPeds.empty() && g_overlayRenderPeds.back() == ped)
+        g_overlayRenderPeds.pop_back();
 }
 
 void OrcSkinsReleaseAllInstancesAndPreview() {
     OrcSkinNativeOnSkinAssetsReleased();
-    OrcSkinsDestroyPreview();
     for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
     for (auto& s : g_standardSkins) DestroyStandardSkinInstance(s);
-    DestroyAllRandomPoolSkins();
+    ReleaseRandomPoolSkinInstances();
 }
 
 void OrcSkinsShutdown() {
     OrcSkinNativeShutdown();
-    OrcSkinsDestroyPreview();
-    g_hideSnapshotValid = false;
-    g_hiddenPed = nullptr;
-    g_hiddenClump = nullptr;
-    for (auto& s : g_customSkins) {
-        DestroyCustomSkinInstance(s);
+    g_overlayRenderPeds.clear();
+    if (g_overlayRenderHookInstalled &&
+        ReadEntityClumpRenderTarget() == reinterpret_cast<uintptr_t>(&RenderClumpWithSkinOverlay)) {
+        plugin::patch::RedirectCall(kEntityClumpRenderCall, kRwClumpRender);
     }
-    for (auto& s : g_standardSkins)
-        DestroyStandardSkinInstance(s);
+    g_overlayRenderHookInstalled = false;
+    for (auto& s : g_customSkins) DestroyCustomSkinInstance(s);
+    for (auto& s : g_standardSkins) DestroyStandardSkinInstance(s);
     DestroyAllRandomPoolSkins();
 }
